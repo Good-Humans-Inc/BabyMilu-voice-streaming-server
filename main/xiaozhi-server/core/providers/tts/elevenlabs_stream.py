@@ -159,6 +159,15 @@ class TTSProvider(TTSProviderBase):
                         self.tts_audio_queue.put((SentenceType.LAST, [], None))
                         return
 
+                    content_type = resp.headers.get("Content-Type", "").lower()
+                    logger.bind(tag=TAG).info(f"ElevenLabs Content-Type: {content_type}")
+
+                    # WAV probe state
+                    wav_mode = False
+                    wav_header = bytearray()
+                    wav_data_started = False
+                    # For WAV, we need to skip header until 'data' chunk
+
                     # First-sentence signal for clients
                     self.pcm_buffer.clear()
                     self.tts_audio_queue.put((SentenceType.FIRST, [], text))
@@ -166,9 +175,51 @@ class TTSProvider(TTSProviderBase):
                     async for chunk in resp.content.iter_any():
                         if not chunk:
                             continue
-                        # When requesting pcm_16000, ElevenLabs streams raw 16-bit PCM bytes
-                        self.pcm_buffer.extend(chunk)
 
+                        # Detect MP3 and abort with guidance (we need PCM/WAV for streaming)
+                        if not wav_mode and not wav_data_started and len(self.pcm_buffer) == 0:
+                            # Peek first bytes of the first chunk for format hints
+                            head = chunk[:4]
+                            if head.startswith(b"ID3") or (len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0):
+                                logger.bind(tag=TAG).error("收到MP3流，当前实现仅支持PCM/WAV流。请设置 output_format: pcm_16000 或 wav。");
+                                self.tts_audio_queue.put((SentenceType.LAST, [], None))
+                                return
+                            if head.startswith(b"RIFF"):
+                                wav_mode = True
+
+                        if wav_mode and not wav_data_started:
+                            # Accumulate WAV header until 'data' chunk
+                            wav_header.extend(chunk)
+                            # Look for 'WAVE' signature and 'data' chunk
+                            if len(wav_header) >= 12 and wav_header[8:12] == b"WAVE":
+                                # Search for 'data' chunk marker
+                                pos = 0
+                                while True:
+                                    idx = wav_header.find(b"data", pos)
+                                    if idx == -1:
+                                        break
+                                    if idx + 8 <= len(wav_header):
+                                        # bytes after 'data' + 4-byte size is the start of PCM
+                                        data_start = idx + 8
+                                        if data_start <= len(wav_header):
+                                            pcm_part = wav_header[data_start:]
+                                            if pcm_part:
+                                                self.pcm_buffer.extend(pcm_part)
+                                            wav_data_started = True
+                                            # Keep only data bytes in header buffer to reduce memory
+                                            wav_header = bytearray()
+                                            break
+                                    # Not enough bytes yet; wait for more
+                                    pos = idx + 4
+                            # Continue to next chunk until data starts
+                            if not wav_data_started:
+                                continue
+
+                        if not wav_mode or wav_data_started:
+                            # Either raw PCM mode, or WAV data part started
+                            self.pcm_buffer.extend(chunk if not wav_mode else b"")
+
+                        # Drain PCM buffer into Opus frames
                         while len(self.pcm_buffer) >= frame_bytes:
                             frame = bytes(self.pcm_buffer[:frame_bytes])
                             del self.pcm_buffer[:frame_bytes]
