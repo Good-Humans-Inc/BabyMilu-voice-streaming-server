@@ -162,11 +162,59 @@ class TTSProvider(TTSProviderBase):
                     content_type = resp.headers.get("Content-Type", "").lower()
                     logger.bind(tag=TAG).info(f"ElevenLabs Content-Type: {content_type}")
 
-                    # WAV probe state
+                    # Modes
                     wav_mode = False
                     wav_header = bytearray()
                     wav_data_started = False
-                    # For WAV, we need to skip header until 'data' chunk
+                    mp3_mode = content_type.startswith("audio/mpeg")
+
+                    # If MP3, start ffmpeg to transcode to s16le 16k mono
+                    ffmpeg_proc = None
+                    pump_task = None
+                    if mp3_mode:
+                        try:
+                            ffmpeg_proc = await asyncio.create_subprocess_exec(
+                                "ffmpeg",
+                                "-hide_banner",
+                                "-loglevel",
+                                "error",
+                                "-f",
+                                "mp3",
+                                "-i",
+                                "pipe:0",
+                                "-ac",
+                                "1",
+                                "-ar",
+                                str(self.sample_rate),
+                                "-f",
+                                "s16le",
+                                "pipe:1",
+                                stdin=asyncio.subprocess.PIPE,
+                                stdout=asyncio.subprocess.PIPE,
+                                stderr=asyncio.subprocess.PIPE,
+                            )
+                        except Exception as e:
+                            logger.bind(tag=TAG).error(f"启动ffmpeg失败: {e}")
+                            self.tts_audio_queue.put((SentenceType.LAST, [], None))
+                            return
+
+                        async def pump_stdout():
+                            try:
+                                while True:
+                                    data = await ffmpeg_proc.stdout.read(4096)
+                                    if not data:
+                                        break
+                                    self.pcm_buffer.extend(data)
+                                    while len(self.pcm_buffer) >= frame_bytes:
+                                        frame = bytes(self.pcm_buffer[:frame_bytes])
+                                        del self.pcm_buffer[:frame_bytes]
+                                        self.opus_encoder.encode_pcm_to_opus_stream(
+                                            frame, end_of_stream=False, callback=self.handle_opus
+                                        )
+                            except Exception as e:
+                                logger.bind(tag=TAG).error(f"读取ffmpeg输出失败: {e}")
+
+                        pump_task = asyncio.create_task(pump_stdout())
 
                     # First-sentence signal for clients
                     self.pcm_buffer.clear()
@@ -176,48 +224,89 @@ class TTSProvider(TTSProviderBase):
                         if not chunk:
                             continue
 
-                        # Detect MP3 and abort with guidance (we need PCM/WAV for streaming)
-                        if not wav_mode and not wav_data_started and len(self.pcm_buffer) == 0:
-                            # Peek first bytes of the first chunk for format hints
+                        # Fallback probe if content-type not reliable
+                        if not mp3_mode and not wav_mode and not wav_data_started and len(self.pcm_buffer) == 0:
                             head = chunk[:4]
                             if head.startswith(b"ID3") or (len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0):
-                                logger.bind(tag=TAG).error("收到MP3流，当前实现仅支持PCM/WAV流。请设置 output_format: pcm_16000 或 wav。");
-                                self.tts_audio_queue.put((SentenceType.LAST, [], None))
-                                return
+                                mp3_mode = True
+                                try:
+                                    ffmpeg_proc = await asyncio.create_subprocess_exec(
+                                        "ffmpeg",
+                                        "-hide_banner",
+                                        "-loglevel",
+                                        "error",
+                                        "-f",
+                                        "mp3",
+                                        "-i",
+                                        "pipe:0",
+                                        "-ac",
+                                        "1",
+                                        "-ar",
+                                        str(self.sample_rate),
+                                        "-f",
+                                        "s16le",
+                                        "pipe:1",
+                                        stdin=asyncio.subprocess.PIPE,
+                                        stdout=asyncio.subprocess.PIPE,
+                                        stderr=asyncio.subprocess.PIPE,
+                                    )
+                                except Exception as e:
+                                    logger.bind(tag=TAG).error(f"启动ffmpeg失败: {e}")
+                                    self.tts_audio_queue.put((SentenceType.LAST, [], None))
+                                    return
+
+                                async def pump_stdout2():
+                                    try:
+                                        while True:
+                                            data = await ffmpeg_proc.stdout.read(4096)
+                                            if not data:
+                                                break
+                                            self.pcm_buffer.extend(data)
+                                            while len(self.pcm_buffer) >= frame_bytes:
+                                                frame = bytes(self.pcm_buffer[:frame_bytes])
+                                                del self.pcm_buffer[:frame_bytes]
+                                                self.opus_encoder.encode_pcm_to_opus_stream(
+                                                    frame, end_of_stream=False, callback=self.handle_opus
+                                                )
+                                    except Exception as e:
+                                        logger.bind(tag=TAG).error(f"读取ffmpeg输出失败: {e}")
+
+                                pump_task = asyncio.create_task(pump_stdout2())
+
                             if head.startswith(b"RIFF"):
                                 wav_mode = True
 
-                        if wav_mode and not wav_data_started:
-                            # Accumulate WAV header until 'data' chunk
+                        if mp3_mode:
+                            try:
+                                ffmpeg_proc.stdin.write(chunk)
+                                await ffmpeg_proc.stdin.drain()
+                            except Exception as e:
+                                logger.bind(tag=TAG).error(f"写入ffmpeg失败: {e}")
+                                break
+                            # PCM will be drained by pump task
+                        elif wav_mode and not wav_data_started:
                             wav_header.extend(chunk)
-                            # Look for 'WAVE' signature and 'data' chunk
                             if len(wav_header) >= 12 and wav_header[8:12] == b"WAVE":
-                                # Search for 'data' chunk marker
                                 pos = 0
                                 while True:
                                     idx = wav_header.find(b"data", pos)
                                     if idx == -1:
                                         break
                                     if idx + 8 <= len(wav_header):
-                                        # bytes after 'data' + 4-byte size is the start of PCM
                                         data_start = idx + 8
                                         if data_start <= len(wav_header):
                                             pcm_part = wav_header[data_start:]
                                             if pcm_part:
                                                 self.pcm_buffer.extend(pcm_part)
                                             wav_data_started = True
-                                            # Keep only data bytes in header buffer to reduce memory
                                             wav_header = bytearray()
                                             break
-                                    # Not enough bytes yet; wait for more
                                     pos = idx + 4
-                            # Continue to next chunk until data starts
                             if not wav_data_started:
                                 continue
-
-                        if not wav_mode or wav_data_started:
-                            # Either raw PCM mode, or WAV data part started
-                            self.pcm_buffer.extend(chunk if not wav_mode else b"")
+                        else:
+                            # Raw PCM
+                            self.pcm_buffer.extend(chunk)
 
                         # Drain PCM buffer into Opus frames
                         while len(self.pcm_buffer) >= frame_bytes:
@@ -227,7 +316,23 @@ class TTSProvider(TTSProviderBase):
                                 frame, end_of_stream=False, callback=self.handle_opus
                             )
 
-                    # flush remainder
+                    # finalize transcoding and flush remainder
+                    if mp3_mode and ffmpeg_proc:
+                        try:
+                            if ffmpeg_proc.stdin and not ffmpeg_proc.stdin.at_eof():
+                                ffmpeg_proc.stdin.write_eof()
+                        except Exception:
+                            pass
+                        if pump_task:
+                            try:
+                                await pump_task
+                            except Exception:
+                                pass
+                        try:
+                            await ffmpeg_proc.wait()
+                        except Exception:
+                            pass
+
                     if self.pcm_buffer:
                         self.opus_encoder.encode_pcm_to_opus_stream(
                             bytes(self.pcm_buffer),
