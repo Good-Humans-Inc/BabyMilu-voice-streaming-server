@@ -2,6 +2,13 @@ import os
 import yaml
 from collections.abc import Mapping
 from config.manage_api_client import init_service, get_server_config, get_agent_models
+from typing import Any, Dict
+import time
+
+_firestore_client = None
+_profile_cache: Dict[str, Dict[str, Any]] = {}
+_profile_cache_ttl_seconds = 60
+_profile_cache_time: Dict[str, float] = {}
 
 
 def get_project_dir():
@@ -72,8 +79,98 @@ def get_config_from_api(config):
 
 
 def get_private_config_from_api(config, device_id, client_id):
-    """从Java API获取私有配置"""
-    return get_agent_models(device_id, client_id, config["selected_module"])
+    """获取私有配置：优先调用Java API；如果未配置，则尝试Firestore。"""
+    # 1) Java API path (manager-api)
+    if config.get("manager-api", {}).get("url"):
+        return get_agent_models(device_id, client_id, config["selected_module"])
+
+    # 2) Firestore path (if configured)
+    fs_conf = config.get("firestore", {})
+    if not fs_conf:
+        return {}
+
+    profile = _get_profile_from_firestore(device_id, fs_conf)
+    if not profile:
+        return {}
+
+    # Build private_config in the same shape expected by connection.py
+    private_config: Dict[str, Any] = {"selected_module": {}}
+
+    # Prompt override
+    if profile.get("prompt"):
+        private_config["prompt"] = profile["prompt"]
+
+    # TTS override (CustomTTS default for stability)
+    eleven_key = profile.get("elevenlabs_api_key") or fs_conf.get("elevenlabs_api_key", "")
+    voice_id = profile.get("voice_id")
+    tts_mode = profile.get("tts_mode", "custom").lower()
+    if voice_id and eleven_key:
+        if tts_mode == "stream":
+            private_config["selected_module"]["TTS"] = "ElevenLabsStream"
+            private_config.setdefault("TTS", {})["ElevenLabsStream"] = {
+                "type": "elevenlabs_stream",
+                "api_key": eleven_key,
+                "voice_id": voice_id,
+                "model_id": profile.get("model_id", "eleven_multilingual_v2"),
+                "output_format": profile.get("output_format", "pcm_16000"),
+                "optimize_streaming_latency": int(profile.get("optimize_streaming_latency", 4)),
+                "output_dir": "tmp/",
+            }
+        else:
+            private_config["selected_module"]["TTS"] = "CustomTTS"
+            private_config.setdefault("TTS", {})["CustomTTS"] = {
+                "type": "custom",
+                "method": "POST",
+                "url": f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+                "headers": {
+                    "xi-api-key": eleven_key,
+                    "accept": "audio/mpeg",
+                    "Content-Type": "application/json",
+                },
+                "params": {
+                    "text": "{prompt_text}",
+                    "model_id": profile.get("model_id", "eleven_multilingual_v2"),
+                    "optimize_streaming_latency": int(profile.get("optimize_streaming_latency", 4)),
+                },
+                "format": "mp3",
+                "output_dir": "tmp/",
+            }
+
+    # Preserve selected_module fallbacks to current config
+    for k in ("VAD", "ASR", "LLM", "Memory", "Intent", "VLLM"):
+        if k not in private_config["selected_module"] and config.get("selected_module", {}).get(k):
+            private_config["selected_module"][k] = config["selected_module"][k]
+
+    return private_config
+
+
+def _get_profile_from_firestore(device_id: str, fs_conf: Dict[str, Any]) -> Dict[str, Any]:
+    # Simple in-memory TTL cache
+    now = time.time()
+    if device_id in _profile_cache and now - _profile_cache_time.get(device_id, 0) < _profile_cache_ttl_seconds:
+        return _profile_cache[device_id]
+
+    global _firestore_client
+    if _firestore_client is None:
+        try:
+            from google.cloud import firestore
+        except Exception:
+            return {}
+        project_id = fs_conf.get("project_id")
+        # ADC on GCE; credentials picked automatically
+        _firestore_client = firestore.Client(project=project_id) if project_id else firestore.Client()
+
+    try:
+        collection = fs_conf.get("devices_collection", "devices")
+        doc = _firestore_client.collection(collection).document(str(device_id)).get()
+        if not doc.exists:
+            return {}
+        profile = doc.to_dict() or {}
+        _profile_cache[device_id] = profile
+        _profile_cache_time[device_id] = now
+        return profile
+    except Exception:
+        return {}
 
 
 def ensure_directories(config):
