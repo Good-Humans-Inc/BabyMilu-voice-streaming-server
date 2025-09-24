@@ -106,6 +106,7 @@ def get_private_config_from_api(config, device_id, client_id):
     tts_mode = profile.get("tts_mode", "custom").lower()
     if voice_id and eleven_key:
         if tts_mode == "stream":
+            # 仅声明我们实际要变更的模块，避免其它模块被误判需要重新初始化
             private_config["selected_module"]["TTS"] = "ElevenLabsStream"
             private_config.setdefault("TTS", {})["ElevenLabsStream"] = {
                 "type": "elevenlabs_stream",
@@ -136,10 +137,9 @@ def get_private_config_from_api(config, device_id, client_id):
                 "output_dir": "tmp/",
             }
 
-    # Preserve selected_module fallbacks to current config
-    for k in ("VAD", "ASR", "LLM", "Memory", "Intent", "VLLM"):
-        if k not in private_config["selected_module"] and config.get("selected_module", {}).get(k):
-            private_config["selected_module"][k] = config["selected_module"][k]
+    # 注意：不要在这里补齐其它模块的 selected_module，
+    # 否则会触发连接侧对 VAD/ASR 等模块的“需要更新”判断，
+    # 但 private_config 未提供对应模块的配置块，从而导致 KeyError。
 
     return private_config
 

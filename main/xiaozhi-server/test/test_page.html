@@ -703,24 +703,46 @@
             }
         }
 
-        // 连接WebSocket服务器
+        // 连接WebSocket服务器（支持“仅WS”直连，不依赖OTA）
         async function connectToServer() {
             const url = serverUrlInput.value.trim();
             const config = getConfig();
-            // 先检查OTA状态
-            log('正在检查OTA状态...', 'info');
             const otaUrl = document.getElementById('otaUrl').value.trim();
             localStorage.setItem('otaUrl', otaUrl);
             localStorage.setItem('wsUrl', url);
 
-            try {
-                const ws = await webSocketConnect(otaUrl, url, config)
-                if (ws === undefined) {
-                    return
+            // 小工具：拼接 device-id / client-id / token 到WS URL
+            const buildDirectWsUrl = (baseUrl) => {
+                try {
+                    const u = new URL(baseUrl);
+                    const params = u.searchParams;
+                    params.set('device-id', config.deviceId);
+                    params.set('client-id', config.clientId || config.deviceId);
+                    if (config.token) params.set('token', config.token);
+                    u.search = params.toString();
+                    return u.toString();
+                } catch (e) {
+                    const qs = `device-id=${encodeURIComponent(config.deviceId)}&client-id=${encodeURIComponent(config.clientId || config.deviceId)}${config.token ? `&token=${encodeURIComponent(config.token)}` : ''}`;
+                    return baseUrl + (baseUrl.includes('?') ? '&' : '?') + qs;
                 }
-                websocket = ws
+            };
 
-                // 设置接收二进制数据的类型为ArrayBuffer
+            try {
+                let ws = undefined;
+                // 优先尝试带OTA的连接（适配旧流程）；若失败或未配置，则走仅WS直连
+                if (otaUrl) {
+                    log('正在检查OTA状态...', 'info');
+                    ws = await webSocketConnect(otaUrl, url, config);
+                }
+
+                if (ws === undefined) {
+                    // 仅WS直连（API模式推荐）
+                    const directUrl = buildDirectWsUrl(url);
+                    log(`尝试仅WS直连: ${directUrl}`, 'info');
+                    ws = new WebSocket(directUrl);
+                }
+
+                websocket = ws;
                 websocket.binaryType = 'arraybuffer';
 
                 websocket.onopen = async () => {
@@ -734,7 +756,6 @@
                     connectButton.textContent = '断开';
                     connectButton.removeEventListener('click', connectToServer);
                     connectButton.addEventListener('click', disconnectFromServer);
-                    // connectButton.onclick = disconnectFromServer;
                     messageInput.disabled = false;
                     sendTextButton.disabled = false;
 
