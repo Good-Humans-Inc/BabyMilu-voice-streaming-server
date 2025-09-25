@@ -107,6 +107,19 @@ wakeup_words:
 # MCP接入点地址，地址格式为：ws://你的mcp接入点ip或者域名:端口号/mcp/?token=你的token
 # 详细教程 https://github.com/xinnan-tech/xiaozhi-esp32-server/blob/main/docs/mcp-endpoint-integration.md
 mcp_endpoint: 你的接入点 websocket地址
+# Firestore 配置（如果走 Firestore 读取设备动画信息）
+firestore:
+  project_id: your-gcp-project-id
+  devices_collection: devices
+  # 可选：以下字段用于云函数签名URL生成等扩展
+  # service_account_json: path/to/service-account.json
+
+# 设备动画资产配置
+assets:
+  # 存放动画二进制与清单的 GCS bucket 名称
+  bucket: bm-anim
+  # 设备轮询的最小间隔（秒），仅提供给客户端参考
+  poll_seconds: 30
 # 插件的基础配置
 plugins:
   # 获取天气插件的配置，这里填写你的api_key

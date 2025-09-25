@@ -3,6 +3,7 @@ from aiohttp import web
 from config.logger import setup_logging
 from core.api.ota_handler import OTAHandler
 from core.api.vision_handler import VisionHandler
+from core.api.assets_handler import AssetsHandler
 
 TAG = __name__
 
@@ -13,6 +14,7 @@ class SimpleHttpServer:
         self.logger = setup_logging()
         self.ota_handler = OTAHandler(config)
         self.vision_handler = VisionHandler(config)
+        self.assets_handler = AssetsHandler(config)
 
     def _get_websocket_url(self, local_ip: str, port: int) -> str:
         """获取websocket地址
@@ -56,6 +58,9 @@ class SimpleHttpServer:
                     web.get("/mcp/vision/explain", self.vision_handler.handle_get),
                     web.post("/mcp/vision/explain", self.vision_handler.handle_post),
                     web.options("/mcp/vision/explain", self.vision_handler.handle_post),
+                    # assets
+                    web.get("/mcp/assets/manifest", self.assets_handler.handle_manifest),
+                    web.get("/mcp/assets/bin", self.assets_handler.handle_bin),
                 ]
             )
 
