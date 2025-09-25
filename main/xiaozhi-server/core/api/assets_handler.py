@@ -40,6 +40,9 @@ class AssetsHandler:
             device_id = request.query.get("device-id", "")
             client_id = request.headers.get("Client-Id", "")
             emotion = request.query.get("emotion", "normal")
+            self.logger.bind(tag=TAG).info(
+                f"/mcp/assets/manifest device_id={device_id}, emotion={emotion}, auth_enabled={self.auth_enabled}"
+            )
             if self.auth_enabled:
                 is_valid, token_device_id = self._verify_auth_token(request)
                 if not is_valid:
@@ -60,6 +63,10 @@ class AssetsHandler:
             from config.config_loader import _get_profile_from_firestore
             fs_conf = current_config.get("firestore", {})
             profile = _get_profile_from_firestore(device_id, fs_conf) or {}
+            if not profile:
+                self.logger.bind(tag=TAG).warning(
+                    f"No Firestore profile found for device_id={device_id}"
+                )
 
             animation = (profile.get("animation") or {}).get(emotion) or {}
             if not animation:
@@ -112,6 +119,9 @@ class AssetsHandler:
             version = request.query.get("v", "")
             emotion = request.query.get("emotion", "normal")
             client_id = request.headers.get("Client-Id", "")
+            self.logger.bind(tag=TAG).info(
+                f"/mcp/assets/bin device_id={device_id}, version={version}, emotion={emotion}, auth_enabled={self.auth_enabled}"
+            )
             if self.auth_enabled:
                 is_valid, token_device_id = self._verify_auth_token(request)
                 if not is_valid:

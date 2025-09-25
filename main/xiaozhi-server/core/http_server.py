@@ -64,6 +64,10 @@ class SimpleHttpServer:
                 ]
             )
 
+            self.logger.bind(tag=TAG).info(
+                "HTTP routes registered: /mcp/vision/explain (GET,POST), /mcp/assets/manifest (GET), /mcp/assets/bin (GET)"
+            )
+
             # 运行服务
             runner = web.AppRunner(app)
             await runner.setup()
