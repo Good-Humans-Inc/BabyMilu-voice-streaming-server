@@ -8,6 +8,83 @@ from config.manage_api_client import save_mem_local_short
 from core.utils.util import check_model_key
 
 
+short_term_memory_prompt_en = """
+# Dynamic Memory Agent
+
+## Core Mission
+
+Build a growing memory system that keeps key information while tracking how it changes over time.
+Summarize important details from conversations so future responses can be more personalized.
+
+## Memory Rules
+
+### 1. Memory Evaluation (every update)
+
+| Dimension   | Criteria                            | Weight |
+| ----------- | ----------------------------------- | ------ |
+| Recency     | How fresh the information is        | 40%    |
+| Emotion     | 💖 mark / frequency of mention      | 35%    |
+| Connections | How many links to other stored info | 25%    |
+
+### 2. Update Mechanism
+
+**Example: Name Change**
+Original: `"former_names": ["John"], "current_name": "Jonathan"`
+Trigger: phrases like “My name is X” or “Call me Y”
+Steps:
+
+1. Move old name to `"former_names"`
+2. Record timeline: `"2024-02-15 14:32: Switched to Jonathan"`
+3. Add note: `"Identity shift from John to Jonathan"`
+
+### 3. Space Optimization
+
+* **Compression:** Use shorthand instead of long text
+
+  * ✅ `"Jonathan [NY/SWE/🐱]"`
+  * ❌ `"Jonathan, software engineer in New York, owns a cat"`
+* **Pruning:** If total text ≥ 900 characters
+
+  1. Delete entries with score < 60 not mentioned in last 3 turns
+  2. Merge similar items (keep most recent timestamp)
+
+## Memory Structure
+
+Always output valid JSON.
+Only extract from the actual conversation (no examples or comments).
+
+```json
+{
+  "archive": {
+    "identity": {
+      "current_name": "",
+      "tags": []
+    },
+    "memories": [
+      {
+        "event": "Joined a new company",
+        "timestamp": "2024-03-20",
+        "emotion_score": 0.9,
+        "related": ["afternoon tea"],
+        "shelf_life": 30
+      }
+    ]
+  },
+  "network": {
+    "frequent_topics": {"work": 12},
+    "hidden_links": [""]
+  },
+  "pending": {
+    "urgent": ["Tasks that need immediate action"],
+    "care": ["Support that could be offered"]
+  },
+  "highlights": [
+    "Most moving moments, strong emotions, exact user quotes"
+  ]
+}
+```
+"""
+
 short_term_memory_prompt = """
 # 时空记忆编织者
 
@@ -165,28 +242,33 @@ class MemoryProvider(MemoryProviderBase):
             elif msg.role == "assistant":
                 msgStr += f"Assistant: {msg.content}\n"
         if self.short_memory and len(self.short_memory) > 0:
-            msgStr += "历史记忆：\n"
+            msgStr += "Previous memory：\n"
             msgStr += self.short_memory
 
         # 当前时间
         time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        msgStr += f"当前时间：{time_str}"
+        msgStr += f"Current time:{time_str}"
 
         if self.save_to_file:
+            logger.bind(tag=TAG).info("short_term_memory_prompt_en")
             result = self.llm.response_no_stream(
-                short_term_memory_prompt,
+                short_term_memory_prompt_en,
                 msgStr,
                 max_tokens=2000,
                 temperature=0.2,
             )
+            logger.bind(tag=TAG).debug(f"Raw LLM response: {result[:200]}...")
             json_str = extract_json_data(result)
+            logger.bind(tag=TAG).debug(f"Extracted JSON: {json_str[:200]}...")
             try:
                 json.loads(json_str)  # 检查json格式是否正确
                 self.short_memory = json_str
                 self.save_memory_to_file()
             except Exception as e:
+                logger.bind(tag=TAG).error(f"JSON parsing error: {e}")
                 print("Error:", e)
         else:
+            logger.bind(tag=TAG).info("short_term_memory_prompt_only_content")
             result = self.llm.response_no_stream(
                 short_term_memory_prompt_only_content,
                 msgStr,

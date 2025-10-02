@@ -1,0 +1,5 @@
+services:
+  xiaozhi-esp32-server:
+    image: my-xiaozhi-server:latest
+    volumes:
+      - ./data:/opt/xiaozhi-esp32-server/data
