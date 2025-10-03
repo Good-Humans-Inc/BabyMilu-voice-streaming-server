@@ -7,8 +7,11 @@ from core.handle.textHandler.listenMessageHandler import ListenTextMessageHandle
 from core.handle.textHandler.mcpMessageHandler import McpTextMessageHandler
 from core.handle.textMessageHandler import TextMessageHandler
 from core.handle.textHandler.serverMessageHandler import ServerTextMessageHandler
+from core.handle.textHandler.voiceMessageHandler import VoiceTextMessageHandler
+from config.logger import setup_logging
 
 TAG = __name__
+logger = setup_logging()
 
 
 class TextMessageHandlerRegistry:
@@ -27,6 +30,7 @@ class TextMessageHandlerRegistry:
             IotTextMessageHandler(),
             McpTextMessageHandler(),
             ServerTextMessageHandler(),
+            VoiceTextMessageHandler(),
         ]
 
         for handler in handlers:

@@ -81,6 +81,8 @@ class ConnectionHandler:
         self.max_output_size = 0
         self.chat_history_conf = 0
         self.audio_format = "opus"
+        # per-connection preferred TTS voice id (e.g., ElevenLabs voice id)
+        self.voice_id = None
 
         # 客户端状态相关
         self.client_abort = False
@@ -165,24 +167,28 @@ class ConnectionHandler:
             # 获取并验证headers
             self.headers = dict(ws.request.headers)
 
-            if self.headers.get("device-id", None) is None:
-                # 尝试从 URL 的查询参数中获取 device-id
-                from urllib.parse import parse_qs, urlparse
+            # 从 URL 查询参数补充必要与可选参数
+            from urllib.parse import parse_qs, urlparse
+            request_path = ws.request.path
+            if not request_path:
+                self.logger.bind(tag=TAG).error("无法获取请求路径")
+                return
+            parsed_url = urlparse(request_path)
+            query_params = parse_qs(parsed_url.query)
 
-                # 从 WebSocket 请求中获取路径
-                request_path = ws.request.path
-                if not request_path:
-                    self.logger.bind(tag=TAG).error("无法获取请求路径")
-                    return
-                parsed_url = urlparse(request_path)
-                query_params = parse_qs(parsed_url.query)
+            # 如果headers没有device-id，则必须从查询参数中获取
+            if self.headers.get("device-id", None) is None:
                 if "device-id" in query_params:
                     self.headers["device-id"] = query_params["device-id"][0]
-                    self.headers["client-id"] = query_params["client-id"][0]
+                    self.headers["client-id"] = query_params.get("client-id", [query_params["device-id"][0]])[0]
                 else:
                     await ws.send("端口正常，如需测试连接，请使用test_page.html")
                     await self.close(ws)
                     return
+
+            # 可选 voice-id，总是尝试从查询参数中读取以覆盖
+            if "voice-id" in query_params:
+                self.headers["voice-id"] = query_params["voice-id"][0]
             real_ip = self.headers.get("x-real-ip") or self.headers.get(
                 "x-forwarded-for"
             )
@@ -200,6 +206,16 @@ class ConnectionHandler:
             # 认证通过,继续处理
             self.websocket = ws
             self.device_id = self.headers.get("device-id", None)
+
+            # 提取并校验 voice-id（来自 header 或查询参数）
+            raw_voice_id = self.headers.get("voice-id")
+            if raw_voice_id:
+                # 仅允许字母、数字、下划线、短横线，防止路径注入
+                import re as _re
+                safe_voice_id = _re.sub(r"[^A-Za-z0-9_-]", "", str(raw_voice_id))
+                if safe_voice_id:
+                    self.voice_id = safe_voice_id
+                    self.logger.bind(tag=TAG).info(f"使用来自客户端的voice-id: {self.voice_id}")
 
             # 检查是否来自MQTT连接
             request_path = ws.request.path
@@ -783,13 +799,13 @@ class ConnectionHandler:
                         ),
                         functions=functions,
                     )
-                else:
-                    llm_responses = self.llm.response(
-                        self.session_id,
-                        self.dialogue.get_llm_dialogue_with_memory(
-                            memory_str, self.config.get("voiceprint", {})
-                        ),
-                    )
+            else:
+                llm_responses = self.llm.response(
+                    self.session_id,
+                    self.dialogue.get_llm_dialogue_with_memory(
+                        memory_str, self.config.get("voiceprint", {})
+                    ),
+                )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM 处理出错 {query}: {e}")
             return None

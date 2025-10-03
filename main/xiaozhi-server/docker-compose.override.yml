@@ -3,3 +3,4 @@ services:
     image: my-xiaozhi-server:latest
     volumes:
       - ./data:/opt/xiaozhi-esp32-server/data
+      - ./:/opt/xiaozhi-esp32-server

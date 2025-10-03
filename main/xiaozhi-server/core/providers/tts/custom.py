@@ -19,6 +19,8 @@ class TTSProvider(TTSProviderBase):
         self.audio_file_type = config.get("format", "wav")
         self.output_file = config.get("output_dir", "tmp/")
         self.params = config.get("params")
+        # 支持URL中的 {voice_id} 占位符，若配置提供默认voice_id则使用
+        self.default_voice_id = config.get("voice_id")
 
         if isinstance(self.params, str):
             try:
@@ -38,10 +40,21 @@ class TTSProvider(TTSProviderBase):
                 v = v.replace("{prompt_text}", text)
             request_params[k] = v
 
+        # 处理动态voice_id: 优先使用连接上的voice_id，其次使用默认voice_id
+        final_url = self.url
+        if isinstance(final_url, str) and "{voice_id}" in final_url:
+            voice_id = None
+            if self.conn and getattr(self.conn, "voice_id", None):
+                voice_id = self.conn.voice_id
+            elif self.default_voice_id:
+                voice_id = str(self.default_voice_id)
+            if voice_id:
+                final_url = final_url.replace("{voice_id}", voice_id)
+
         if self.method.upper() == "POST":
-            resp = requests.post(self.url, json=request_params, headers=self.headers)
+            resp = requests.post(final_url, json=request_params, headers=self.headers)
         else:
-            resp = requests.get(self.url, params=request_params, headers=self.headers)
+            resp = requests.get(final_url, params=request_params, headers=self.headers)
         if resp.status_code == 200:
             if output_file:
                 with open(output_file, "wb") as file:
