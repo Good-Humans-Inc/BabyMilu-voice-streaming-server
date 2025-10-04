@@ -44,6 +44,9 @@ from core.utils.firestore_client import (
     get_active_character_for_device,
     get_character_profile,
     extract_character_profile_fields,
+    get_owner_phone_for_device,
+    get_user_profile_by_phone,
+    extract_user_profile_fields,
 )
 
 TAG = __name__
@@ -233,25 +236,6 @@ class ConnectionHandler:
                     if not self.voice_id and fields.get("voice"):
                         self.voice_id = str(fields.get("voice"))
 
-                    # 如果依然没有voice_id，则尝试使用配置中的默认值，并打印警告
-                    if not self.voice_id:
-                        default_voice = (
-                            self.config.get("TTS", {})
-                            .get("CustomTTS", {})
-                            .get("default_voice_id")
-                            or self.config.get("TTS", {}).get("CustomTTS", {}).get("voice_id")
-                        )
-                        if default_voice:
-                            self.logger.bind(tag=TAG).warning(
-                                "Character has no voice_id; using default voice from config"
-                            )
-                            self.voice_id = str(default_voice)
-                        else:
-                            self.logger.bind(tag=TAG).error(
-                                "No character voice_id and no default voice configured"
-                            )
-                    self.logger.bind(tag=TAG).info(f"voice_id={self.voice_id}")
-
                     # 组装角色提示并更新系统提示词
                     profile_parts = []
                     for label, key in (
@@ -264,7 +248,7 @@ class ConnectionHandler:
                         val = fields.get(key)
                         if val:
                             profile_parts.append(f"{label}: {val}")
-                    profile_line = "; ".join(profile_parts)
+                    profile_line = "\n- ".join(profile_parts)
                     bio_text = fields.get("bio")
 
                     new_prompt = self.config.get("prompt", "")
@@ -272,6 +256,20 @@ class ConnectionHandler:
                         new_prompt = new_prompt + f"\nCharacter profile: {profile_line}"
                     if bio_text:
                         new_prompt = new_prompt + f"\nUser's description of you: {bio_text}"
+
+                    # Append user profile from Firestore users/{ownerPhone}
+                    owner_phone = get_owner_phone_for_device(self.device_id)
+                    if owner_phone:
+                        user_doc = get_user_profile_by_phone(owner_phone)
+                        user_fields = extract_user_profile_fields(user_doc or {})
+                        user_parts = []
+                        for label, key in (("User's name", "name"), ("User's Birthday", "birthday"), ("User's Pronouns", "pronouns")):
+                            val = user_fields.get(key)
+                            if val:
+                                user_parts.append(f"{label}: {val}")
+                        if user_parts:
+                            user_profile = "\n- ".join(user_parts)
+                            new_prompt = new_prompt + f"\nUser profile:\n {user_profile}"
                     if new_prompt != self.config.get("prompt", ""):
                         self.config["prompt"] = new_prompt
                         self.change_system_prompt(new_prompt)
@@ -538,7 +536,7 @@ class ConnectionHandler:
         )
         if enhanced_prompt:
             self.change_system_prompt(enhanced_prompt)
-            self.logger.bind(tag=TAG).info(f"系统提示词已增强更新:============\n {enhanced_prompt}\n============")
+            self.logger.bind(tag=TAG).info(f"系统提示词已增强更新: {enhanced_prompt}")
 
     def _init_report_threads(self):
         """初始化ASR和TTS上报线程"""

@@ -33,6 +33,26 @@ def get_active_character_for_device(device_id: str, timeout: float = 3.0) -> Opt
         return None
 
 
+def get_device_doc(device_id: str, timeout: float = 3.0) -> Optional[Dict[str, Any]]:
+    try:
+        client = _build_client()
+        doc = client.collection("devices").document(device_id).get(timeout=timeout)
+        if not doc.exists:
+            logger.bind(tag=TAG).warning(f"Firestore devices/{device_id} not found")
+            return None
+        return doc.to_dict() or {}
+    except Exception as e:
+        logger.bind(tag=TAG).error(f"Firestore get device doc error: {e}")
+        return None
+
+
+def get_owner_phone_for_device(device_id: str, timeout: float = 3.0) -> Optional[str]:
+    data = get_device_doc(device_id, timeout=timeout)
+    if not data:
+        return None
+    return data.get("ownerPhone")
+
+
 def get_character_profile(character_id: str, timeout: float = 3.0) -> Optional[Dict[str, Any]]:
     try:
         client = _build_client()
@@ -75,5 +95,31 @@ def extract_character_profile_fields(character_doc: Dict[str, Any]) -> Dict[str,
 def extract_voice_and_bio(character_doc: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
     fields = extract_character_profile_fields(character_doc)
     return fields.get("voice"), fields.get("bio")
+
+
+def get_user_profile_by_phone(owner_phone: str, timeout: float = 3.0) -> Optional[Dict[str, Any]]:
+    """Fetch users/{owner_phone} (doc id is phone)."""
+    try:
+        client = _build_client()
+        doc = client.collection("users").document(owner_phone).get(timeout=timeout)
+        if not doc.exists:
+            logger.bind(tag=TAG).warning(f"Firestore users/{owner_phone} not found")
+            return None
+        return doc.to_dict() or {}
+    except Exception as e:
+        logger.bind(tag=TAG).error(f"Firestore get user error: {e}")
+        return None
+
+
+def extract_user_profile_fields(user_doc: Dict[str, Any]) -> Dict[str, Optional[str]]:
+    wanted = ("name", "birthday", "pronouns", "phoneNumber")
+    result: Dict[str, Optional[str]] = {k: None for k in wanted}
+    if not user_doc:
+        return result
+    for k in wanted:
+        v = user_doc.get(k)
+        # Convert timestamp-like values to string if needed
+        result[k] = str(v) if v is not None else None
+    return result
 
 
