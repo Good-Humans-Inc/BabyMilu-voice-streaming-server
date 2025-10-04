@@ -208,7 +208,9 @@ class ConnectionHandler:
 
             # 认证通过,继续处理
             self.websocket = ws
-            self.device_id = self.headers.get("device-id", None)
+            # Normalize device-id to uppercase to match Firestore doc IDs
+            raw_device_id = self.headers.get("device-id", None)
+            self.device_id = raw_device_id.upper() if isinstance(raw_device_id, str) else raw_device_id
             self.logger.bind(tag=TAG).info(f"device_id: {self.device_id}")
 
             # 检查是否来自MQTT连接
