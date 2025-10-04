@@ -38,10 +38,34 @@ class TTSProvider(TTSProviderBase):
                 v = v.replace("{prompt_text}", text)
             request_params[k] = v
 
-        if self.method.upper() == "POST":
-            resp = requests.post(self.url, json=request_params, headers=self.headers)
+        # Resolve voice_id: prefer connection value, then default from config
+        voice_id = None
+        if self.conn and getattr(self.conn, "voice_id", None):
+            voice_id = self.conn.voice_id
+        elif getattr(self, "default_voice_id", None):
+            voice_id = str(self.default_voice_id)
+
+        final_url = self.url
+        if voice_id:
+            final_url = final_url.replace("{voice_id}", voice_id)
         else:
-            resp = requests.get(self.url, params=request_params, headers=self.headers)
+            logger.bind(tag=TAG).warning(
+                "No voice_id resolved (conn/default). Request may fail"
+            )
+
+        logger.debug(
+            f"CustomTTS request: URL={final_url}, "
+            f"JSON={request_params}, HEADERS={self.headers}"
+        )
+
+        if self.method.upper() == "POST":
+            resp = requests.post(
+                final_url, json=request_params, headers=self.headers, timeout=15
+            )
+        else:
+            resp = requests.get(
+                final_url, params=request_params, headers=self.headers, timeout=15
+            )
         if resp.status_code == 200:
             if output_file:
                 with open(output_file, "wb") as file:

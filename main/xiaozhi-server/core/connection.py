@@ -40,6 +40,11 @@ from config.manage_api_client import DeviceNotFoundException, DeviceBindExceptio
 from core.utils.prompt_manager import PromptManager
 from core.utils.voiceprint_provider import VoiceprintProvider
 from core.utils import textUtils
+from core.utils.firestore_client import (
+    get_active_character_for_device,
+    get_character_profile,
+    extract_character_profile_fields,
+)
 
 TAG = __name__
 
@@ -132,6 +137,7 @@ class ConnectionHandler:
 
         # tts相关变量
         self.sentence_id = None
+        self.voice_id = None
         # 处理TTS响应没有文本返回
         self.tts_MessageText = ""
 
@@ -200,6 +206,7 @@ class ConnectionHandler:
             # 认证通过,继续处理
             self.websocket = ws
             self.device_id = self.headers.get("device-id", None)
+            self.logger.bind(tag=TAG).info(f"device_id: {self.device_id}")
 
             # 检查是否来自MQTT连接
             request_path = ws.request.path
@@ -209,6 +216,70 @@ class ConnectionHandler:
 
             # 初始化活动时间戳
             self.last_activity_time = time.time() * 1000
+
+            # 从云端获取角色配置（voice, bio 等），并应用到本次会话
+            try:
+                char_id = None
+                if self.device_id:
+                    char_id = get_active_character_for_device(self.device_id)
+                if char_id:
+                    self.logger.info(f"char_id={char_id!r}")
+                    char_doc = get_character_profile(char_id)
+                    self.logger.info(f"char_doc_keys={list((char_doc or {}).keys())}")
+                    fields = extract_character_profile_fields(char_doc or {})
+                    self.logger.info(f"resolved voice={fields.get('voice')}, bio_present={bool(fields.get('bio'))}")
+
+                    # 优先保留客户端传入的 voice-id；否则使用云端的
+                    if not self.voice_id and fields.get("voice"):
+                        self.voice_id = str(fields.get("voice"))
+
+                    # 如果依然没有voice_id，则尝试使用配置中的默认值，并打印警告
+                    if not self.voice_id:
+                        default_voice = (
+                            self.config.get("TTS", {})
+                            .get("CustomTTS", {})
+                            .get("default_voice_id")
+                            or self.config.get("TTS", {}).get("CustomTTS", {}).get("voice_id")
+                        )
+                        if default_voice:
+                            self.logger.bind(tag=TAG).warning(
+                                "Character has no voice_id; using default voice from config"
+                            )
+                            self.voice_id = str(default_voice)
+                        else:
+                            self.logger.bind(tag=TAG).error(
+                                "No character voice_id and no default voice configured"
+                            )
+                    self.logger.bind(tag=TAG).info(f"voice_id={self.voice_id}")
+
+                    # 组装角色提示并更新系统提示词
+                    profile_parts = []
+                    for label, key in (
+                        ("Your Name", "name"),
+                        ("Your Age", "age"),
+                        ("Your Pronouns", "pronouns"),
+                        ("Your Relationship with the user", "relationship"),
+                        ("You like calling the user", "callMe"),
+                    ):
+                        val = fields.get(key)
+                        if val:
+                            profile_parts.append(f"{label}: {val}")
+                    profile_line = "; ".join(profile_parts)
+                    bio_text = fields.get("bio")
+
+                    new_prompt = self.config.get("prompt", "")
+                    if profile_line:
+                        new_prompt = new_prompt + f"\nCharacter profile: {profile_line}"
+                    if bio_text:
+                        new_prompt = new_prompt + f"\nUser's description of you: {bio_text}"
+                    if new_prompt != self.config.get("prompt", ""):
+                        self.config["prompt"] = new_prompt
+                        self.change_system_prompt(new_prompt)
+                        self.logger.bind(tag=TAG).info(f"Applied character profile from Firestore, prompt={self.config.get('prompt')}")
+                else:
+                    self.logger.bind(tag=TAG).info("No activeCharacterId found for device; using defaults")
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(f"Failed to fetch/apply character profile: {e}")
 
             # 启动超时检查任务
             self.timeout_task = asyncio.create_task(self._check_timeout())
@@ -424,7 +495,7 @@ class ConnectionHandler:
                 prompt = self.prompt_manager.get_quick_prompt(user_prompt)
                 self.change_system_prompt(prompt)
                 self.logger.bind(tag=TAG).info(
-                    f"快速初始化组件: prompt成功 {prompt[:50]}..."
+                    f"快速初始化组件: prompt成功: {prompt}..."
                 )
 
             """初始化本地组件"""
@@ -467,7 +538,7 @@ class ConnectionHandler:
         )
         if enhanced_prompt:
             self.change_system_prompt(enhanced_prompt)
-            self.logger.bind(tag=TAG).info("系统提示词已增强更新")
+            self.logger.bind(tag=TAG).info(f"系统提示词已增强更新:============\n {enhanced_prompt}\n============")
 
     def _init_report_threads(self):
         """初始化ASR和TTS上报线程"""

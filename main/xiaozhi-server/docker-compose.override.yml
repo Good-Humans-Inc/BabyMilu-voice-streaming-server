@@ -1,0 +1,10 @@
+services:
+  xiaozhi-esp32-server:
+    image: my-xiaozhi-server:latest
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp_sa.json
+      - GOOGLE_CLOUD_PROJECT=composed-augury-469200-g6
+    volumes:
+      - ./data/.gcp/sa.json:/run/secrets/gcp_sa.json:ro
+      - ./data:/opt/xiaozhi-esp32-server/data
+      - ./:/opt/xiaozhi-esp32-server
