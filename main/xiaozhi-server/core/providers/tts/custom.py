@@ -19,6 +19,8 @@ class TTSProvider(TTSProviderBase):
         self.audio_file_type = config.get("format", "wav")
         self.output_file = config.get("output_dir", "tmp/")
         self.params = config.get("params")
+        # Default voice fallback (used if connection doesn't provide one)
+        self.default_voice_id = config.get("default_voice_id") or config.get("voice_id")
 
         if isinstance(self.params, str):
             try:
@@ -45,17 +47,19 @@ class TTSProvider(TTSProviderBase):
         elif getattr(self, "default_voice_id", None):
             voice_id = str(self.default_voice_id)
 
-        final_url = self.url
-        if voice_id:
-            final_url = final_url.replace("{voice_id}", voice_id)
-        else:
-            logger.bind(tag=TAG).warning(
-                "No voice_id resolved (conn/default). Request may fail"
-            )
+        # Build final URL from base + voice_id; abort if voice_id missing
+        if not voice_id:
+            logger.bind(tag=TAG).error("No voice_id resolved (conn/default). Abort TTS request")
+            raise Exception("No voice_id resolved; cannot call TTS")
 
+        final_url = f"{self.url.rstrip('/')}/{voice_id}"
+
+        safe_headers = dict(self.headers or {})
+        for _k in list(safe_headers.keys()):
+            if _k.lower() in ("xi-api-key", "authorization"):
+                safe_headers[_k] = "***"
         logger.debug(
-            f"CustomTTS request: URL={final_url}, "
-            f"JSON={request_params}, HEADERS={self.headers}"
+            f"CustomTTS request: URL={final_url}, JSON={request_params}, HEADERS={safe_headers}"
         )
 
         if self.method.upper() == "POST":

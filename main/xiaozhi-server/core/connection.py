@@ -278,6 +278,23 @@ class ConnectionHandler:
                         self.logger.bind(tag=TAG).info(f"Applied character profile from Firestore, prompt={self.config.get('prompt')}")
                 else:
                     self.logger.bind(tag=TAG).info("No activeCharacterId found for device; using defaults")
+                    # No character info – still ensure a default voice is applied if missing
+                    if not self.voice_id:
+                        default_voice = (
+                            self.config.get("TTS", {})
+                            .get("CustomTTS", {})
+                            .get("default_voice_id")
+                            or self.config.get("TTS", {}).get("CustomTTS", {}).get("voice_id")
+                        )
+                        if default_voice:
+                            self.logger.bind(tag=TAG).warning(
+                                "No character voice_id; using default voice from config"
+                            )
+                            self.voice_id = str(default_voice)
+                        else:
+                            self.logger.bind(tag=TAG).error(
+                                "No character voice_id and no default voice configured"
+                            )
             except Exception as e:
                 self.logger.bind(tag=TAG).warning(f"Failed to fetch/apply character profile: {e}")
 
