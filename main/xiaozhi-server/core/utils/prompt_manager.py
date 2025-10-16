@@ -184,7 +184,7 @@ class PromptManager:
             self.logger.bind(tag=TAG).error(f"更新上下文信息失败: {e}")
 
     def build_enhanced_prompt(
-        self, user_prompt: str, device_id: str, client_ip: str = None
+        self, user_prompt: str, device_id: str, client_ip: str = None, memory: str = None
     ) -> str:
         """构建增强的系统提示词"""
         if not self.base_prompt_template:
@@ -226,6 +226,18 @@ class PromptManager:
                 emojiList=EMOJI_List,
                 device_id=device_id,
             )
+            # 插入记忆内容：将模板中的 <memory>...</memory> 替换成实际记忆
+            try:
+                import re as _re
+                if memory is not None:
+                    enhanced_prompt = _re.sub(
+                        r"<memory>[\s\S]*?</memory>",
+                        f"<memory>\n{memory}\n</memory>",
+                        enhanced_prompt,
+                        flags=_re.DOTALL,
+                    )
+            except Exception:
+                pass
             device_cache_key = f"device_prompt:{device_id}"
             self.cache_manager.set(
                 self.CacheType.DEVICE_PROMPT, device_cache_key, enhanced_prompt

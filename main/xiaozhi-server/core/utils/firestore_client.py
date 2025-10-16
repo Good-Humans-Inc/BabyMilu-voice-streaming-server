@@ -123,3 +123,30 @@ def extract_user_profile_fields(user_doc: Dict[str, Any]) -> Dict[str, Optional[
     return result
 
 
+
+def get_conversation_id_for_device(device_id: str, timeout: float = 3.0) -> Optional[str]:
+    """Return devices/{device_id}.conversationId if present."""
+    try:
+        client = _build_client()
+        doc = client.collection("devices").document(device_id).get(timeout=timeout)
+        if not doc.exists:
+            logger.bind(tag=TAG).warning(f"Firestore devices/{device_id} not found")
+            return None
+        data = doc.to_dict() or {}
+        return data.get("conversationId")
+    except Exception as e:
+        logger.bind(tag=TAG).error(f"Firestore get conversationId error: {e}")
+        return None
+
+
+def set_conversation_id_for_device(device_id: str, conversation_id: str, timeout: float = 3.0) -> bool:
+    """Upsert devices/{deviceId}.conversationId = conversation_id."""
+    try:
+        client = _build_client()
+        client.collection("devices").document(device_id).set(
+            {"conversationId": conversation_id}, merge=True, timeout=timeout
+        )
+        return True
+    except Exception as e:
+        logger.bind(tag=TAG).error(f"Firestore set conversationId error: {e}")
+        return False

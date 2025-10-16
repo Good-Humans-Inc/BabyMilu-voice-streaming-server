@@ -47,6 +47,8 @@ from core.utils.firestore_client import (
     get_owner_phone_for_device,
     get_user_profile_by_phone,
     extract_user_profile_fields,
+    get_conversation_id_for_device,
+    set_conversation_id_for_device,
 )
 
 TAG = __name__
@@ -168,6 +170,8 @@ class ConnectionHandler:
 
         # 初始化提示词管理器
         self.prompt_manager = PromptManager(config, self.logger)
+        # 当新建会话时，首轮需要下发instructions
+        self._seed_instructions_once = False
 
     async def handle_connection(self, ws):
         try:
@@ -306,6 +310,68 @@ class ConnectionHandler:
 
             # 获取差异化配置
             self._initialize_private_config()
+            # 同步构建首轮系统提示词（包含增强+记忆），用于会话首条system消息
+            try:
+                base_prompt = self.config.get("prompt")
+                if base_prompt is not None:
+                    quick = self.prompt_manager.get_quick_prompt(base_prompt)
+                    self.change_system_prompt(quick)
+                    # 根据当前连接信息构建增强prompt
+                    self.prompt_manager.update_context_info(self, self.client_ip)
+                    # 读取已有短期记忆文本
+                    short_memory_text = ""
+                    try:
+                        # 确保记忆模块已初始化（轻量）
+                        self._initialize_memory()
+                        if self.memory is not None:
+                            future = asyncio.run_coroutine_threadsafe(
+                                self.memory.query_memory(""), self.loop
+                            )
+                            short_memory_text = future.result() or ""
+                    except Exception:
+                        short_memory_text = ""
+
+                    enhanced = self.prompt_manager.build_enhanced_prompt(
+                        self.config["prompt"], self.device_id, self.client_ip, memory=short_memory_text
+                    )
+                    if enhanced:
+                        self.change_system_prompt(enhanced)
+                        self.logger.bind(tag=TAG).info(
+                            f"同步构建增强系统提示词完成"
+                        )
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(f"同步构建系统提示词失败: {e}")
+            # 拉取并注入持久会话ID
+            try:
+                if self.llm and self.device_id:
+                    conv_id = get_conversation_id_for_device(self.device_id)
+                    if conv_id:
+                        if hasattr(self.llm, "adopt_conversation_id_for_session"):
+                            self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
+                            self.logger.bind(tag=TAG).info(f"Loaded conversationId for device: {conv_id}")
+                    else:
+                        # 未找到则创建新会话，并回写到Firestore
+                        try:
+                            if hasattr(self.llm, "ensure_conversation_with_system"):
+                                # 在创建会话时，直接以系统消息作为首条item
+                                new_conv_id = self.llm.ensure_conversation_with_system(self.session_id, self.prompt)
+                            elif hasattr(self.llm, "ensure_conversation"):
+                                new_conv_id = self.llm.ensure_conversation(self.session_id)
+                            else:
+                                # 兜底：调用一次对话以触发创建
+                                new_conv_id = None
+                            if new_conv_id:
+                                ok = set_conversation_id_for_device(self.device_id, new_conv_id)
+                                if ok:
+                                    self.logger.bind(tag=TAG).info(f"Created and saved conversationId for device: {new_conv_id}")
+                                    # 标记需要在首轮发送instructions
+                                    self._seed_instructions_once = True
+                                else:
+                                    self.logger.bind(tag=TAG).warning("Failed to save conversationId to Firestore")
+                        except Exception as create_err:
+                            self.logger.bind(tag=TAG).warning(f"Create conversationId failed: {create_err}")
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(f"Failed to load conversationId: {e}")
             # 异步初始化
             self.executor.submit(self._initialize_components)
 
@@ -862,21 +928,34 @@ class ConnectionHandler:
                 )
                 memory_str = future.result()
 
+            # 根据是否有持久会话决定是否传递全历史
+            use_full_history = True
+            try:
+                if hasattr(self.llm, "has_conversation") and self.llm.has_conversation(self.session_id):
+                    use_full_history = False
+            except Exception:
+                pass
+
+            current_input = None
+            if use_full_history:
+                current_input = self.dialogue.get_llm_dialogue_with_memory(
+                    memory_str, self.config.get("voiceprint", {})
+                )
+            else:
+                # 仅传入最新用户消息；系统prompt/instructions由会话持久化
+                current_input = [{"role": "user", "content": query}]
+
             if self.intent_type == "function_call" and functions is not None:
                 # 使用支持functions的streaming接口
                 llm_responses = self.llm.response_with_functions(
                     self.session_id,
-                    self.dialogue.get_llm_dialogue_with_memory(
-                        memory_str, self.config.get("voiceprint", {})
-                    ),
+                    current_input,
                     functions=functions,
                 )
             else:
                 llm_responses = self.llm.response(
                     self.session_id,
-                    self.dialogue.get_llm_dialogue_with_memory(
-                        memory_str, self.config.get("voiceprint", {})
-                    ),
+                    current_input,
                 )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM 处理出错 {query}: {e}")
