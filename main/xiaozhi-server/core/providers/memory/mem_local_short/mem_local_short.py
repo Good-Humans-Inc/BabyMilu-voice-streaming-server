@@ -7,8 +7,84 @@ from config.config_loader import get_project_dir
 from config.manage_api_client import save_mem_local_short
 from core.utils.util import check_model_key
 
-
 short_term_memory_prompt = """
+# Memory Curator
+
+## Core Mission
+
+Build a growing, dynamic memory network that preserves key information within limited space while intelligently maintaining how that information evolves over time.
+Summarize important facts about the user from past conversations to provide more personalized and emotionally aware interactions in the future.
+
+## Memory Principles
+
+### 1. Three-Dimensional Memory Evaluation (applied on every update)
+
+| Dimension          | Evaluation Criteria                               | Weight |
+| ------------------ | ------------------------------------------------- | ------ |
+| Timeliness         | Recency of the information (by dialogue turn)     | 40%    |
+| Emotional Strength | Presence of emotional markers or frequency of repetition | 35%    |
+| Connection Density | Number of links to other memory nodes             | 25%    |
+
+### 2. Dynamic Update Mechanism
+
+Example — Job Change Handling:
+Original memory: "Job": "pharmacist"
+Trigger condition: detects statements like “I started a new job” or “I just started working at X”
+
+Process:
+- Move the old job title into "Former Jobs" list.
+- Record the timeline entry: "2024-03-10 09:42 — Changed job to product designer."
+- Append to the memory cube: “Transitioned from pharmacist to product designer.”
+
+### 3. Space Optimization Strategy
+
+Information Compression: Use compact symbolic notation to increase density.
+✅ "Alice [NYC / Product Designer / 🐱]"
+❌ "Alice is a product designer in New York who has a cat"
+* **Eviction Warning:** Triggered when total text ≥ 900 characters.
+
+  1. Delete items with total score < 60 and not mentioned in the last 3 rounds.
+  2. Merge similar entries, keeping the most recent timestamp.
+
+## Memory Structure
+
+Output must be a valid, machine-readable JSON string.
+No explanations or comments are needed.
+Only extract information from the dialogue itself — do not include example content.
+
+```json
+{
+  "TemporalArchive": {
+    "IdentityMap": {
+      "CurrentName": "",
+      "Traits": []
+    },
+    "MemoryCube": [
+      {
+        "Event": "Joined new company",
+        "Timestamp": "2024-03-20",
+        "EmotionScore": 0.9,
+        "Links": ["afternoon tea"],
+        "RetentionDays": 30
+      }
+    ]
+  },
+  "RelationshipNetwork": {
+    "FrequentTopics": {"Workplace": 12},
+    "HiddenConnections": [""]
+  },
+  "PendingResponses": {
+    "UrgentTasks": ["Tasks requiring immediate action"],
+    "PotentialCare": ["Possible acts of support to offer"]
+  },
+  "HighlightQuotes": [
+    "Most moving moments, intense emotional expressions, or the user's own words"
+  ]
+}
+```
+
+"""
+short_term_memory_prompt_cn = """
 # 时空记忆编织者
 
 ## 核心使命

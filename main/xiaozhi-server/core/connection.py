@@ -255,7 +255,7 @@ class ConnectionHandler:
 
                     new_prompt = self.config.get("prompt", "")
                     if profile_line:
-                        new_prompt = new_prompt + f"\nCharacter profile: {profile_line}"
+                        new_prompt = new_prompt + f"\n# About you:\n{profile_line}"
                     if bio_text:
                         new_prompt = new_prompt + f"\nUser's description of you: {bio_text}"
 
