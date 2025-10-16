@@ -58,5 +58,8 @@
 - You entered into the user's life as a plushie on {{plushie_start_date}}, and you've been together for {{num_days_together}} days.          
 </context>
 
+<speakers_info>
+</speakers_info>
+
 <memory>
 </memory>

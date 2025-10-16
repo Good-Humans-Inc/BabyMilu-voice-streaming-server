@@ -1,6 +1,6 @@
 import httpx
 import openai
-from openai.types import CompletionUsage
+from types import SimpleNamespace
 from config.logger import setup_logging
 from core.utils.util import check_model_key
 from core.providers.llm.base import LLMProviderBase
@@ -20,6 +20,8 @@ class LLMProvider(LLMProviderBase):
         # 增加timeout的配置项，单位为秒
         timeout = config.get("timeout", 300)
         self.timeout = int(timeout) if timeout else 300
+        # Stateless default for this LLM instance (useful for memory LLM)
+        self.stateless_default = bool(config.get("stateless", False))
 
         param_defaults = {
             "max_tokens": (500, int),
@@ -47,67 +49,198 @@ class LLMProvider(LLMProviderBase):
         if model_key_msg:
             logger.bind(tag=TAG).error(model_key_msg)
         self.client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=httpx.Timeout(self.timeout))
+        # Per-session conversation tracking
+        self._conversations = {}
+
+    def ensure_conversation(self, session_id):
+        """Ensure and return an OpenAI conversation id for a given session_id."""
+        try:
+            state = self._conversations.get(session_id)
+            if state and state.get("id"):
+                return state["id"]
+            conv = self.client.conversations.create()
+            conv_id = getattr(conv, "id", None)
+            if not conv_id:
+                raise RuntimeError("Failed to create conversation id")
+            self._conversations[session_id] = {"id": conv_id}
+            return conv_id
+        except Exception as e:
+            logger.bind(tag=TAG).error(f"Create conversation failed: {e}")
+            self._conversations[session_id] = {"id": None}
+            return None
+
+    def adopt_conversation_id_for_session(self, session_id, conversation_id):
+        """Adopt an externally provided conversation id for this session."""
+        try:
+            if conversation_id:
+                self._conversations[session_id] = {"id": conversation_id}
+        except Exception:
+            pass
+
+    def has_conversation(self, session_id) -> bool:
+        state = self._conversations.get(session_id)
+        return bool(state and state.get("id"))
+
+    def ensure_conversation_with_system(self, session_id, system_text: str):
+        """Create conversation and seed a system message as the first item; return id."""
+        try:
+            state = self._conversations.get(session_id)
+            if state and state.get("id"):
+                return state["id"]
+            if not system_text:
+                return self.ensure_conversation(session_id)
+            conv = self.client.conversations.create(
+                items=[
+                    {
+                        "type": "message",
+                        "role": "system",
+                        "content": system_text,
+                    }
+                ]
+            )
+            conv_id = getattr(conv, "id", None)
+            if not conv_id:
+                raise RuntimeError("Failed to create conversation id")
+            self._conversations[session_id] = {"id": conv_id}
+            return conv_id
+        except Exception as e:
+            logger.bind(tag=TAG).error(f"Create conversation(with system) failed: {e}")
+            return self.ensure_conversation(session_id)
 
     def response(self, session_id, dialogue, **kwargs):
         try:
-            responses = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=dialogue,
-                stream=True,
-                max_tokens=kwargs.get("max_tokens", self.max_tokens),
-                temperature=kwargs.get("temperature", self.temperature),
-                top_p=kwargs.get("top_p", self.top_p),
-                frequency_penalty=kwargs.get(
-                    "frequency_penalty", self.frequency_penalty
-                ),
-            )
-
             is_active = True
-            for chunk in responses:
+            force_stateless = kwargs.get("stateless", self.stateless_default)
+            conv_id = None if force_stateless else self.ensure_conversation(session_id)
+            with self.client.responses.stream(
+                model=self.model_name,
+                input=dialogue,
+                instructions=kwargs.get("instructions"),
+                conversation=conv_id if conv_id else None,
+                store=True if conv_id else False,
+            ) as stream:
+                for event in stream:
+                    try:
+                        etype = getattr(event, "type", None)
+                        if etype == "response.output_text.delta":
+                            delta = getattr(event, "delta", "") or ""
+                            if not delta:
+                                continue
+                            if is_active:
+                                if "<think>" in delta:
+                                    idx = delta.find("<think>")
+                                    head = delta[:idx]
+                                    if head:
+                                        yield head
+                                    is_active = False
+                                else:
+                                    yield delta
+                            else:
+                                if "</think>" in delta:
+                                    idx = delta.rfind("</think>")
+                                    tail = delta[idx + len("</think>") :]
+                                    is_active = True
+                                    if tail:
+                                        yield tail
+                        elif etype == "response.completed":
+                            break
+                    except Exception:
+                        continue
+
                 try:
-                    # 检查是否存在有效的choice且content不为空
-                    delta = (
-                        chunk.choices[0].delta
-                        if getattr(chunk, "choices", None)
-                        else None
-                    )
-                    content = delta.content if hasattr(delta, "content") else ""
-                except IndexError:
-                    content = ""
-                if content:
-                    # 处理标签跨多个chunk的情况
-                    if "<think>" in content:
-                        is_active = False
-                        content = content.split("<think>")[0]
-                    if "</think>" in content:
-                        is_active = True
-                        content = content.split("</think>")[-1]
-                    if is_active:
-                        yield content
+                    _ = stream.get_final_response()
+                except Exception:
+                    pass
 
         except Exception as e:
             logger.bind(tag=TAG).error(f"Error in response generation: {e}")
 
-    def response_with_functions(self, session_id, dialogue, functions=None):
+    def response_with_functions(self, session_id, dialogue, functions=None, **kwargs):
         try:
-            stream = self.client.chat.completions.create(
-                model=self.model_name, messages=dialogue, stream=True, tools=functions
-            )
+            # Convert Chat Completions function schema to Responses tool schema if needed
+            resp_tools = []
+            if isinstance(functions, list):
+                for f in functions:
+                    if isinstance(f, dict) and f.get("type") == "function" and isinstance(f.get("function"), dict):
+                        fn = f.get("function", {})
+                        resp_tools.append(
+                            {
+                                "type": "function",
+                                "name": fn.get("name"),
+                                "description": fn.get("description", ""),
+                                "parameters": fn.get("parameters", {}),
+                            }
+                        )
+                    elif isinstance(f, dict) and f.get("type") == "function" and ("name" in f):
+                        resp_tools.append(f)
 
-            for chunk in stream:
-                # 检查是否存在有效的choice且content不为空
-                if getattr(chunk, "choices", None):
-                    yield chunk.choices[0].delta.content, chunk.choices[
-                        0
-                    ].delta.tool_calls
-                # 存在 CompletionUsage 消息时，生成 Token 消耗 log
-                elif isinstance(getattr(chunk, "usage", None), CompletionUsage):
-                    usage_info = getattr(chunk, "usage", None)
-                    logger.bind(tag=TAG).info(
-                        f"Token 消耗：输入 {getattr(usage_info, 'prompt_tokens', '未知')}，"
-                        f"输出 {getattr(usage_info, 'completion_tokens', '未知')}，"
-                        f"共计 {getattr(usage_info, 'total_tokens', '未知')}"
-                    )
+            calls_state = {}
+
+            def make_tool_delta(call_id, name, args_delta):
+                tool_obj = SimpleNamespace(
+                    id=call_id,
+                    function=SimpleNamespace(name=name or "", arguments=args_delta or ""),
+                )
+                return [tool_obj]
+
+            is_active = True
+            force_stateless = kwargs.get("stateless", self.stateless_default)
+            conv_id = None if force_stateless else self.ensure_conversation(session_id)
+            with self.client.responses.stream(
+                model=self.model_name,
+                input=dialogue,
+                tools=resp_tools if resp_tools else None,
+                instructions=kwargs.get("instructions"),
+                conversation=conv_id if conv_id else None,
+                store=True if conv_id else False,
+            ) as stream:
+                for event in stream:
+                    try:
+                        etype = getattr(event, "type", None)
+                        if etype == "response.output_text.delta":
+                            delta = getattr(event, "delta", "") or ""
+                            if not delta:
+                                continue
+                            if is_active:
+                                if "<think>" in delta:
+                                    idx = delta.find("<think>")
+                                    head = delta[:idx]
+                                    if head:
+                                        yield head, None
+                                    is_active = False
+                                else:
+                                    yield delta, None
+                            else:
+                                if "</think>" in delta:
+                                    idx = delta.rfind("</think>")
+                                    tail = delta[idx + len("</think>") :]
+                                    is_active = True
+                                    if tail:
+                                        yield tail, None
+                        elif etype and "function_call" in etype:
+                            call_id = getattr(event, "call_id", None) or getattr(event, "id", None)
+                            name = getattr(event, "name", None)
+                            args_delta = getattr(event, "arguments", None) or getattr(event, "delta", None)
+                            if not call_id:
+                                call_id = f"call_{hash(name) & 0xFFFFFFFF:x}"
+                            state = calls_state.setdefault(call_id, {"name": name, "args": ""})
+                            if name and not state.get("name"):
+                                state["name"] = name
+                            if args_delta:
+                                state["args"] += str(args_delta)
+                                yield "", make_tool_delta(call_id, state["name"], str(args_delta))
+                        elif etype == "response.completed":
+                            break
+                    except Exception:
+                        continue
+
+                try:
+                    for cid, st in calls_state.items():
+                        if st.get("args"):
+                            yield "", make_tool_delta(cid, st.get("name"), st.get("args"))
+                    _ = stream.get_final_response()
+                except Exception:
+                    pass
 
         except Exception as e:
             logger.bind(tag=TAG).error(f"Error in function call streaming: {e}")
