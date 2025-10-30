@@ -1,4 +1,5 @@
 import os
+import json
 import functools
 from typing import Optional, Tuple, Dict, Any
 
@@ -27,6 +28,16 @@ def get_active_character_for_device(device_id: str, timeout: float = 3.0) -> Opt
             logger.bind(tag=TAG).warning(f"Firestore devices/{device_id} not found")
             return None
         data = doc.to_dict() or {}
+        # Debug visibility into what we actually fetched from Firestore
+        try:
+            pretty_doc = json.dumps(data, ensure_ascii=False, default=str, indent=2)
+            logger.bind(tag=TAG).info(
+                f"Firestore devices/{device_id} read: project={getattr(client, 'project', None)}, "
+                f"exists={doc.exists}, full_doc=\n{pretty_doc}"
+            )
+        except Exception:
+            # Logging must not break the read path
+            pass
         return data.get("activeCharacterId")
     except Exception as e:
         logger.bind(tag=TAG).error(f"Firestore get device error: {e}")
@@ -150,3 +161,40 @@ def set_conversation_id_for_device(device_id: str, conversation_id: str, timeout
     except Exception as e:
         logger.bind(tag=TAG).error(f"Firestore set conversationId error: {e}")
         return False
+
+
+def get_most_recent_character_via_user_for_device(device_id: str, timeout: float = 3.0) -> Optional[str]:
+    """Return the most recently created characterId for the owner of devices/{device_id}.
+
+    Assumes users/{ownerPhone} contains an array field "characterIds" where the last
+    element is the most recent character.
+    """
+    try:
+        device_doc = get_device_doc(device_id, timeout=timeout)
+        if not device_doc:
+            logger.bind(tag=TAG).warning(f"⚠️ Device doc missing for fallback: devices/{device_id}")
+            return None
+        owner_phone = device_doc.get("ownerPhone")
+        if not owner_phone:
+            logger.bind(tag=TAG).warning(
+                f"Device devices/{device_id} has no ownerPhone; cannot derive recent character"
+            )
+            return None
+        user_doc = get_user_profile_by_phone(owner_phone, timeout=timeout)
+        if not user_doc:
+            logger.bind(tag=TAG).warning(f"⚠️ users/{owner_phone} not found for fallback")
+            return None
+        char_ids = user_doc.get("characterIds") or []
+        if isinstance(char_ids, list) and len(char_ids) > 0:
+            most_recent = str(char_ids[-1])
+            logger.bind(tag=TAG).info(
+                f"Fallback chose most recent character for device {device_id} -> users/{owner_phone}: {most_recent}"
+            )
+            return most_recent
+        logger.bind(tag=TAG).warning(
+            f"⚠️ users/{owner_phone} has no characterIds; cannot derive recent character"
+        )
+        return None
+    except Exception as e:
+        logger.bind(tag=TAG).error(f"Fallback most recent character error: {e}")
+        return None

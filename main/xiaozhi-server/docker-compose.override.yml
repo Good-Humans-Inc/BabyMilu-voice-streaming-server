@@ -8,3 +8,9 @@ services:
       - ./data/.gcp/sa.json:/run/secrets/gcp_sa.json:ro
       - ./data:/opt/xiaozhi-esp32-server/data
       - ./:/opt/xiaozhi-esp32-server
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+        max-file: "2"
+        compress: "true"

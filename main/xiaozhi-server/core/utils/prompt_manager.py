@@ -220,7 +220,6 @@ class PromptManager:
                 current_time="{{current_time}}",
                 today_date=today_date,
                 today_weekday=today_weekday,
-                lunar_date=lunar_date,
                 local_address=local_address,
                 weather_info=weather_info,
                 emojiList=EMOJI_List,

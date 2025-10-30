@@ -112,10 +112,21 @@ class LLMProvider(LLMProviderBase):
             is_active = True
             force_stateless = kwargs.get("stateless", self.stateless_default)
             conv_id = None if force_stateless else self.ensure_conversation(session_id)
+            
+            # Build instructions with memory injection
+            instructions = kwargs.get("instructions")
+            memory_str = kwargs.get("memory")
+            if memory_str:
+                memory_instruction = f"\n\n<memory>\n{memory_str}\n</memory>"
+                if instructions:
+                    instructions = instructions + memory_instruction
+                else:
+                    instructions = memory_instruction
+            
             with self.client.responses.stream(
                 model=self.model_name,
                 input=dialogue,
-                instructions=kwargs.get("instructions"),
+                instructions=instructions,
                 conversation=conv_id if conv_id else None,
                 store=True if conv_id else False,
             ) as stream:
@@ -186,11 +197,22 @@ class LLMProvider(LLMProviderBase):
             is_active = True
             force_stateless = kwargs.get("stateless", self.stateless_default)
             conv_id = None if force_stateless else self.ensure_conversation(session_id)
+            
+            # Build instructions with memory injection
+            instructions = kwargs.get("instructions")
+            memory_str = kwargs.get("memory")
+            if memory_str:
+                memory_instruction = f"\n\n<memory>\n{memory_str}\n</memory>"
+                if instructions:
+                    instructions = instructions + memory_instruction
+                else:
+                    instructions = memory_instruction
+            
             with self.client.responses.stream(
                 model=self.model_name,
                 input=dialogue,
                 tools=resp_tools if resp_tools else None,
-                instructions=kwargs.get("instructions"),
+                instructions=instructions,
                 conversation=conv_id if conv_id else None,
                 store=True if conv_id else False,
             ) as stream:

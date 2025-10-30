@@ -49,6 +49,7 @@ from core.utils.firestore_client import (
     extract_user_profile_fields,
     get_conversation_id_for_device,
     set_conversation_id_for_device,
+    get_most_recent_character_via_user_for_device,
 )
 
 TAG = __name__
@@ -231,6 +232,13 @@ class ConnectionHandler:
                 char_id = None
                 if self.device_id:
                     char_id = get_active_character_for_device(self.device_id)
+                    if not char_id:
+                        fallback_id = get_most_recent_character_via_user_for_device(self.device_id)
+                        if fallback_id:
+                            self.logger.bind(tag=TAG, device_id=self.device_id).warning(
+                                f"activeCharacterId missing; falling back to most recent user character: {fallback_id}"
+                            )
+                            char_id = fallback_id
                 if char_id:
                     self.logger.info(f"char_id={char_id!r}")
                     char_doc = get_character_profile(char_id)
@@ -281,7 +289,10 @@ class ConnectionHandler:
                         self.change_system_prompt(new_prompt)
                         self.logger.bind(tag=TAG).info(f"Applied character profile from Firestore, prompt={self.config.get('prompt')}")
                 else:
-                    self.logger.bind(tag=TAG).info("No activeCharacterId found for device; using defaults")
+                    # Prominent error to surface missing character configuration
+                    self.logger.bind(tag=TAG, device_id=self.device_id).error(
+                        "🚨 MISSING activeCharacterId for device; using defaults 🚨"
+                    )
                     # No character info – still ensure a default voice is applied if missing
                     if not self.voice_id:
                         default_voice = (
@@ -881,8 +892,8 @@ class ConnectionHandler:
 
     def change_system_prompt(self, prompt):
         self.prompt = prompt
-        # 更新系统prompt至上下文
         self.dialogue.update_system_message(self.prompt)
+        self.logger.bind(tag=TAG).info(f"Ran change_system_prompt (new prompt length {len(prompt)}） with prompt:\n\n{prompt}\n")
 
     def chat(self, query, depth=0):
         self.logger.bind(tag=TAG).info(f"大模型收到用户消息: {query}")
@@ -938,11 +949,13 @@ class ConnectionHandler:
                     self.session_id,
                     current_input,
                     functions=functions,
+                    memory=memory_str,
                 )
             else:
                 llm_responses = self.llm.response(
                     self.session_id,
                     current_input,
+                    memory=memory_str,
                 )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM 处理出错 {query}: {e}")
