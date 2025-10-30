@@ -45,7 +45,23 @@ async def handleHelloMessage(conn, msg_json):
         if features.get("mode"):
             conn.mode = features.get("mode").lower()
             mode_config = conn.config.get("mode_config", {}).get(conn.mode, {})
-            conn.mode_specific_instructions = mode_config.get("instructions", "")
+            # Load instructions from file if specified
+            instructions_file = mode_config.get("instructions_file")
+            if instructions_file:
+                try:
+                    with open(instructions_file, 'r', encoding='utf-8') as f:
+                        conn.mode_specific_instructions = f.read().strip()
+                    conn.logger.bind(tag=TAG).info(f"Loaded mode specific instructions from {instructions_file}")
+                except Exception as e:
+                    conn.logger.bind(tag=TAG).warning(f"Failed to load mode specific instructions from {instructions_file}: {e}")
+                    conn.mode_specific_instructions = mode_config.get("instructions", "")
+            else:
+                conn.mode_specific_instructions = mode_config.get("instructions", "")
+            if conn.mode_specific_instructions:
+                conn.logger.bind(tag=TAG).info(f"Read mode specific instructions from mode config: {conn.mode_specific_instructions}")
+            else:
+                conn.logger.bind(tag=TAG).warning(f"No mode specific instructions found for mode: {conn.mode}")
+            # whether to initiate chat from server for this mode
             conn.server_initiate_chat = mode_config.get("server_initiate_chat", False)
         if features.get("mcp"):
             conn.logger.bind(tag=TAG).info("客户端支持MCP")
