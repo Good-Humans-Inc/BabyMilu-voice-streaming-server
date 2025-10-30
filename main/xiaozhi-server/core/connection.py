@@ -98,6 +98,11 @@ class ConnectionHandler:
         self.client_is_speaking = False
         self.client_listen_mode = "auto"
 
+        # Mode state (e.g., "morning_alarm")
+        self.mode = None
+        self.mode_specific_instructions = ""
+        self.server_initiate_chat = False
+
         # 线程任务相关
         self.loop = asyncio.get_event_loop()
         self.stop_event = threading.Event()
@@ -607,6 +612,10 @@ class ConnectionHandler:
             self._init_report_threads()
             """更新系统提示词"""
             self._init_prompt_enhancement()
+            
+            """触发服务端主动问候（如果配置了，且没有其他对话进行中）"""
+            if self.server_initiate_chat and self.llm_finish_task:
+                self.chat("")
 
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"实例化组件失败: {e}")
@@ -943,19 +952,33 @@ class ConnectionHandler:
                 # 仅传入最新用户消息；系统prompt/instructions由会话持久化
                 current_input = [{"role": "user", "content": query}]
 
+            # 构建instructions：合并memory和可选的mode-specific instructions
+            instructions = ""
+            if self.mode: # e.g. "morning_alarm"
+                instructions += self.mode_specific_instructions
+                # one-shot: 使用后即清空，避免后续轮次再次注入
+                self.mode_specific_instructions = ""
+            
+            if memory_str:
+                instructions += f"\n\n<memory>\n{memory_str}\n</memory>"
+
+            kwargs = {}
+            if instructions:
+                kwargs["instructions"] = instructions
+
             if self.intent_type == "function_call" and functions is not None:
                 # 使用支持functions的streaming接口
                 llm_responses = self.llm.response_with_functions(
                     self.session_id,
                     current_input,
                     functions=functions,
-                    memory=memory_str,
+                    **kwargs
                 )
             else:
                 llm_responses = self.llm.response(
                     self.session_id,
                     current_input,
-                    memory=memory_str,
+                    **kwargs
                 )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM 处理出错 {query}: {e}")

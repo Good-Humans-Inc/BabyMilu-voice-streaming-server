@@ -30,6 +30,7 @@ _wakeup_response_lock = asyncio.Lock()
 
 async def handleHelloMessage(conn, msg_json):
     """处理hello消息"""
+    conn.logger.bind(tag=TAG).info(f"👋 Received hello message: {msg_json}")
     audio_params = msg_json.get("audio_params")
     if audio_params:
         format = audio_params.get("format")
@@ -38,8 +39,14 @@ async def handleHelloMessage(conn, msg_json):
         conn.welcome_msg["audio_params"] = audio_params
     features = msg_json.get("features")
     if features:
-        conn.logger.bind(tag=TAG).info(f"客户端特性: {features}")
+        conn.logger.bind(tag=TAG).info(f"客户端特性features: {features}")
         conn.features = features
+        # Mode功能（如morning_alarm闹钟）
+        if features.get("mode"):
+            conn.mode = features.get("mode").lower()
+            mode_config = conn.config.get("mode_config", {}).get(conn.mode, {})
+            conn.mode_specific_instructions = mode_config.get("instructions", "")
+            conn.server_initiate_chat = mode_config.get("server_initiate_chat", False)
         if features.get("mcp"):
             conn.logger.bind(tag=TAG).info("客户端支持MCP")
             conn.mcp_client = MCPClient()
