@@ -21,6 +21,8 @@ async def handleAudioMessage(conn, audio):
         if not hasattr(conn, "vad_resume_task") or conn.vad_resume_task.done():
             conn.vad_resume_task = asyncio.create_task(resume_vad_detection(conn))
         return
+
+    conn.logger.bind(tag=TAG).debug(f"Interrupt check: have_voice={have_voice}, client_is_speaking={conn.client_is_speaking}")
     if have_voice:
         if conn.client_is_speaking:
             await handleAbortMessage(conn)

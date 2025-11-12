@@ -64,18 +64,31 @@ class TTSProvider(TTSProviderBase):
 
         if self.method.upper() == "POST":
             resp = requests.post(
-                final_url, json=request_params, headers=self.headers, timeout=15
+                final_url, json=request_params, headers=self.headers, timeout=15, stream=True
             )
         else:
             resp = requests.get(
-                final_url, params=request_params, headers=self.headers, timeout=15
+                final_url, params=request_params, headers=self.headers, timeout=15, stream=True
             )
         if resp.status_code == 200:
+            logger.bind(tag=TAG).debug("Starting to stream TTS audio.")
             if output_file:
                 with open(output_file, "wb") as file:
-                    file.write(resp.content)
+                    for chunk in resp.iter_content(chunk_size=4096):
+                        if self.conn and self.conn.client_abort:
+                            logger.bind(tag=TAG).info("TTS interrupted by client")
+                            resp.close()
+                            return
+                        file.write(chunk)
             else:
-                return resp.content
+                audio_data = bytearray()
+                for chunk in resp.iter_content(chunk_size=4096):
+                    if self.conn and self.conn.client_abort:
+                        logger.bind(tag=TAG).info("TTS interrupted by client")
+                        resp.close()
+                        return None
+                    audio_data.extend(chunk)
+                return bytes(audio_data)
         else:
             error_msg = f"Custom TTS请求失败: {resp.status_code} - {resp.text}"
             logger.bind(tag=TAG).error(error_msg)

@@ -1,417 +1,94 @@
 import os
 import json
-import time
-import queue
-import asyncio
-import aiohttp
-import traceback
+import uuid
+import requests
 from config.logger import setup_logging
-from core.utils.tts import MarkdownCleaner
+from datetime import datetime
 from core.providers.tts.base import TTSProviderBase
-from core.utils import opus_encoder_utils
-from core.providers.tts.dto.dto import SentenceType, ContentType
 
 TAG = __name__
 logger = setup_logging()
 
-
 class TTSProvider(TTSProviderBase):
     def __init__(self, config, delete_audio_file):
         super().__init__(config, delete_audio_file)
+        self.url = config.get("url")
+        self.method = config.get("method", "GET")
+        self.headers = config.get("headers", {})
+        self.format = config.get("format", "wav")
+        self.audio_file_type = config.get("format", "wav")
+        self.output_file = config.get("output_dir", "tmp/")
+        self.params = config.get("params")
+        # Default voice fallback (used if connection doesn't provide one)
+        self.default_voice_id = config.get("default_voice_id") or config.get("voice_id")
 
-        # Required
-        self.api_key = config.get("api_key")
-        self.voice_id = config.get("voice_id")
-
-        # Optional tuning
-        self.model_id = config.get("model_id", "eleven_multilingual_v2")
-        # 0..4 (4 = lowest latency, potentially more artifacts)
-        self.optimize_streaming_latency = int(str(config.get("optimize_streaming_latency", 3)))
-        # Use raw PCM so we can encode to Opus immediately
-        self.output_format = config.get("output_format", "pcm_16000")
-
-        # PCM format expectations when using pcm_16000
-        self.sample_rate = 16000
-        self.channels = 1
-        self.audio_file_type = "pcm"
-
-        # Optional per-voice settings passthrough
-        self.voice_settings = config.get("voice_settings", {})
-
-        # HTTP streaming endpoint
-        # Ref: POST /v1/text-to-speech/{voice_id}/stream
-        self.api_url = config.get(
-            "api_url",
-            f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}/stream",
-        )
-
-        # Opus encoder: encode 60ms frames for our transport
-        self.opus_encoder = opus_encoder_utils.OpusEncoderUtils(
-            sample_rate=self.sample_rate, channels=self.channels, frame_size_ms=60
-        )
-
-        # PCM buffer for chunking into opus frames
-        self.pcm_buffer = bytearray()
-
-    def tts_text_priority_thread(self):
-        """Streaming text processing loop (single-sentence chunks)."""
-        while not self.conn.stop_event.is_set():
+        if isinstance(self.params, str):
             try:
-                message = self.tts_text_queue.get(timeout=1)
-                if message.sentence_type == SentenceType.FIRST:
-                    # Reset state for a new turn
-                    self.tts_stop_request = False
-                    self.processed_chars = 0
-                    self.tts_text_buff = []
-                    self.before_stop_play_files.clear()
+                self.params = json.loads(self.params)
+            except json.JSONDecodeError:
+                raise ValueError("Custom TTS配置参数出错,无法将字符串解析为对象")
+        elif not isinstance(self.params, dict):
+            raise TypeError("Custom TTS配置参数出错, 请参考配置说明")
 
-                if message.content_type == ContentType.TEXT and message.content_detail:
-                    self.tts_text_buff.append(message.content_detail)
-                    segment_text = self._get_segment_text()
-                    if segment_text:
-                        self.to_tts_single_stream(segment_text, is_last=False)
+    def generate_filename(self):
+        return os.path.join(self.output_file, f"tts-{datetime.now().date()}@{uuid.uuid4().hex}.{self.format}")
 
-                elif message.content_type == ContentType.FILE:
-                    if message.content_file and os.path.exists(message.content_file):
-                        self._process_audio_file_stream(
-                            message.content_file,
-                            callback=lambda audio_data: self.handle_audio_file(
-                                audio_data, message.content_detail
-                            ),
-                        )
+    async def text_to_speak(self, text, output_file):
+        request_params = {}
+        for k, v in self.params.items():
+            if isinstance(v, str) and "{prompt_text}" in v:
+                v = v.replace("{prompt_text}", text)
+            request_params[k] = v
 
-                if message.sentence_type == SentenceType.LAST:
-                    # Flush remaining text
-                    self._process_remaining_text_stream()
+        # Resolve voice_id: prefer connection value, then default from config
+        voice_id = None
+        if self.conn and getattr(self.conn, "voice_id", None):
+            voice_id = self.conn.voice_id
+        elif getattr(self, "default_voice_id", None):
+            voice_id = str(self.default_voice_id)
 
-            except queue.Empty:
-                continue
-            except Exception as e:
-                logger.bind(tag=TAG).error(
-                    f"处理TTS文本失败: {str(e)}, 类型: {type(e).__name__}, 堆栈: {traceback.format_exc()}"
-                )
+        # Build final URL from base + voice_id; abort if voice_id missing
+        if not voice_id:
+            logger.bind(tag=TAG).error("No voice_id resolved (conn/default). Abort TTS request")
+            raise Exception("No voice_id resolved; cannot call TTS")
 
-    def _process_remaining_text_stream(self):
-        full_text = "".join(self.tts_text_buff)
-        remaining_text = full_text[self.processed_chars :]
-        if remaining_text:
-            segment_text = MarkdownCleaner.clean_markdown(remaining_text)
-            if segment_text:
-                self.to_tts_single_stream(segment_text, is_last=True)
-                self.processed_chars += len(full_text)
-        else:
-            self._process_before_stop_play_files()
+        final_url = f"{self.url.rstrip('/')}/{voice_id}"
 
-    def to_tts_single_stream(self, text, is_last=False):
-        """Stream a single sentence via HTTP chunked streaming and pipe to Opus."""
-        text = MarkdownCleaner.clean_markdown(text)
-        max_repeat_time = 5
-        try:
-            asyncio.run(self.text_to_speak(text, is_last))
-        except Exception as e:
-            logger.bind(tag=TAG).warning(
-                f"语音生成失败{5 - max_repeat_time + 1}次: {text}，错误: {e}"
-            )
-            max_repeat_time -= 1
-        finally:
-            return None
-
-    async def text_to_speak(self, text, is_last):
-        """HTTP streaming to ElevenLabs stream endpoint, output raw PCM chunks."""
-        headers = {
-            "Content-Type": "application/json",
-            "xi-api-key": self.api_key,
-            # Request raw PCM if supported by server
-            "Accept": "application/octet-stream",
-        }
-        payload = {
-            "text": text,
-            "model_id": self.model_id,
-            "optimize_streaming_latency": self.optimize_streaming_latency,
-            "output_format": self.output_format,  # expect pcm_16000
-        }
-        if isinstance(self.voice_settings, dict) and len(self.voice_settings) > 0:
-            payload["voice_settings"] = self.voice_settings
-
-        # Frame size in bytes (16-bit PCM)
-        frame_bytes = int(
-            self.opus_encoder.sample_rate
-            * self.opus_encoder.channels
-            * self.opus_encoder.frame_size_ms
-            / 1000
-            * 2
+        safe_headers = dict(self.headers or {})
+        for _k in list(safe_headers.keys()):
+            if _k.lower() in ("xi-api-key", "authorization"):
+                safe_headers[_k] = "***"
+        logger.debug(
+            f"CustomTTS request: URL={final_url}, JSON={request_params}, HEADERS={safe_headers}"
         )
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.api_url,
-                    headers=headers,
-                    data=json.dumps(payload),
-                    timeout=15,
-                ) as resp:
-                    if resp.status != 200:
-                        try:
-                            err_text = await resp.text()
-                        except Exception:
-                            err_text = f"status={resp.status}"
-                        logger.bind(tag=TAG).error(f"TTS请求失败: {err_text}")
-                        self.tts_audio_queue.put((SentenceType.LAST, [], None))
-                        return
-
-                    content_type = resp.headers.get("Content-Type", "").lower()
-                    logger.bind(tag=TAG).info(f"ElevenLabs Content-Type: {content_type}")
-
-                    # Modes
-                    wav_mode = False
-                    wav_header = bytearray()
-                    wav_data_started = False
-                    mp3_mode = content_type.startswith("audio/mpeg")
-
-                    # If MP3, start ffmpeg to transcode to s16le 16k mono
-                    ffmpeg_proc = None
-                    pump_task = None
-                    if mp3_mode:
-                        try:
-                            ffmpeg_proc = await asyncio.create_subprocess_exec(
-                                "ffmpeg",
-                                "-hide_banner",
-                                "-loglevel",
-                                "error",
-                                "-f",
-                                "mp3",
-                                "-i",
-                                "pipe:0",
-                                "-ac",
-                                "1",
-                                "-ar",
-                                str(self.sample_rate),
-                                "-f",
-                                "s16le",
-                                "pipe:1",
-                                stdin=asyncio.subprocess.PIPE,
-                                stdout=asyncio.subprocess.PIPE,
-                                stderr=asyncio.subprocess.PIPE,
-                            )
-                        except Exception as e:
-                            logger.bind(tag=TAG).error(f"启动ffmpeg失败: {e}")
-                            self.tts_audio_queue.put((SentenceType.LAST, [], None))
+        if self.method.upper() == "POST":
+            resp = requests.post(
+                final_url, json=request_params, headers=self.headers, timeout=15, stream=True
+            )
+        else:
+            resp = requests.get(
+                final_url, params=request_params, headers=self.headers, timeout=15, stream=True
+            )
+        if resp.status_code == 200:
+            if output_file:
+                with open(output_file, "wb") as file:
+                    for chunk in resp.iter_content(chunk_size=4096):
+                        if self.conn and self.conn.client_abort:
+                            logger.bind(tag=TAG).info("TTS interrupted by client")
+                            resp.close()
                             return
-
-                        async def pump_stdout():
-                            try:
-                                while True:
-                                    data = await ffmpeg_proc.stdout.read(4096)
-                                    if not data:
-                                        break
-                                    self.pcm_buffer.extend(data)
-                                    while len(self.pcm_buffer) >= frame_bytes:
-                                        frame = bytes(self.pcm_buffer[:frame_bytes])
-                                        del self.pcm_buffer[:frame_bytes]
-                                        self.opus_encoder.encode_pcm_to_opus_stream(
-                                            frame, end_of_stream=False, callback=self.handle_opus
-                                        )
-                            except Exception as e:
-                                logger.bind(tag=TAG).error(f"读取ffmpeg输出失败: {e}")
-
-                        pump_task = asyncio.create_task(pump_stdout())
-
-                    # First-sentence signal for clients
-                    self.pcm_buffer.clear()
-                    self.tts_audio_queue.put((SentenceType.FIRST, [], text))
-
-                    async for chunk in resp.content.iter_any():
-                        if not chunk:
-                            continue
-
-                        # Fallback probe if content-type not reliable
-                        if not mp3_mode and not wav_mode and not wav_data_started and len(self.pcm_buffer) == 0:
-                            head = chunk[:4]
-                            if head.startswith(b"ID3") or (len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0):
-                                mp3_mode = True
-                                try:
-                                    ffmpeg_proc = await asyncio.create_subprocess_exec(
-                                        "ffmpeg",
-                                        "-hide_banner",
-                                        "-loglevel",
-                                        "error",
-                                        "-f",
-                                        "mp3",
-                                        "-i",
-                                        "pipe:0",
-                                        "-ac",
-                                        "1",
-                                        "-ar",
-                                        str(self.sample_rate),
-                                        "-f",
-                                        "s16le",
-                                        "pipe:1",
-                                        stdin=asyncio.subprocess.PIPE,
-                                        stdout=asyncio.subprocess.PIPE,
-                                        stderr=asyncio.subprocess.PIPE,
-                                    )
-                                except Exception as e:
-                                    logger.bind(tag=TAG).error(f"启动ffmpeg失败: {e}")
-                                    self.tts_audio_queue.put((SentenceType.LAST, [], None))
-                                    return
-
-                                async def pump_stdout2():
-                                    try:
-                                        while True:
-                                            data = await ffmpeg_proc.stdout.read(4096)
-                                            if not data:
-                                                break
-                                            self.pcm_buffer.extend(data)
-                                            while len(self.pcm_buffer) >= frame_bytes:
-                                                frame = bytes(self.pcm_buffer[:frame_bytes])
-                                                del self.pcm_buffer[:frame_bytes]
-                                                self.opus_encoder.encode_pcm_to_opus_stream(
-                                                    frame, end_of_stream=False, callback=self.handle_opus
-                                                )
-                                    except Exception as e:
-                                        logger.bind(tag=TAG).error(f"读取ffmpeg输出失败: {e}")
-
-                                pump_task = asyncio.create_task(pump_stdout2())
-
-                            if head.startswith(b"RIFF"):
-                                wav_mode = True
-
-                        if mp3_mode:
-                            try:
-                                ffmpeg_proc.stdin.write(chunk)
-                                await ffmpeg_proc.stdin.drain()
-                            except Exception as e:
-                                logger.bind(tag=TAG).error(f"写入ffmpeg失败: {e}")
-                                break
-                            # PCM will be drained by pump task
-                        elif wav_mode and not wav_data_started:
-                            wav_header.extend(chunk)
-                            if len(wav_header) >= 12 and wav_header[8:12] == b"WAVE":
-                                pos = 0
-                                while True:
-                                    idx = wav_header.find(b"data", pos)
-                                    if idx == -1:
-                                        break
-                                    if idx + 8 <= len(wav_header):
-                                        data_start = idx + 8
-                                        if data_start <= len(wav_header):
-                                            pcm_part = wav_header[data_start:]
-                                            if pcm_part:
-                                                self.pcm_buffer.extend(pcm_part)
-                                            wav_data_started = True
-                                            wav_header = bytearray()
-                                            break
-                                    pos = idx + 4
-                            if not wav_data_started:
-                                continue
-                        else:
-                            # Raw PCM
-                            self.pcm_buffer.extend(chunk)
-
-                        # Drain PCM buffer into Opus frames
-                        while len(self.pcm_buffer) >= frame_bytes:
-                            frame = bytes(self.pcm_buffer[:frame_bytes])
-                            del self.pcm_buffer[:frame_bytes]
-                            self.opus_encoder.encode_pcm_to_opus_stream(
-                                frame, end_of_stream=False, callback=self.handle_opus
-                            )
-
-                    # finalize transcoding and flush remainder
-                    if mp3_mode and ffmpeg_proc:
-                        try:
-                            if ffmpeg_proc.stdin and not ffmpeg_proc.stdin.at_eof():
-                                ffmpeg_proc.stdin.write_eof()
-                        except Exception:
-                            pass
-                        if pump_task:
-                            try:
-                                await pump_task
-                            except Exception:
-                                pass
-                        try:
-                            await ffmpeg_proc.wait()
-                        except Exception:
-                            pass
-
-                    if self.pcm_buffer:
-                        self.opus_encoder.encode_pcm_to_opus_stream(
-                            bytes(self.pcm_buffer),
-                            end_of_stream=True,
-                            callback=self.handle_opus,
-                        )
-                        self.pcm_buffer.clear()
-
-                    if is_last:
-                        self._process_before_stop_play_files()
-
-        except Exception as e:
-            logger.bind(tag=TAG).error(f"TTS请求异常: {e}")
-            self.tts_audio_queue.put((SentenceType.LAST, [], None))
-
-    async def close(self):
-        await super().close()
-        if hasattr(self, "opus_encoder"):
-            self.opus_encoder.close()
-
-    def to_tts(self, text: str) -> list:
-        """Sync helper for tests: request non-stream and return Opus packets."""
-        # For simplicity, defer to streaming path and accumulate.
-        try:
-            opus_list = []
-
-            def _collect(opus_bytes: bytes):
-                opus_list.append(opus_bytes)
-
-            # Create a temp event loop to run streaming call
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-            async def _run():
-                headers = {
-                    "Content-Type": "application/json",
-                    "xi-api-key": self.api_key,
-                    "Accept": "application/octet-stream",
-                }
-                payload = {
-                    "text": MarkdownCleaner.clean_markdown(text),
-                    "model_id": self.model_id,
-                    "optimize_streaming_latency": self.optimize_streaming_latency,
-                    "output_format": self.output_format,
-                }
-                frame_bytes_local = int(
-                    self.opus_encoder.sample_rate
-                    * self.opus_encoder.channels
-                    * self.opus_encoder.frame_size_ms
-                    / 1000
-                    * 2
-                )
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        self.api_url, headers=headers, data=json.dumps(payload), timeout=15
-                    ) as resp:
-                        if resp.status != 200:
-                            return []
-                        pcm_buf = bytearray()
-                        async for chunk in resp.content.iter_any():
-                            if not chunk:
-                                continue
-                            pcm_buf.extend(chunk)
-                            while len(pcm_buf) >= frame_bytes_local:
-                                frame = bytes(pcm_buf[:frame_bytes_local])
-                                del pcm_buf[:frame_bytes_local]
-                                self.opus_encoder.encode_pcm_to_opus_stream(
-                                    frame, end_of_stream=False, callback=_collect
-                                )
-                        if pcm_buf:
-                            self.opus_encoder.encode_pcm_to_opus_stream(
-                                bytes(pcm_buf), end_of_stream=True, callback=_collect
-                            )
-                return opus_list
-
-            result = loop.run_until_complete(_run())
-            loop.close()
-            return result or []
-        except Exception:
-            return []
-
-
+                        file.write(chunk)
+            else:
+                audio_data = bytearray()
+                for chunk in resp.iter_content(chunk_size=4096):
+                    if self.conn and self.conn.client_abort:
+                        logger.bind(tag=TAG).info("TTS interrupted by client")
+                        resp.close()
+                        return None
+                    audio_data.extend(chunk)
+                return bytes(audio_data)
+        else:
+            error_msg = f"Custom TTS请求失败: {resp.status_code} - {resp.text}"
+            logger.bind(tag=TAG).error(error_msg)
+            raise Exception(error_msg)  # 抛出异常，让调用方捕获

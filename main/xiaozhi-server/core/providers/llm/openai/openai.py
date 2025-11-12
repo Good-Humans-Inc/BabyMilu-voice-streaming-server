@@ -71,6 +71,14 @@ class LLMProvider(LLMProviderBase):
         state = self._conversations.get(session_id)
         return bool(state and state.get("id"))
 
+    def adopt_conversation_id_for_session(self, session_id, conversation_id):
+        """Adopt an externally provided conversation ID (e.g., from Firestore) for this session."""
+        if conversation_id:
+            self._conversations[session_id] = {"id": conversation_id}
+            logger.bind(tag=TAG).info(
+                f"Adopted conversation {conversation_id} for session {session_id}"
+            )
+
     def ensure_conversation_with_system(self, session_id, system_text: str):
         """Create conversation and seed a system message as the first item."""
         state = self._conversations.get(session_id)

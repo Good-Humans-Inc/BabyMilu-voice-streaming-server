@@ -1043,6 +1043,7 @@ class ConnectionHandler:
         emotion_flag = True
         for response in llm_responses:
             if self.client_abort:
+                self.logger.bind(tag=TAG).info("LLM response generation interrupted by client.")
                 break
             if self.intent_type == "function_call" and functions is not None:
                 content, tools_call = response
