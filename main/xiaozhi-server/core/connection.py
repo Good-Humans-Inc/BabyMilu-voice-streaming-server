@@ -49,7 +49,7 @@ from core.utils.firestore_client import (
     extract_user_profile_fields,
     get_conversation_id_for_device,
     set_conversation_id_for_device,
-    get_most_recent_character_via_user_for_device,
+    get_most_recent_character_via_user_for_device, 
 )
 
 TAG = __name__
