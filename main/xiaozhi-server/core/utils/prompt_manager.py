@@ -8,6 +8,7 @@ import cnlunar
 from typing import Dict, Any
 from config.logger import setup_logging
 from jinja2 import Template
+from core.utils.firestore_client import get_timezone_for_device, get_owner_phone_for_device, get_user_profile_by_phone, extract_user_profile_fields
 
 TAG = __name__
 
@@ -115,15 +116,15 @@ class PromptManager:
         self.logger.bind(tag=TAG).info(f"使用快速提示词: {user_prompt[:50]}...")
         return user_prompt
 
-    def _get_current_time_info(self) -> tuple:
+    def _get_current_time_info(self, timezone: str = None) -> tuple:
         """获取当前时间信息"""
-        from .current_time import get_current_date, get_current_weekday, get_current_lunar_date
+        from .current_time import get_current_time, get_current_date, get_current_weekday
         
-        today_date = get_current_date()
-        today_weekday = get_current_weekday()
-        lunar_date = get_current_lunar_date() + "\n"
+        today_date = get_current_date(timezone)
+        today_weekday = get_current_weekday(timezone)
+        current_time = get_current_time(timezone)
 
-        return today_date, today_weekday, lunar_date
+        return current_time, today_date, today_weekday
 
     def _get_location_info(self, client_ip: str) -> str:
         """获取位置信息"""
@@ -192,9 +193,8 @@ class PromptManager:
 
         try:
             # 获取最新的时间信息（不缓存）
-            today_date, today_weekday, lunar_date = (
-                self._get_current_time_info()
-            )
+            tz = get_timezone_for_device(device_id) if device_id else None
+            current_time, today_date, today_weekday = self._get_current_time_info(tz or None)
 
             # 获取缓存的上下文信息
             local_address = ""
@@ -215,15 +215,28 @@ class PromptManager:
 
             # 替换模板变量
             template = Template(self.base_prompt_template)
+            # 读取用户名称用于 {{user}}
+            user_name = ""
+            try:
+                if device_id:
+                    owner_phone = get_owner_phone_for_device(device_id)
+                    if owner_phone:
+                        user_doc = get_user_profile_by_phone(owner_phone)
+                        if user_doc:
+                            user_fields = extract_user_profile_fields(user_doc)
+                            user_name = user_fields.get("name") or ""
+            except Exception:
+                user_name = ""
             enhanced_prompt = template.render(
                 base_prompt=user_prompt,
-                current_time="{{current_time}}",
+                current_time=current_time,
                 today_date=today_date,
                 today_weekday=today_weekday,
                 local_address=local_address,
                 weather_info=weather_info,
                 emojiList=EMOJI_List,
                 device_id=device_id,
+                user=user_name,
             )
             device_cache_key = f"device_prompt:{device_id}"
             self.cache_manager.set(

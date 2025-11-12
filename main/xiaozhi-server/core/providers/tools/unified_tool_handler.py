@@ -162,7 +162,7 @@ class UnifiedToolHandler:
                     self.logger.error(f"无法解析函数参数: {arguments}")
                     return ActionResponse(
                         action=Action.ERROR,
-                        response="无法解析函数参数",
+                        response="Unable to parse function parameters",
                     )
 
             self.logger.debug(f"调用函数: {function_name}, 参数: {arguments}")
@@ -178,7 +178,7 @@ class UnifiedToolHandler:
     def _combine_responses(self, responses: List[ActionResponse]) -> ActionResponse:
         """合并多个函数调用的响应"""
         if not responses:
-            return ActionResponse(action=Action.NONE, response="无响应")
+            return ActionResponse(action=Action.NONE, response="No response")
 
         # 如果有任何错误，返回第一个错误
         for response in responses:

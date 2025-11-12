@@ -102,6 +102,8 @@ class ConnectionHandler:
         self.mode = None
         self.mode_specific_instructions = ""
         self.server_initiate_chat = False
+        self.alarm_followup_task = None
+        self.alarm_followup_count = 0
 
         # 线程任务相关
         self.loop = asyncio.get_event_loop()
@@ -145,6 +147,9 @@ class ConnectionHandler:
         # llm相关变量
         self.llm_finish_task = True
         self.dialogue = Dialogue()
+
+        # 组件初始化完成事件
+        self.components_initialized = asyncio.Event()
 
         # tts相关变量
         self.sentence_id = None
@@ -568,6 +573,7 @@ class ConnectionHandler:
             )
 
     def _initialize_components(self):
+        import traceback
         try:
             self.selected_module_str = build_module_string(
                 self.config.get("selected_module", {})
@@ -612,13 +618,15 @@ class ConnectionHandler:
             self._init_report_threads()
             """更新系统提示词"""
             self._init_prompt_enhancement()
-            
-            """触发服务端主动问候（如果配置了，且没有其他对话进行中）"""
-            if self.server_initiate_chat and self.llm_finish_task:
-                self.chat("")
+
+            self.logger.bind(tag=TAG).info("所有组件初始化完成")
 
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"实例化组件失败: {e}")
+            self.logger.bind(tag=TAG).error(f"Traceback:\n{traceback.format_exc()}")
+        finally:
+            # Always signal completion, even if there was an error
+            self.loop.call_soon_threadsafe(self.components_initialized.set)
 
     def _init_prompt_enhancement(self):
         # 更新上下文信息
@@ -904,9 +912,41 @@ class ConnectionHandler:
         self.dialogue.update_system_message(self.prompt)
         self.logger.bind(tag=TAG).info(f"Ran change_system_prompt (new prompt length {len(prompt)}） with prompt:\n\n{prompt}\n")
 
+    def _schedule_alarm_followup(self):
+        """Schedule a follow-up chat after delay if no user response"""
+        # Cancel any existing follow-up task
+        if self.alarm_followup_task and not self.alarm_followup_task.done():
+            self.alarm_followup_task.cancel()
+        
+        # Schedule new follow-up
+        delay = getattr(self, "alarm_followup_delay", 10)
+        self.alarm_followup_task = asyncio.run_coroutine_threadsafe(
+            self._alarm_followup_trigger(delay), self.loop
+        )
+        self.logger.bind(tag=TAG).info(f"Scheduled alarm follow-up #{self.alarm_followup_count + 1} in {delay}s")
+    
+    async def _alarm_followup_trigger(self, delay):
+        """Wait and trigger follow-up if not cancelled"""
+        try:
+            await asyncio.sleep(delay)
+            # Only trigger if LLM is still idle
+            if self.llm_finish_task:
+                self.alarm_followup_count += 1
+                self.logger.bind(tag=TAG).info(f"Triggering alarm follow-up #{self.alarm_followup_count}")
+                # Include context in the query to ensure it's seen even with conversation persistence
+                followup_query = f"[No response from user - alarm follow-up #{self.alarm_followup_count}]"
+                self.executor.submit(self.chat, followup_query)
+        except asyncio.CancelledError:
+            self.logger.bind(tag=TAG).info("Alarm follow-up cancelled (user responded)")
+
     def chat(self, query, depth=0):
         self.logger.bind(tag=TAG).info(f"大模型收到用户消息: {query}")
         self.llm_finish_task = False
+        
+        # Cancel alarm follow-up if user provides input
+        if query and self.alarm_followup_task and not self.alarm_followup_task.done():
+            self.alarm_followup_task.cancel()
+            self.logger.bind(tag=TAG).info("User responded - cancelling alarm follow-up")
 
         # 为最顶层时新建会话ID和发送FIRST请求
         if depth == 0:
@@ -930,10 +970,13 @@ class ConnectionHandler:
             # 使用带记忆的对话
             memory_str = None
             if self.memory is not None:
-                future = asyncio.run_coroutine_threadsafe(
-                    self.memory.query_memory(query), self.loop
-                )
-                memory_str = future.result()
+                try:
+                    future = asyncio.run_coroutine_threadsafe(
+                        self.memory.query_memory(query), self.loop
+                    )
+                    memory_str = future.result(timeout=5.0)  # 5 second timeout
+                except Exception as e:
+                    self.logger.bind(tag=TAG).warning(f"记忆查询失败或超时: {e}")
 
             # 根据是否有持久会话决定是否传递全历史
             use_full_history = True
@@ -954,10 +997,11 @@ class ConnectionHandler:
 
             # 构建instructions：合并memory和可选的mode-specific instructions
             instructions = ""
-            if self.mode: # e.g. "morning_alarm"
+            if self.mode_specific_instructions:
                 instructions += self.mode_specific_instructions
-                # one-shot: 使用后即清空，避免后续轮次再次注入
-                self.mode_specific_instructions = ""
+                # Clear after use UNLESS alarm follow-ups are active (need persistent context)
+                if not getattr(self, "alarm_followup_enabled", False):
+                    self.mode_specific_instructions = ""
             
             if memory_str:
                 instructions += f"\n\n<memory>\n{memory_str}\n</memory>"
@@ -965,6 +1009,7 @@ class ConnectionHandler:
             kwargs = {}
             if instructions:
                 kwargs["instructions"] = instructions
+                self.logger.bind(tag=TAG).debug(f"Passing instructions to LLM (length: {len(instructions)})")
 
             if self.intent_type == "function_call" and functions is not None:
                 # 使用支持functions的streaming接口
@@ -982,6 +1027,8 @@ class ConnectionHandler:
                 )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM 处理出错 {query}: {e}")
+            import traceback
+            self.logger.bind(tag=TAG).error(f"Traceback:\n{traceback.format_exc()}")
             return None
 
         # 处理流式响应
@@ -1099,6 +1146,11 @@ class ConnectionHandler:
                 )
             )
         self.llm_finish_task = True
+        
+        # Schedule alarm follow-up if enabled
+        if getattr(self, "alarm_followup_enabled", False) and self.alarm_followup_count < getattr(self, "alarm_followup_max", 5):
+            self._schedule_alarm_followup()
+        
         # 使用lambda延迟计算，只有在DEBUG级别时才执行get_llm_dialogue()
         self.logger.bind(tag=TAG).debug(
             lambda: json.dumps(

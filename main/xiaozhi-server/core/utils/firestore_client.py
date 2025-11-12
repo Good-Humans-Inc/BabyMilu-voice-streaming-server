@@ -123,7 +123,7 @@ def get_user_profile_by_phone(owner_phone: str, timeout: float = 3.0) -> Optiona
 
 
 def extract_user_profile_fields(user_doc: Dict[str, Any]) -> Dict[str, Optional[str]]:
-    wanted = ("name", "birthday", "pronouns", "phoneNumber")
+    wanted = ("name", "birthday", "pronouns", "phoneNumber", "timezone")
     result: Dict[str, Optional[str]] = {k: None for k in wanted}
     if not user_doc:
         return result
@@ -133,6 +133,25 @@ def extract_user_profile_fields(user_doc: Dict[str, Any]) -> Dict[str, Optional[
         result[k] = str(v) if v is not None else None
     return result
 
+
+def get_timezone_for_device(device_id: str, timeout: float = 3.0) -> Optional[str]:
+    """
+    Resolve the user's timezone string (e.g., \"America/Los_Angeles\") for a given device.
+    Looks up devices/{device_id} → ownerPhone → users/{ownerPhone}.timezone
+    """
+    try:
+        owner_phone = get_owner_phone_for_device(device_id, timeout=timeout)
+        if not owner_phone:
+            return None
+        user_doc = get_user_profile_by_phone(owner_phone, timeout=timeout)
+        if not user_doc:
+            return None
+        tz = user_doc.get("timezone")
+        if isinstance(tz, str) and tz.strip():
+            return tz.strip()
+        return None
+    except Exception:
+        return None
 
 
 def get_conversation_id_for_device(device_id: str, timeout: float = 3.0) -> Optional[str]:
