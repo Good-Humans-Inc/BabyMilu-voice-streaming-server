@@ -32,8 +32,8 @@ from core.providers.asr.dto.dto import InterfaceType
 from core.handle.textHandle import handleTextMessage
 from core.providers.tools.unified_tool_handler import UnifiedToolHandler
 from plugins_func.loadplugins import auto_import_modules
-from plugins_func.register import Action, ActionResponse
-from core.auth import AuthMiddleware, AuthenticationError
+from plugins_func.register import Action
+from core.auth import AuthenticationError
 from config.config_loader import get_private_config_from_api
 from core.providers.tts.dto.dto import ContentType, TTSMessageDTO, SentenceType
 from config.logger import setup_logging, build_module_string, create_connection_logger
@@ -41,17 +41,6 @@ from config.manage_api_client import DeviceNotFoundException, DeviceBindExceptio
 from core.utils.prompt_manager import PromptManager
 from core.utils.voiceprint_provider import VoiceprintProvider
 from core.utils import textUtils
-from core.utils.firestore_client import (
-    get_active_character_for_device,
-    get_character_profile,
-    extract_character_profile_fields,
-    get_owner_phone_for_device,
-    get_user_profile_by_phone,
-    extract_user_profile_fields,
-    get_conversation_id_for_device,
-    set_conversation_id_for_device,
-    get_most_recent_character_via_user_for_device,
-)
 
 TAG = __name__
 
@@ -79,7 +68,6 @@ class ConnectionHandler:
         self.logger = setup_logging()
         self.server = server  # 保存server实例的引用
 
-        self.auth = AuthMiddleware(config)
         self.need_bind = False
         self.bind_code = None
         self.read_config_from_api = self.config.get("read_config_from_api", False)
@@ -98,13 +86,6 @@ class ConnectionHandler:
         self.client_abort = False
         self.client_is_speaking = False
         self.client_listen_mode = "auto"
-
-        # Mode state (e.g., "morning_alarm")
-        self.mode = None
-        self.mode_specific_instructions = ""
-        self.server_initiate_chat = False
-        self.alarm_followup_task = None
-        self.alarm_followup_count = 0
 
         # 线程任务相关
         self.loop = asyncio.get_event_loop()
@@ -149,12 +130,8 @@ class ConnectionHandler:
         self.llm_finish_task = True
         self.dialogue = Dialogue()
 
-        # 组件初始化完成事件
-        self.components_initialized = asyncio.Event()
-
         # tts相关变量
         self.sentence_id = None
-        self.voice_id = None
         # 处理TTS响应没有文本返回
         self.tts_MessageText = ""
 
@@ -182,32 +159,11 @@ class ConnectionHandler:
 
         # 初始化提示词管理器
         self.prompt_manager = PromptManager(config, self.logger)
-        # 当新建会话时，首轮需要下发instructions
-        self._seed_instructions_once = False
 
     async def handle_connection(self, ws):
         try:
             # 获取并验证headers
             self.headers = dict(ws.request.headers)
-
-            if self.headers.get("device-id", None) is None:
-                # 尝试从 URL 的查询参数中获取 device-id
-                from urllib.parse import parse_qs, urlparse
-
-                # 从 WebSocket 请求中获取路径
-                request_path = ws.request.path
-                if not request_path:
-                    self.logger.bind(tag=TAG).error("无法获取请求路径")
-                    return
-                parsed_url = urlparse(request_path)
-                query_params = parse_qs(parsed_url.query)
-                if "device-id" in query_params:
-                    self.headers["device-id"] = query_params["device-id"][0]
-                    self.headers["client-id"] = query_params["client-id"][0]
-                else:
-                    await ws.send("端口正常，如需测试连接，请使用test_page.html")
-                    await self.close(ws)
-                    return
             real_ip = self.headers.get("x-real-ip") or self.headers.get(
                 "x-forwarded-for"
             )
@@ -219,14 +175,10 @@ class ConnectionHandler:
                 f"{self.client_ip} conn - Headers: {self.headers}"
             )
 
-            await self.auth.authenticate(self.headers)
+            self.device_id = self.headers.get("device-id", None)
 
             # 认证通过,继续处理
             self.websocket = ws
-            # Normalize device-id to uppercase to match Firestore doc IDs
-            raw_device_id = self.headers.get("device-id", None)
-            self.device_id = raw_device_id.upper() if isinstance(raw_device_id, str) else raw_device_id
-            self.logger.bind(tag=TAG).info(f"device_id: {self.device_id}")
 
             # 检查是否来自MQTT连接
             request_path = ws.request.path
@@ -237,92 +189,6 @@ class ConnectionHandler:
             # 初始化活动时间戳
             self.last_activity_time = time.time() * 1000
 
-            # 从云端获取角色配置（voice, bio 等），并应用到本次会话
-            try:
-                char_id = None
-                if self.device_id:
-                    char_id = get_active_character_for_device(self.device_id)
-                    if not char_id:
-                        fallback_id = get_most_recent_character_via_user_for_device(self.device_id)
-                        if fallback_id:
-                            self.logger.bind(tag=TAG, device_id=self.device_id).warning(
-                                f"activeCharacterId missing; falling back to most recent user character: {fallback_id}"
-                            )
-                            char_id = fallback_id
-                if char_id:
-                    self.logger.info(f"char_id={char_id!r}")
-                    char_doc = get_character_profile(char_id)
-                    self.logger.info(f"char_doc_keys={list((char_doc or {}).keys())}")
-                    fields = extract_character_profile_fields(char_doc or {})
-                    self.logger.info(f"resolved voice={fields.get('voice')}, bio_present={bool(fields.get('bio'))}")
-
-                    # 优先保留客户端传入的 voice-id；否则使用云端的
-                    if not self.voice_id and fields.get("voice"):
-                        self.voice_id = str(fields.get("voice"))
-
-                    # 组装角色提示并更新系统提示词
-                    profile_parts = []
-                    for label, key in (
-                        ("Your Name", "name"),
-                        ("Your Age", "age"),
-                        ("Your Pronouns", "pronouns"),
-                        ("Your Relationship with the user", "relationship"),
-                        ("You like calling the user", "callMe"),
-                    ):
-                        val = fields.get(key)
-                        if val:
-                            profile_parts.append(f"{label}: {val}")
-                    profile_line = "\n- ".join(profile_parts)
-                    bio_text = fields.get("bio")
-
-                    new_prompt = self.config.get("prompt", "")
-                    if profile_line:
-                        new_prompt = new_prompt + f"\n# About you:\n{profile_line}"
-                    if bio_text:
-                        new_prompt = new_prompt + f"\nUser's description of you: {bio_text}"
-
-                    # Append user profile from Firestore users/{ownerPhone}
-                    owner_phone = get_owner_phone_for_device(self.device_id)
-                    if owner_phone:
-                        user_doc = get_user_profile_by_phone(owner_phone)
-                        user_fields = extract_user_profile_fields(user_doc or {})
-                        user_parts = []
-                        for label, key in (("User's name", "name"), ("User's Birthday", "birthday"), ("User's Pronouns", "pronouns")):
-                            val = user_fields.get(key)
-                            if val:
-                                user_parts.append(f"{label}: {val}")
-                        if user_parts:
-                            user_profile = "\n- ".join(user_parts)
-                            new_prompt = new_prompt + f"\nUser profile:\n {user_profile}"
-                    if new_prompt != self.config.get("prompt", ""):
-                        self.config["prompt"] = new_prompt
-                        self.change_system_prompt(new_prompt)
-                        self.logger.bind(tag=TAG).info(f"Applied character profile from Firestore, prompt={self.config.get('prompt')}")
-                else:
-                    # Prominent error to surface missing character configuration
-                    self.logger.bind(tag=TAG, device_id=self.device_id).error(
-                        "🚨 MISSING activeCharacterId for device; using defaults 🚨"
-                    )
-                    # No character info – still ensure a default voice is applied if missing
-                    if not self.voice_id:
-                        default_voice = (
-                            self.config.get("TTS", {})
-                            .get("CustomTTS", {})
-                            .get("default_voice_id")
-                            or self.config.get("TTS", {}).get("CustomTTS", {}).get("voice_id")
-                        )
-                        if default_voice:
-                            self.logger.bind(tag=TAG).warning(
-                                "No character voice_id; using default voice from config"
-                            )
-                            self.voice_id = str(default_voice)
-                        else:
-                            self.logger.bind(tag=TAG).error(
-                                "No character voice_id and no default voice configured"
-                            )
-            except Exception as e:
-                self.logger.bind(tag=TAG).warning(f"Failed to fetch/apply character profile: {e}")
-
             # 启动超时检查任务
             self.timeout_task = asyncio.create_task(self._check_timeout())
 
@@ -331,55 +197,6 @@ class ConnectionHandler:
 
             # 获取差异化配置
             self._initialize_private_config()
-            # 同步构建首轮系统提示词（包含增强），用于会话首条system消息
-            try:
-                base_prompt = self.config.get("prompt")
-                if base_prompt is not None:
-                    quick = self.prompt_manager.get_quick_prompt(base_prompt)
-                    self.change_system_prompt(quick)
-                    # 根据当前连接信息构建增强prompt
-                    self.prompt_manager.update_context_info(self, self.client_ip)
-                    enhanced = self.prompt_manager.build_enhanced_prompt(
-                        self.config["prompt"], self.device_id, self.client_ip
-                    )
-                    if enhanced:
-                        self.change_system_prompt(enhanced)
-                        self.logger.bind(tag=TAG).info(
-                            f"同步构建增强系统提示词完成"
-                        )
-            except Exception as e:
-                self.logger.bind(tag=TAG).warning(f"同步构建系统提示词失败: {e}")
-            # 拉取并注入持久会话ID
-            try:
-                if self.llm and self.device_id:
-                    conv_id = get_conversation_id_for_device(self.device_id)
-                    if conv_id:
-                        if hasattr(self.llm, "adopt_conversation_id_for_session"):
-                            self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
-                            self.logger.bind(tag=TAG).info(f"Loaded conversationId for device: {conv_id}")
-                    else:
-                        # 未找到则创建新会话，并回写到Firestore
-                        try:
-                            if hasattr(self.llm, "ensure_conversation_with_system"):
-                                # 在创建会话时，直接以系统消息作为首条item
-                                new_conv_id = self.llm.ensure_conversation_with_system(self.session_id, self.prompt)
-                            elif hasattr(self.llm, "ensure_conversation"):
-                                new_conv_id = self.llm.ensure_conversation(self.session_id)
-                            else:
-                                # 兜底：调用一次对话以触发创建
-                                new_conv_id = None
-                            if new_conv_id:
-                                ok = set_conversation_id_for_device(self.device_id, new_conv_id)
-                                if ok:
-                                    self.logger.bind(tag=TAG).info(f"Created and saved conversationId for device: {new_conv_id}")
-                                    # 标记需要在首轮发送instructions
-                                    self._seed_instructions_once = True
-                                else:
-                                    self.logger.bind(tag=TAG).warning("Failed to save conversationId to Firestore")
-                        except Exception as create_err:
-                            self.logger.bind(tag=TAG).warning(f"Create conversationId failed: {create_err}")
-            except Exception as e:
-                self.logger.bind(tag=TAG).warning(f"Failed to load conversationId: {e}")
             # 异步初始化
             self.executor.submit(self._initialize_components)
 
@@ -573,7 +390,6 @@ class ConnectionHandler:
             )
 
     def _initialize_components(self):
-        import traceback
         try:
             self.selected_module_str = build_module_string(
                 self.config.get("selected_module", {})
@@ -587,7 +403,7 @@ class ConnectionHandler:
                 prompt = self.prompt_manager.get_quick_prompt(user_prompt)
                 self.change_system_prompt(prompt)
                 self.logger.bind(tag=TAG).info(
-                    f"快速初始化组件: prompt成功: {prompt}..."
+                    f"快速初始化组件: prompt成功 {prompt[:50]}..."
                 )
 
             """初始化本地组件"""
@@ -619,14 +435,8 @@ class ConnectionHandler:
             """更新系统提示词"""
             self._init_prompt_enhancement()
 
-            self.logger.bind(tag=TAG).info("所有组件初始化完成")
-
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"实例化组件失败: {e}")
-            self.logger.bind(tag=TAG).error(f"Traceback:\n{traceback.format_exc()}")
-        finally:
-            # Always signal completion, even if there was an error
-            self.loop.call_soon_threadsafe(self.components_initialized.set)
 
     def _init_prompt_enhancement(self):
         # 更新上下文信息
@@ -636,7 +446,7 @@ class ConnectionHandler:
         )
         if enhanced_prompt:
             self.change_system_prompt(enhanced_prompt)
-            self.logger.bind(tag=TAG).info(f"系统提示词已增强更新: {enhanced_prompt}")
+            self.logger.bind(tag=TAG).debug("系统提示词已增强更新")
 
     def _init_report_threads(self):
         """初始化ASR和TTS上报线程"""
@@ -909,44 +719,12 @@ class ConnectionHandler:
 
     def change_system_prompt(self, prompt):
         self.prompt = prompt
+        # 更新系统prompt至上下文
         self.dialogue.update_system_message(self.prompt)
-        self.logger.bind(tag=TAG).info(f"Ran change_system_prompt (new prompt length {len(prompt)}） with prompt:\n\n{prompt}\n")
 
-    def _schedule_alarm_followup(self):
-        """Schedule a follow-up chat after delay if no user response"""
-        # Cancel any existing follow-up task
-        if self.alarm_followup_task and not self.alarm_followup_task.done():
-            self.alarm_followup_task.cancel()
-        
-        # Schedule new follow-up
-        delay = getattr(self, "alarm_followup_delay", 10)
-        self.alarm_followup_task = asyncio.run_coroutine_threadsafe(
-            self._alarm_followup_trigger(delay), self.loop
-        )
-        self.logger.bind(tag=TAG).info(f"Scheduled alarm follow-up #{self.alarm_followup_count + 1} in {delay}s")
-    
-    async def _alarm_followup_trigger(self, delay):
-        """Wait and trigger follow-up if not cancelled"""
-        try:
-            await asyncio.sleep(delay)
-            # Only trigger if LLM is still idle
-            if self.llm_finish_task:
-                self.alarm_followup_count += 1
-                self.logger.bind(tag=TAG).info(f"Triggering alarm follow-up #{self.alarm_followup_count}")
-                # Include context in the query to ensure it's seen even with conversation persistence
-                followup_query = f"[No response from user - alarm follow-up #{self.alarm_followup_count}]"
-                self.executor.submit(self.chat, followup_query)
-        except asyncio.CancelledError:
-            self.logger.bind(tag=TAG).info("Alarm follow-up cancelled (user responded)")
-
-    def chat(self, query, depth=0, extra_inputs=None):
+    def chat(self, query, depth=0):
         self.logger.bind(tag=TAG).info(f"大模型收到用户消息: {query}")
         self.llm_finish_task = False
-        
-        # Cancel alarm follow-up if user provides input
-        if query and self.alarm_followup_task and not self.alarm_followup_task.done():
-            self.alarm_followup_task.cancel()
-            self.logger.bind(tag=TAG).info("User responded - cancelling alarm follow-up")
 
         # 为最顶层时新建会话ID和发送FIRST请求
         if depth == 0:
@@ -970,67 +748,29 @@ class ConnectionHandler:
             # 使用带记忆的对话
             memory_str = None
             if self.memory is not None:
-                try:
-                    future = asyncio.run_coroutine_threadsafe(
-                        self.memory.query_memory(query), self.loop
-                    )
-                    memory_str = future.result(timeout=5.0)  # 5 second timeout
-                except Exception as e:
-                    self.logger.bind(tag=TAG).warning(f"记忆查询失败或超时: {e}")
-
-            # 根据是否有持久会话决定是否传递全历史
-            use_full_history = True
-            try:
-                if hasattr(self.llm, "has_conversation") and self.llm.has_conversation(self.session_id):
-                    use_full_history = False
-            except Exception:
-                pass
-
-            current_input = None
-            if use_full_history:
-                current_input = self.dialogue.get_llm_dialogue_with_memory(
-                    memory_str, self.config.get("voiceprint", {})
+                future = asyncio.run_coroutine_threadsafe(
+                    self.memory.query_memory(query), self.loop
                 )
-            else:
-                # 仅传入最新用户消息；系统prompt/instructions由会话持久化
-                current_input = [{"role": "user", "content": query}]
-
-            # 构建instructions：合并memory和可选的mode-specific instructions
-            instructions = ""
-            if self.mode_specific_instructions:
-                instructions += self.mode_specific_instructions
-                # Clear after use UNLESS alarm follow-ups are active (need persistent context)
-                if not getattr(self, "alarm_followup_enabled", False):
-                    self.mode_specific_instructions = ""
-            
-            if memory_str:
-                instructions += f"\n\n<memory>\n{memory_str}\n</memory>"
-
-            kwargs = {}
-            if instructions:
-                kwargs["instructions"] = instructions
-                self.logger.bind(tag=TAG).debug(f"Passing instructions to LLM (length: {len(instructions)})")
-            if extra_inputs:
-                kwargs["extra_inputs"] = extra_inputs
+                memory_str = future.result()
 
             if self.intent_type == "function_call" and functions is not None:
                 # 使用支持functions的streaming接口
                 llm_responses = self.llm.response_with_functions(
                     self.session_id,
-                    current_input,
+                    self.dialogue.get_llm_dialogue_with_memory(
+                        memory_str, self.config.get("voiceprint", {})
+                    ),
                     functions=functions,
-                    **kwargs
                 )
             else:
                 llm_responses = self.llm.response(
                     self.session_id,
-                    current_input,
-                    **kwargs
+                    self.dialogue.get_llm_dialogue_with_memory(
+                        memory_str, self.config.get("voiceprint", {})
+                    ),
                 )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM 处理出错 {query}: {e}")
-            import traceback
-            self.logger.bind(tag=TAG).error(f"Traceback:\n{traceback.format_exc()}")
             return None
 
         # 处理流式响应
@@ -1046,16 +786,6 @@ class ConnectionHandler:
                 break
             if self.intent_type == "function_call" and functions is not None:
                 content, tools_call = response
-                if tools_call is not None and len(tools_call) > 0:
-                    try:
-                        arg_sample = ""
-                        try:
-                            arg_sample = str(getattr(getattr(tools_call[0], 'function', None), 'arguments', ""))[:80]
-                        except Exception:
-                            arg_sample = ""
-                        self.logger.bind(tag=TAG).info(f"tool_call delta: id={getattr(tools_call[0], 'id', None)}, name={getattr(getattr(tools_call[0], 'function', None), 'name', None)}, args_len={len(str(getattr(getattr(tools_call[0], 'function', None), 'arguments', '') or ''))}, args_prefix={arg_sample}")
-                    except Exception:
-                        pass
                 if "content" in response:
                     content = response["content"]
                     tools_call = None
@@ -1068,9 +798,9 @@ class ConnectionHandler:
 
                 if tools_call is not None and len(tools_call) > 0:
                     tool_call_flag = True
-                    if tools_call[0].id is not None:
+                    if tools_call[0].id is not None and tools_call[0].id != "":
                         function_id = tools_call[0].id
-                    if tools_call[0].function.name is not None:
+                    if tools_call[0].function.name is not None and tools_call[0].function.name != "":
                         function_name = tools_call[0].function.name
                     if tools_call[0].function.arguments is not None:
                         function_arguments += tools_call[0].function.arguments
@@ -1126,12 +856,9 @@ class ConnectionHandler:
                     self.tts_MessageText = text_buff
                     self.dialogue.put(Message(role="assistant", content=text_buff))
                 response_message.clear()
-                try:
-                    self.logger.bind(tag=TAG).info(
-                        f"Consolidated function_call: id={function_id}, name={function_name}, args_len={len(function_arguments) if function_arguments else 0}, args_prefix={(function_arguments or '')[:120]}"
-                    )
-                except Exception:
-                    pass
+                self.logger.bind(tag=TAG).debug(
+                    f"function_name={function_name}, function_id={function_id}, function_arguments={function_arguments}"
+                )
                 function_call_data = {
                     "name": function_name,
                     "id": function_id,
@@ -1139,22 +866,12 @@ class ConnectionHandler:
                 }
 
                 # 使用统一工具处理器处理所有工具调用
-                try:
-                    self.logger.bind(tag=TAG).debug("Invoking handle_llm_function_call")
-                except Exception:
-                    pass
                 result = asyncio.run_coroutine_threadsafe(
                     self.func_handler.handle_llm_function_call(
                         self, function_call_data
                     ),
                     self.loop,
                 ).result()
-                try:
-                    self.logger.bind(tag=TAG).info(
-                        f"handle_llm_function_call returned: action={getattr(result,'action',None)}, has_response={bool(getattr(result,'response',None))}, has_result={bool(getattr(result,'result',None))}"
-                    )
-                except Exception:
-                    pass
                 self._handle_function_result(result, function_call_data, depth=depth)
 
         # 存储对话内容
@@ -1171,11 +888,6 @@ class ConnectionHandler:
                 )
             )
         self.llm_finish_task = True
-        
-        # Schedule alarm follow-up if enabled
-        if getattr(self, "alarm_followup_enabled", False) and self.alarm_followup_count < getattr(self, "alarm_followup_max", 5):
-            self._schedule_alarm_followup()
-        
         # 使用lambda延迟计算，只有在DEBUG级别时才执行get_llm_dialogue()
         self.logger.bind(tag=TAG).debug(
             lambda: json.dumps(
@@ -1186,41 +898,6 @@ class ConnectionHandler:
         return True
 
     def _handle_function_result(self, result, function_call_data, depth):
-        # Conversations: 将工具输出作为下一轮responses输入传递（function_call_output），不做本地播报/拼接
-        using_conversation = False
-        if hasattr(self.llm, "has_conversation"):
-            try:
-                using_conversation = bool(self.llm.has_conversation(self.session_id))
-            except Exception:
-                using_conversation = False
-        function_id = function_call_data.get("id")
-        if using_conversation and function_id:
-            tool_output = None
-            if result.action == Action.REQLLM:
-                tool_output = result.result
-            else:
-                tool_output = result.response if result.response else result.result
-            # Ensure output is a string per Responses API; JSON-encode if needed
-            if tool_output is not None and not isinstance(tool_output, str):
-                try:
-                    tool_output = json.dumps(tool_output, ensure_ascii=False)
-                except Exception:
-                    tool_output = str(tool_output)
-            try:
-                self.logger.bind(tag=TAG).debug(f"Preparing function_call_output: id={function_id}, output_len={len(tool_output) if tool_output is not None else 0}")
-            except Exception:
-                pass
-            extra_inputs = [
-                {
-                    "type": "function_call_output",
-                    "call_id": function_id,
-                    "output": "" if tool_output is None else tool_output,
-                }
-            ]
-            self.logger.bind(tag=TAG).info(f"Passing function_call_output in next turn: id={function_id}, len={len(str(tool_output)) if tool_output is not None else 0}")
-            self.chat("", depth=depth + 1, extra_inputs=extra_inputs)
-            return
-
         if result.action == Action.RESPONSE:  # 直接回复前端
             text = result.response
             self.tts.tts_one_sentence(self, ContentType.TEXT, content_detail=text)
@@ -1264,9 +941,6 @@ class ConnectionHandler:
                 self.chat(text, depth=depth + 1)
         elif result.action == Action.NOTFOUND or result.action == Action.ERROR:
             text = result.response if result.response else result.result
-            # more user friendly error reporting
-            # user_friendly_error_message = "Sorry, seems like something's up with a module I'm trying to use. Could you press the connect button to help me try again?"
-            # self.tts.tts_one_sentence(self, ContentType.TEXT, content_detail=user_friendly_error_message)
             self.tts.tts_one_sentence(self, ContentType.TEXT, content_detail=text)
             self.dialogue.put(Message(role="assistant", content=text))
         else:

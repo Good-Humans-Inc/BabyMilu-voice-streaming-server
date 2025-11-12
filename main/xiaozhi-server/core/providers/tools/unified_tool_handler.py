@@ -1,6 +1,7 @@
 """统一工具处理器"""
 
 import json
+import time
 from typing import Dict, List, Any, Optional
 from config.logger import setup_logging
 from plugins_func.loadplugins import auto_import_modules
@@ -139,16 +140,32 @@ class UnifiedToolHandler:
         self, conn, function_call_data: Dict[str, Any]
     ) -> Optional[ActionResponse]:
         """处理LLM函数调用"""
+        start_ts = time.time()
         try:
+            try:
+                self.logger.debug(
+                    f"[tool] incoming call: id={function_call_data.get('id')}, name={function_call_data.get('name')}, raw_args_len={len(function_call_data.get('arguments') or '')}"
+                )
+            except Exception:
+                pass
             # 处理多函数调用
             if "function_calls" in function_call_data:
                 responses = []
                 for call in function_call_data["function_calls"]:
+                    try:
+                        self.logger.debug(f"[tool] executing (multi) name={call.get('name')}")
+                    except Exception:
+                        pass
                     result = await self.tool_manager.execute_tool(
                         call["name"], call.get("arguments", {})
                     )
                     responses.append(result)
-                return self._combine_responses(responses)
+                combined = self._combine_responses(responses)
+                try:
+                    self.logger.info(f"[tool] combined result action={combined.action}")
+                except Exception:
+                    pass
+                return combined
 
             # 处理单函数调用
             function_name = function_call_data["name"]
@@ -165,10 +182,18 @@ class UnifiedToolHandler:
                         response="Unable to parse function parameters",
                     )
 
-            self.logger.debug(f"调用函数: {function_name}, 参数: {arguments}")
+            try:
+                self.logger.info(f"[tool] executing: name={function_name}, args_keys={list(arguments.keys()) if isinstance(arguments, dict) else type(arguments)}")
+            except Exception:
+                pass
 
             # 执行工具调用
             result = await self.tool_manager.execute_tool(function_name, arguments)
+            try:
+                cost_ms = int((time.time() - start_ts) * 1000)
+                self.logger.info(f"[tool] done: name={function_name}, action={result.action}, took={cost_ms}ms, has_response={bool(result.response)}, has_result={bool(result.result)}")
+            except Exception:
+                pass
             return result
 
         except Exception as e:
