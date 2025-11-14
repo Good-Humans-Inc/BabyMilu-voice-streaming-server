@@ -468,7 +468,7 @@ class ConnectionHandler:
                         task_str = query_task(owner_phone, fields.get("name"), user_fields.get("name"))
                         
                         if task_str:
-                            new_prompt = new_prompt + f"\nUser unfinished tasks:\n {task_str}"
+                            new_prompt = new_prompt + f"\n{user_fields.get('name')} might be trying to accomplish these tasks:\n {task_str}"
                 else:
                     self.logger.bind(tag=TAG).warning(
                         f"❌ No owner phone found for device {self.device_id}, using fallback user_id: {user_id}"
