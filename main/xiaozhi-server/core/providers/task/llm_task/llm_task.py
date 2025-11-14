@@ -75,13 +75,13 @@ class TaskProvider(TaskProviderBase):
         self.temperature = config.get("temperature", 0.5)
         self.stateless = config.get("stateless", True)
         
-    async def detect_task(self, msgs, tasks=None, user_id=None):
+    async def detect_task(self, msgs, tasks=None, user_id=None, character_name=None):
         """
         Detect tasks from conversation messages
         
         Args:
             msgs: List of conversation messages (Message objects or dicts)
-            tasks: List of user's assigned tasks (optional, can be provided later)
+            tasks: user's assigned tasks text (optional, can be provided later)
             user_id: User ID for logging purposes
             
         Returns:
@@ -108,15 +108,17 @@ class TaskProvider(TaskProviderBase):
             # Build conversation text
             conv_text = self._build_conversation_text(msgs)
             
-            # Fetch user's assigned tasks
-            assigned_tasks = get_assigned_tasks_for_user(user_id)
-            if not assigned_tasks or len(assigned_tasks) == 0:
+            if tasks is not None:
+                tasks_text = tasks
+            else:
+                # Fetch user's assigned tasks
+                assigned_tasks = get_assigned_tasks_for_user(user_id)
+                
+                # Build tasks text
+                tasks_text = self._build_tasks_text_from_list(assigned_tasks, character_name)
+            if not tasks_text:
                 logger.bind(tag=TAG).debug(f"用户 {user_id} 没有分配的任务，跳过任务检测")
                 return []
-            
-            # Build tasks text
-            tasks_text = self._build_tasks_text_from_list(assigned_tasks)
-            
             # Get appropriate prompt template
             prompt_template = TASK_DETECTION_PROMPT_CN if self.use_chinese else TASK_DETECTION_PROMPT
             
@@ -140,18 +142,25 @@ class TaskProvider(TaskProviderBase):
                 #     messages=messages,
                 #     temperature=self.temperature,
                 #     max_tokens=self.max_tokens,
-                #     response_format={
-                #         "type": "json_schema",
-                #         "json_schema": {
-                #             "name": "task_detection_response",
-                #             "strict": True,
-                #             "schema": TASK_DETECTION_SCHEMA
-                #         }
-                #     }
+                    # response_format={
+                    #     "type": "json_schema",
+                    #     "json_schema": {
+                    #         "name": "task_detection_response",
+                    #         "strict": True,
+                    #         "schema": TASK_DETECTION_SCHEMA
+                    #     }
+                    # }
                 # )
                 
                 # response_text = completion.choices[0].message.content
-                response_text = self.llm.response_with_structured_output(messages, TASK_DETECTION_SCHEMA)
+                response_text = self.llm.response_with_structured_output(messages, {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "task_detection_response",
+                            "strict": True,
+                            "schema": TASK_DETECTION_SCHEMA
+                        }
+                    })
                 logger.bind(tag=TAG).debug(f"LLM响应: {response_text}")
                 
                 # Parse JSON response
@@ -200,7 +209,7 @@ class TaskProvider(TaskProviderBase):
         
         return conv_text
     
-    def _build_tasks_text_from_list(self, tasks):
+    def _build_tasks_text_from_list(self, tasks, character_name: str):
         """Build tasks text from task list"""
         tasks_text = ""
         for idx, task in enumerate(tasks, 1):
@@ -208,10 +217,11 @@ class TaskProvider(TaskProviderBase):
             task_title = task.get("title", "No title")
             action_config = task.get("actionConfig", {})
             action = action_config.get("action", "N/A")
-            
+            if character_name:
+                task_title = task_title.replace("{character}", character_name)
+
             tasks_text += f"{idx}. ID: {task_id}\n"
             tasks_text += f"   Title: {task_title}\n"
             tasks_text += f"   Action: {action}\n\n"
         
         return tasks_text
-

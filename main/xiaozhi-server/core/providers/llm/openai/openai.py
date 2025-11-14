@@ -255,7 +255,7 @@ class LLMProvider(LLMProviderBase):
 
     def response_with_structured_output(self, dialogue, structured_output, **kwargs):
         try:
-           completion = self.client.chat.completions.create(
+            completion = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=dialogue,
                 temperature=self.temperature,
