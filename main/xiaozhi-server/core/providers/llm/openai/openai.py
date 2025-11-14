@@ -113,7 +113,6 @@ class LLMProvider(LLMProviderBase):
             force_stateless = kwargs.get("stateless", self.stateless_default)
             conv_id = None if force_stateless else self.ensure_conversation(session_id)
             instructions = kwargs.get("instructions")
-            text_format = kwargs.get("text_format")
             
             # Build stream parameters
             stream_params = {
@@ -123,9 +122,6 @@ class LLMProvider(LLMProviderBase):
                 "conversation": conv_id if conv_id else None,
                 "store": True if conv_id else False,
             }
-            # Only add text_format if it has actual content
-            if text_format:
-                stream_params["text_format"] = text_format
             
             with self.client.responses.stream(**stream_params) as stream:
                 for event in stream:
@@ -256,3 +252,19 @@ class LLMProvider(LLMProviderBase):
         except Exception as e:
             logger.bind(tag=TAG).error(f"Error in function call streaming: {e}")
             yield f"【OpenAI服务响应异常: {e}】", None
+
+    def response_with_structured_output(self, dialogue, structured_output, **kwargs):
+        try:
+           completion = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=dialogue,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                response_format=structured_output
+            )
+            
+            response_text = completion.choices[0].message.content
+            return response_text
+        except Exception as e:
+            logger.bind(tag=TAG).error(f"Error in structured output streaming: {e}")
+            return f"【OpenAI服务响应异常: {e}】"

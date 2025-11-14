@@ -27,7 +27,7 @@ def initialize_modules(
         Dict[str, Any]: 包含所有初始化后的模块的字典
     """
     modules = {}
-
+    print("initialize_modules config ii", config)
     # 初始化TTS模块
     if init_tts:
         select_tts_module = config["selected_module"]["TTS"]

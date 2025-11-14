@@ -12,16 +12,14 @@ def get_assigned_tasks_for_user(user_id: str) -> List[Dict[str, Any]]:
         body = {
             "uid": user_id,
             "status": ["action"],
-            "device": "plushie",
             "extra": True
         }
         response = requests.post(f"https://us-central1-composed-augury-469200-g6.cloudfunctions.net/get-tasks-for-user", json=body)
-        print("get assigned tasks response:", response)
 
         if response.status_code != 200:
             logger.bind(tag=TAG).error(f"get assigned tasks error: {response.status_code} {response.text}")
             return []
-        return response.json()["data"]["tasks"]
+        return list(filter(lambda x: x["device"] == "plushie", response.json()["tasks"]))
     except Exception as e:
         logger.bind(tag=TAG).error(f"get assigned tasks error: {e}")
         return []
@@ -37,7 +35,7 @@ def process_user_action(user_id: str, tasks: List[Dict[str, Any]]) -> bool:
                 "actionData": {}
             }
             response = requests.post(f"https://us-central1-composed-augury-469200-g6.cloudfunctions.net/process-user-action", json=body)
-            print("process user action response:", response)
+            
             if response.status_code != 200:
                 logger.bind(tag=TAG).error(f"process user action error: {response.status_code} {response.text}")
                 return False

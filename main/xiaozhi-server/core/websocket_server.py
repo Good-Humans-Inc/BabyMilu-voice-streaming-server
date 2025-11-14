@@ -14,7 +14,6 @@ class WebSocketServer:
         self.config = config
         self.logger = setup_logging()
         self.config_lock = asyncio.Lock()
-        print("WebSocketServer config", self.config["selected_module"])
         modules = initialize_modules(
             self.logger,
             self.config,
@@ -24,7 +23,7 @@ class WebSocketServer:
             False,
             "Memory" in self.config["selected_module"],
             "Intent" in self.config["selected_module"],
-            "Task" in self.config["selected_module"] and "Task" in self.config,
+            "Task" in self.config["selected_module"],
         )
         self._vad = modules["vad"] if "vad" in modules else None
         self._asr = modules["asr"] if "asr" in modules else None
@@ -121,7 +120,7 @@ class WebSocketServer:
                     False,
                     "Memory" in new_config["selected_module"],
                     "Intent" in new_config["selected_module"],
-                    "Task" in new_config["selected_module"] and "Task" in new_config,
+                    "Task" in new_config["selected_module"],
                 )
 
                 # 更新组件实例

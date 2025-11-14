@@ -8,7 +8,6 @@ import time
 from ..base import TaskProviderBase, logger
 from core.utils.util import check_model_key
 from core.utils.api_client import get_assigned_tasks_for_user, process_user_action
-from pydantic import BaseModel
 
 TAG = __name__
 
@@ -22,14 +21,7 @@ User's assigned tasks:
 {tasks}
 
 Carefully analyze the conversation content to determine if any of the above tasks were discussed, mentioned, or completed.
-If there are matching tasks, return a JSON array with the following format:
-[
-  {{"task_id": "task ID", "task_action": "action from actionConfig", "match_reason": "brief explanation of why the conversation relates to this task"}}
-]
-
-If no tasks match, return an empty array: []
-
-Return ONLY the JSON array, no other explanation."""
+Return your response as a structured JSON object with a "tasks" array containing any matched tasks."""
 
 TASK_DETECTION_PROMPT_CN = """分析以下对话内容，判断是否与用户的已分配任务相关。
 
@@ -40,39 +32,38 @@ TASK_DETECTION_PROMPT_CN = """分析以下对话内容，判断是否与用户�
 {tasks}
 
 仔细分析对话内容，确定是否讨论、提及或完成了上述任何任务。
-如果有匹配的任务，返回以下格式的 JSON 数组：
-[
-  {{"task_id": "任务ID", "task_action": "actionConfig中的action", "match_reason": "简要说明对话与此任务相关的原因"}}
-]
+将响应作为结构化 JSON 对象返回，包含一个 "tasks" 数组，其中包含所有匹配的任务。"""
 
-如果没有匹配的任务，返回空数组：[]
-
-只返回 JSON 数组，不需要其他解释。"""
-
-class TaskLLMResponse(BaseModel):
-    task_id: str
-    task_action: str
-    match_reason: str
-
-def extract_json_array(text: str):
-    """Extract JSON array from text response"""
-    try:
-        # Try direct parsing first
-        return json.loads(text)
-    except json.JSONDecodeError:
-        # Try to find JSON array in text
-        if "[" in text and "]" in text:
-            start_idx = text.find("[")
-            end_idx = text.rfind("]") + 1
-            json_str = text[start_idx:end_idx]
-            try:
-                return json.loads(json_str)
-            except json.JSONDecodeError:
-                pass
-    
-    logger.bind(tag=TAG).warning(f"无法解析JSON响应: {text}")
-    return []
-
+# Manual JSON schema for OpenAI structured outputs
+TASK_DETECTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "tasks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "The ID of the matched task"
+                    },
+                    "task_action": {
+                        "type": "string",
+                        "description": "The action from actionConfig"
+                    },
+                    "match_reason": {
+                        "type": "string",
+                        "description": "Brief explanation of why the conversation relates to this task"
+                    }
+                },
+                "required": ["task_id", "task_action", "match_reason"],
+                "additionalProperties": False
+            }
+        }
+    },
+    "required": ["tasks"],
+    "additionalProperties": False
+}
 
 class TaskProvider(TaskProviderBase):
     """LLM-based task detection provider"""
@@ -101,15 +92,13 @@ class TaskProvider(TaskProviderBase):
             logger.bind(tag=TAG).warning("LLM未初始化，无法检测任务")
             return []
             
-        if not tasks or len(tasks) == 0:
-            logger.bind(tag=TAG).debug(f"用户 {user_id or 'unknown'} 没有分配的任务")
-            return []
-            
         if not msgs or len(msgs) == 0:
             logger.bind(tag=TAG).debug("对话为空，跳过任务检测")
             return []
         
         # Check LLM API key
+        model_info = getattr(self.llm, "model_name", str(self.llm.__class__.__name__))
+        logger.bind(tag=TAG).debug(f"使用任务检测模型: {model_info}")
         api_key = getattr(self.llm, "api_key", None)
         task_key_msg = check_model_key("任务检测专用LLM", api_key)
         if task_key_msg:
@@ -119,8 +108,14 @@ class TaskProvider(TaskProviderBase):
             # Build conversation text
             conv_text = self._build_conversation_text(msgs)
             
+            # Fetch user's assigned tasks
+            assigned_tasks = get_assigned_tasks_for_user(user_id)
+            if not assigned_tasks or len(assigned_tasks) == 0:
+                logger.bind(tag=TAG).debug(f"用户 {user_id} 没有分配的任务，跳过任务检测")
+                return []
+            
             # Build tasks text
-            tasks_text = self._build_tasks_text(tasks)
+            tasks_text = self._build_tasks_text_from_list(assigned_tasks)
             
             # Get appropriate prompt template
             prompt_template = TASK_DETECTION_PROMPT_CN if self.use_chinese else TASK_DETECTION_PROMPT
@@ -131,31 +126,41 @@ class TaskProvider(TaskProviderBase):
                 tasks=tasks_text
             )
             
-            # Create prompt for LLM
-            prompt = [{"role": "user", "content": prompt_content}]
+            # Call LLM for task detection with structured outputs
+            logger.bind(tag=TAG).debug(f"开始任务检测 - 用户: {user_id}, 任务数: {len(assigned_tasks)}")
             
-            # Call LLM for task detection
-            logger.bind(tag=TAG).debug(f"开始任务检测 - 用户: {user_id}, 任务数: {len(tasks)}")
+            # Use Chat Completions API for structured outputs
+            # The Responses API doesn't support response_format, so we use completions directly
+            messages = [{"role": "user", "content": prompt_content}]
             
-            response_parts = []
-            llm_responses = self.llm.response_no_stream(
-                f"task_detect_{user_id or 'unknown'}_{int(time.time())}",
-                prompt,
-                stateless=self.stateless,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                text_format=TaskLLMResponse
-            )
-            # FIXME delete
-            print("llm_responses:", llm_responses)
-            for response in llm_responses:
-                if response:
-                    response_parts.append(response)
-            
-            response_text = "".join(response_parts).strip()
-            
-            # Parse JSON response
-            matched_tasks = extract_json_array(response_text)
+            try:
+                # Use Chat Completions API with structured outputs
+                # completion = self.llm.client.chat.completions.create(
+                #     model=self.llm.model_name,
+                #     messages=messages,
+                #     temperature=self.temperature,
+                #     max_tokens=self.max_tokens,
+                #     response_format={
+                #         "type": "json_schema",
+                #         "json_schema": {
+                #             "name": "task_detection_response",
+                #             "strict": True,
+                #             "schema": TASK_DETECTION_SCHEMA
+                #         }
+                #     }
+                # )
+                
+                # response_text = completion.choices[0].message.content
+                response_text = self.llm.response_with_structured_output(messages, TASK_DETECTION_SCHEMA)
+                logger.bind(tag=TAG).debug(f"LLM响应: {response_text}")
+                
+                # Parse JSON response
+                response_data = json.loads(response_text)
+                matched_tasks = response_data.get("tasks", [])
+                
+            except Exception as api_error:
+                logger.bind(tag=TAG).error(f"调用LLM API失败: {api_error}")
+                return []
             
             if matched_tasks and len(matched_tasks) > 0:
                 logger.bind(tag=TAG).info(
@@ -195,13 +200,9 @@ class TaskProvider(TaskProviderBase):
         
         return conv_text
     
-    def _build_tasks_text(self, user_id):
+    def _build_tasks_text_from_list(self, tasks):
         """Build tasks text from task list"""
         tasks_text = ""
-        tasks = get_assigned_tasks_for_user(user_id)
-        if not tasks or len(tasks) == 0:
-            self.logger.bind(tag=TAG).debug(f"用户 {user_id} 没有分配的任务")
-            return ""
         for idx, task in enumerate(tasks, 1):
             task_id = task.get("id", "unknown")
             task_title = task.get("title", "No title")
