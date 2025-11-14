@@ -27,7 +27,6 @@ def initialize_modules(
         Dict[str, Any]: 包含所有初始化后的模块的字典
     """
     modules = {}
-    print("initialize_modules config ii", config)
     # 初始化TTS模块
     if init_tts:
         select_tts_module = config["selected_module"]["TTS"]
@@ -79,7 +78,6 @@ def initialize_modules(
     # 初始化Task模块
     if init_task:
         select_task_module = config["selected_module"]["Task"]
-        print("initialize_modules task config", select_task_module)
         task_type = (
             select_task_module
             if "type" not in config["Task"][select_task_module]

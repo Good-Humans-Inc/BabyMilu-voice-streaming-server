@@ -57,7 +57,7 @@ from core.utils.firestore_client import (
 from services.session_context import store as session_context_store
 from services.alarms.config import MODE_CONFIG
 
-
+from core.utils.api_client import query_task
 TAG = __name__
 
 auto_import_modules("plugins_func.functions")
@@ -384,7 +384,6 @@ class ConnectionHandler:
 
             # 初始化活动时间戳
             self.last_activity_time = time.time() * 1000
-
             # 从云端获取角色配置（voice, bio 等），并应用到本次会话
             try:
                 char_id = None
@@ -448,7 +447,11 @@ class ConnectionHandler:
                         if user_parts:
                             user_profile = "\n- ".join(user_parts)
                             new_prompt = new_prompt + f"\nUser profile:\n {user_profile}"
-
+                         # 使用未完成任务的记忆
+                        task_str = query_task(owner_phone, fields.get("name"), user_fields.get("name"))
+                        print("task_str", task_str)
+                        if task_str:
+                            new_prompt = new_prompt + f"\nUser unfinished tasks:\n {task_str}"
                     if new_prompt != self.config.get("prompt", ""):
                         self.config["prompt"] = new_prompt
                         self.change_system_prompt(new_prompt)
@@ -1013,10 +1016,24 @@ Return ONLY the JSON array, no other explanation."""
                         
                         # Build list of coroutines to run
                         coroutines = [self.memory.save_memory(self.dialogue.dialogue)]
-                        
+                        char_id = None
+                        if self.device_id:
+                            char_id = get_active_character_for_device(self.device_id)
+                            if not char_id:
+                                fallback_id = get_most_recent_character_via_user_for_device(self.device_id)
+                                if fallback_id:
+                                    self.logger.bind(tag=TAG, device_id=self.device_id).warning(
+                                        f"activeCharacterId missing; falling back to most recent user character: {fallback_id}"
+                                    )
+                                    char_id = fallback_id
+                        if char_id:
+                            self.logger.info(f"char_id={char_id!r}")
+                            char_doc = get_character_profile(char_id)
+                            self.logger.info(f"char_doc_keys={list((char_doc or {}).keys())}")
+                            fields = extract_character_profile_fields(char_doc or {})
+                            character_name = fields.get("name")
                         # Only add task detection if task provider has the method
                         if self.task and hasattr(self.task, 'detect_task'):
-                            print("detect_task")
                             coroutines.append(
                                 self.task.detect_task(self.dialogue.dialogue, user_id=owner_phone)
                             )
