@@ -1,6 +1,6 @@
 from typing import Dict, Any
 from config.logger import setup_logging
-from core.utils import tts, llm, intent, memory, vad, asr
+from core.utils import tts, llm, intent, memory, vad, asr, task
 
 TAG = __name__
 logger = setup_logging()
@@ -15,6 +15,7 @@ def initialize_modules(
     init_tts=False,
     init_memory=False,
     init_intent=False,
+    init_task=False,
 ) -> Dict[str, Any]:
     """
     初始化所有模块组件
@@ -75,7 +76,20 @@ def initialize_modules(
             config.get("summaryMemory", None),
         )
         logger.bind(tag=TAG).info(f"初始化组件: memory成功 {select_memory_module}")
-
+    # 初始化Task模块
+    if init_task:
+        select_task_module = config["selected_module"]["Task"]
+        print("initialize_modules task config", select_task_module)
+        task_type = (
+            select_task_module
+            if "type" not in config["Task"][select_task_module]
+            else config["Task"][select_task_module]["type"]
+        )
+        modules["task"] = task.create_instance(
+            task_type,
+            config["Task"][select_task_module],
+        )
+        logger.bind(tag=TAG).info(f"初始化组件: task成功 {select_task_module}")
     # 初始化VAD模块
     if init_vad:
         select_vad_module = config["selected_module"]["VAD"]

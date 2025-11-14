@@ -27,13 +27,14 @@ class WebSocketServer:
             False,
             "Memory" in self.config["selected_module"],
             "Intent" in self.config["selected_module"],
+            "Task" in self.config["selected_module"] and "Task" in self.config,
         )
         self._vad = modules["vad"] if "vad" in modules else None
         self._asr = modules["asr"] if "asr" in modules else None
         self._llm = modules["llm"] if "llm" in modules else None
         self._intent = modules["intent"] if "intent" in modules else None
         self._memory = modules["memory"] if "memory" in modules else None
-
+        self._task = modules["task"] if "task" in modules else None
         self.active_connections = set()
 
     async def start(self):
@@ -55,6 +56,7 @@ class WebSocketServer:
             self._asr,
             self._llm,
             self._memory,
+            self._task,
             self._intent,
             self,  # 传入server实例
         )
@@ -122,6 +124,7 @@ class WebSocketServer:
                     False,
                     "Memory" in new_config["selected_module"],
                     "Intent" in new_config["selected_module"],
+                    "Task" in new_config["selected_module"] and "Task" in new_config,
                 )
 
                 # 更新组件实例
@@ -135,6 +138,8 @@ class WebSocketServer:
                     self._intent = modules["intent"]
                 if "memory" in modules:
                     self._memory = modules["memory"]
+                if "task" in modules:
+                    self._task = modules["task"]
                 self.logger.bind(tag=TAG).info(f"更新配置任务执行完毕")
                 return True
         except Exception as e:
