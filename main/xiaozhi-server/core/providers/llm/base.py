@@ -37,3 +37,9 @@ class LLMProviderBase(ABC):
         for token in self.response(session_id, dialogue):
             yield token, None
 
+    def response_with_structured_output(self, dialogue, structured_output, **kwargs):
+        """
+        Default implementation for structured output
+        This should be overridden by providers that support structured output
+        """
+        pass
