@@ -228,6 +228,21 @@ class ConnectionHandler:
             self.device_id = raw_device_id.upper() if isinstance(raw_device_id, str) else raw_device_id
             self.logger.bind(tag=TAG).info(f"device_id: {self.device_id}")
 
+            # Send server hello to satisfy firmware handshake
+            try:
+                hello = {
+                    "type": "hello",
+                    "transport": "websocket",
+                    "session_id": self.session_id,
+                    "audio_params": {
+                        "sample_rate": 16000,
+                        "frame_duration": 60
+                    }
+                }
+                await self.websocket.send(json.dumps(hello, ensure_ascii=False))
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(f"Failed to send server hello: {e}")
+
             # 检查是否来自MQTT连接
             request_path = ws.request.path
             self.conn_from_mqtt_gateway = request_path.endswith("?from=mqtt_gateway")
