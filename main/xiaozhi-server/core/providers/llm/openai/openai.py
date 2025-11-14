@@ -113,14 +113,21 @@ class LLMProvider(LLMProviderBase):
             force_stateless = kwargs.get("stateless", self.stateless_default)
             conv_id = None if force_stateless else self.ensure_conversation(session_id)
             instructions = kwargs.get("instructions")
+            text_format = kwargs.get("text_format")
             
-            with self.client.responses.stream(
-                model=self.model_name,
-                input=dialogue,
-                instructions=instructions,
-                conversation=conv_id if conv_id else None,
-                store=True if conv_id else False,
-            ) as stream:
+            # Build stream parameters
+            stream_params = {
+                "model": self.model_name,
+                "input": dialogue,
+                "instructions": instructions,
+                "conversation": conv_id if conv_id else None,
+                "store": True if conv_id else False,
+            }
+            # Only add text_format if it has actual content
+            if text_format:
+                stream_params["text_format"] = text_format
+            
+            with self.client.responses.stream(**stream_params) as stream:
                 for event in stream:
                     try:
                         etype = getattr(event, "type", None)
