@@ -451,7 +451,7 @@ class ConnectionHandler:
                         task_str = query_task(owner_phone, fields.get("name"), user_fields.get("name"))
                         print("task_str", task_str)
                         if task_str:
-                            new_prompt = new_prompt + f"\nUser unfinished tasks:\n {task_str}"
+                            new_prompt = new_prompt + f"\n{user_fields.get('name')} might be trying to accomplish these tasks:\n {task_str}"
                     if new_prompt != self.config.get("prompt", ""):
                         self.config["prompt"] = new_prompt
                         self.change_system_prompt(new_prompt)
