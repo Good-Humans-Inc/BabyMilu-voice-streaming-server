@@ -48,6 +48,8 @@ class OTAHandler(BaseHandler):
             server_config = self.config["server"]
             port = int(server_config.get("port", 8000))
             local_ip = get_local_ip()
+            mac_upper = (device_id or "").strip().upper()
+            publish_topic = f"xiaozhi/{mac_upper}/up" if mac_upper else ""
 
             return_json = {
                 "server_time": {
@@ -60,6 +62,12 @@ class OTAHandler(BaseHandler):
                 },
                 "websocket": {
                     "url": self._get_websocket_url(local_ip, port),
+                },
+                # Provide MQTT settings so device can switch to MQTT protocol
+                "mqtt": {
+                    "endpoint": "136.117.60.16:1883",
+                    "client_id": mac_upper,
+                    "publish_topic": publish_topic,
                 },
             }
             response = web.Response(
