@@ -282,9 +282,9 @@ class PromptManager:
             temp = main.get("temp")
             feels = main.get("feels_like")
             print(f"[WeatherDebug] _get_weather_info_openweather: parsed description={description!r}, temp={temp}, feels_like={feels}")
-            temp_str = f"{round(temp)}°F" if isinstance(temp, (int, float)) else ""
+            temp_str = f"{round(temp)} Fahrenheit" if isinstance(temp, (int, float)) else ""
             feels_str = (
-                f"{round(feels)}°F" if isinstance(feels, (int, float)) else ""
+                f"{round(feels)} Fahrenheit" if isinstance(feels, (int, float)) else ""
             )
 
             # 组装简洁描述

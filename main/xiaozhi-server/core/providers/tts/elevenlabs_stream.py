@@ -51,6 +51,9 @@ class TTSProvider(TTSProviderBase):
         
         # Use pcm_16000 so we can reuse the existing Opus pipeline
         self.output_format = config.get("output_format", "pcm_16000")
+        
+        # Optional language_code (ISO 639-1)
+        self.language_code = config.get("language_code")
 
         # Optional voice & generation config
         self.voice_settings_dict = config.get("voice_settings") or {}
@@ -248,6 +251,8 @@ class TTSProvider(TTSProviderBase):
             params = [f"model_id={self.model_id}"]
             if self.output_format:
                 params.append(f"output_format={self.output_format}")
+            if self.language_code:
+                params.append(f"language_code={self.language_code}")
             query = "&".join(params)
 
             # Use fixed ElevenLabs WebSocket endpoint as requested

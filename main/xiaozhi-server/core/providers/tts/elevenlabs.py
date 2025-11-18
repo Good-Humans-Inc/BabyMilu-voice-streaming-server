@@ -29,9 +29,9 @@ class TTSProvider(TTSProviderBase):
         # API parameters
         self.default_voice_id = config.get("default_voice_id")
         self.model_id = config.get("model_id", "eleven_multilingual_v2")
-        self.optimize_streaming_latency = config.get("optimize_streaming_latency")
         self.output_format = config.get("output_format")
         self.voice_settings_dict = config.get("voice_settings")
+        self.language_code = config.get("language_code")
 
 
     def generate_filename(self):
@@ -64,8 +64,8 @@ class TTSProvider(TTSProviderBase):
                 voice_id=voice_id,
                 model_id=self.model_id,
                 voice_settings=voice_settings,
-                optimize_streaming_latency=self.optimize_streaming_latency,
-                output_format=self.output_format
+                output_format=self.output_format,
+                language_code=self.language_code
             )
 
             if output_file:
