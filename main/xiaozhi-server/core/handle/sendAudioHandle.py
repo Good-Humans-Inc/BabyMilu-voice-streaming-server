@@ -15,6 +15,8 @@ async def sendAudioMessage(conn, sentenceType, audios, text):
         await send_tts_message(conn, "start", None)
 
     if sentenceType == SentenceType.FIRST:
+        # 标记当前正在播放TTS，便于VAD检测到用户说话时触发打断
+        conn.client_is_speaking = True
         await send_tts_message(conn, "sentence_start", text)
 
     await sendAudio(conn, audios)

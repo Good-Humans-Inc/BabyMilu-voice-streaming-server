@@ -13,6 +13,9 @@ from core.utils.util import check_ffmpeg_installed
 TAG = __name__
 logger = setup_logging()
 
+import os
+logger.bind(tag=TAG).info("Server PID: {}", os.getpid())
+
 
 async def wait_for_exit() -> None:
     """
