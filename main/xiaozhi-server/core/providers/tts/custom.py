@@ -19,8 +19,6 @@ class TTSProvider(TTSProviderBase):
         self.audio_file_type = config.get("format", "wav")
         self.output_file = config.get("output_dir", "tmp/")
         self.params = config.get("params")
-        # Default voice fallback (used if connection doesn't provide one)
-        self.default_voice_id = config.get("default_voice_id") or config.get("voice_id")
 
         if isinstance(self.params, str):
             try:
@@ -40,55 +38,16 @@ class TTSProvider(TTSProviderBase):
                 v = v.replace("{prompt_text}", text)
             request_params[k] = v
 
-        # Resolve voice_id: prefer connection value, then default from config
-        voice_id = None
-        if self.conn and getattr(self.conn, "voice_id", None):
-            voice_id = self.conn.voice_id
-        elif getattr(self, "default_voice_id", None):
-            voice_id = str(self.default_voice_id)
-
-        # Build final URL from base + voice_id; abort if voice_id missing
-        if not voice_id:
-            logger.bind(tag=TAG).error("No voice_id resolved (conn/default). Abort TTS request")
-            raise Exception("No voice_id resolved; cannot call TTS")
-
-        final_url = f"{self.url.rstrip('/')}/{voice_id}"
-
-        safe_headers = dict(self.headers or {})
-        for _k in list(safe_headers.keys()):
-            if _k.lower() in ("xi-api-key", "authorization"):
-                safe_headers[_k] = "***"
-        logger.debug(
-            f"CustomTTS request: URL={final_url}, JSON={request_params}, HEADERS={safe_headers}"
-        )
-
         if self.method.upper() == "POST":
-            resp = requests.post(
-                final_url, json=request_params, headers=self.headers, timeout=15, stream=True
-            )
+            resp = requests.post(self.url, json=request_params, headers=self.headers)
         else:
-            resp = requests.get(
-                final_url, params=request_params, headers=self.headers, timeout=15, stream=True
-            )
+            resp = requests.get(self.url, params=request_params, headers=self.headers)
         if resp.status_code == 200:
-            logger.bind(tag=TAG).debug("Starting to stream TTS audio.")
             if output_file:
                 with open(output_file, "wb") as file:
-                    for chunk in resp.iter_content(chunk_size=4096):
-                        if self.conn and self.conn.client_abort:
-                            logger.bind(tag=TAG).info("TTS interrupted by client")
-                            resp.close()
-                            return
-                        file.write(chunk)
+                    file.write(resp.content)
             else:
-                audio_data = bytearray()
-                for chunk in resp.iter_content(chunk_size=4096):
-                    if self.conn and self.conn.client_abort:
-                        logger.bind(tag=TAG).info("TTS interrupted by client")
-                        resp.close()
-                        return None
-                    audio_data.extend(chunk)
-                return bytes(audio_data)
+                return resp.content
         else:
             error_msg = f"Custom TTS请求失败: {resp.status_code} - {resp.text}"
             logger.bind(tag=TAG).error(error_msg)
