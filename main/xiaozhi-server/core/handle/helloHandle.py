@@ -28,7 +28,8 @@ async def _trigger_server_greeting(conn):
     # Check llm_finish_task to avoid overlapping conversations
     if conn.llm_finish_task:
         conn.logger.bind(tag=TAG).info("Triggering server-initiated greeting")
-        conn.executor.submit(conn.chat, "")
+        # Server-initiated greeting; not fresh user input
+        conn.executor.submit(conn.chat, "", 0, None, False)
     else:
         conn.logger.bind(tag=TAG).warning("Cannot trigger greeting: llm_finish_task is False")
 
@@ -59,9 +60,9 @@ async def handleHelloMessage(conn, msg_json):
         conn.features = features
         # Mode功能（如morning_alarm闹钟）
         # HACK: Force morning_alarm mode for demo (remove this line when device sends mode)
-        # if not features.get("mode"):
-        #     features["mode"] = "morning_alarm"
-        #     conn.logger.bind(tag=TAG).warning("🚨 DEMO MODE: Forcing morning_alarm mode 🚨")
+        if not features.get("mode"):
+            features["mode"] = "morning_alarm"
+            conn.logger.bind(tag=TAG).warning("🚨 DEMO MODE: Forcing morning_alarm mode 🚨")
         if features.get("mode"):
             conn.mode = features.get("mode").lower()
             mode_config = conn.config.get("mode_config", {}).get(conn.mode, {})
@@ -83,10 +84,10 @@ async def handleHelloMessage(conn, msg_json):
                 conn.logger.bind(tag=TAG).warning(f"No mode specific instructions found for mode: {conn.mode}")
             # whether to initiate chat from server for this mode
             conn.server_initiate_chat = mode_config.get("server_initiate_chat", False)
-            # Alarm follow-up config
-            conn.alarm_followup_enabled = mode_config.get("alarm_followup_enabled", False)
-            conn.alarm_followup_delay = mode_config.get("alarm_followup_delay", 10)
-            conn.alarm_followup_max = mode_config.get("alarm_followup_max", 5)
+            # Generic follow-up config for modes that may need proactive re-engagement
+            conn.followup_enabled = mode_config.get("followup_enabled", False)
+            conn.followup_delay = mode_config.get("followup_delay", 10)
+            conn.followup_max = mode_config.get("followup_max", 5)
             if conn.server_initiate_chat:
                 # Trigger server-initiated greeting after TTS is ready
                 asyncio.create_task(_trigger_server_greeting(conn))

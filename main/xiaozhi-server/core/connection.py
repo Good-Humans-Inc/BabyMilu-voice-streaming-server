@@ -99,12 +99,14 @@ class ConnectionHandler:
         self.client_is_speaking = False
         self.client_listen_mode = "auto"
 
-        # Mode state (e.g., "morning_alarm")
+        # Mode state (e.g., "morning_alarm") and generic follow-up behavior
         self.mode = None
         self.mode_specific_instructions = ""
         self.server_initiate_chat = False
-        self.alarm_followup_task = None
-        self.alarm_followup_count = 0
+        # For modes that may need proactive re-engagement
+        self.followup_task = None
+        self.followup_count = 0
+        self.followup_user_has_responded = False
 
         # 线程任务相关
         self.loop = asyncio.get_event_loop()
@@ -912,41 +914,55 @@ class ConnectionHandler:
         self.dialogue.update_system_message(self.prompt)
         self.logger.bind(tag=TAG).info(f"Ran change_system_prompt (new prompt length {len(prompt)}） with prompt:\n\n{prompt}\n")
 
-    def _schedule_alarm_followup(self):
-        """Schedule a follow-up chat after delay if no user response"""
+    def _schedule_followup(self):
+        """Schedule a mode follow-up chat after a delay if no user response"""
         # Cancel any existing follow-up task
-        if self.alarm_followup_task and not self.alarm_followup_task.done():
-            self.alarm_followup_task.cancel()
-        
+        if self.followup_task and not self.followup_task.done():
+            self.followup_task.cancel()
+
         # Schedule new follow-up
-        delay = getattr(self, "alarm_followup_delay", 10)
-        self.alarm_followup_task = asyncio.run_coroutine_threadsafe(
-            self._alarm_followup_trigger(delay), self.loop
+        delay = getattr(self, "followup_delay", 10)
+        self.followup_task = asyncio.run_coroutine_threadsafe(
+            self._followup_trigger(delay), self.loop
         )
-        self.logger.bind(tag=TAG).info(f"Scheduled alarm follow-up #{self.alarm_followup_count + 1} in {delay}s")
+        self.logger.bind(tag=TAG).info(f"Scheduled follow-up #{self.followup_count + 1} in {delay}s")
     
-    async def _alarm_followup_trigger(self, delay):
-        """Wait and trigger follow-up if not cancelled"""
+    async def _followup_trigger(self, delay):
+        """Wait and trigger mode follow-up if not cancelled
+
+        This uses the internal `is_user_input` flag when calling `chat()` so that:
+        - Server-initiated follow-up turns are clearly distinguished from real user input.
+        - Only genuine user messages (ASR/text paths that call `chat(..., is_user_input=True)`)
+          will flip `followup_user_has_responded` and permanently stop future follow-ups.
+        """
         try:
             await asyncio.sleep(delay)
-            # Only trigger if LLM is still idle
-            if self.llm_finish_task:
-                self.alarm_followup_count += 1
-                self.logger.bind(tag=TAG).info(f"Triggering alarm follow-up #{self.alarm_followup_count}")
+            # Only trigger if user still hasn't responded and LLM is idle
+            if not getattr(self, "followup_user_has_responded", False) and self.llm_finish_task:
+                self.followup_count += 1
+                self.logger.bind(tag=TAG).info(f"Triggering follow-up #{self.followup_count}")
                 # Include context in the query to ensure it's seen even with conversation persistence
-                followup_query = f"[No response from user - alarm follow-up #{self.alarm_followup_count}]"
-                self.executor.submit(self.chat, followup_query)
+                followup_query = f"[No response from user - follow-up #{self.followup_count}]"
+                self.executor.submit(
+                    self.chat,
+                    followup_query,
+                    depth=0,
+                    extra_inputs=None,
+                    is_user_input=False,
+                )
         except asyncio.CancelledError:
-            self.logger.bind(tag=TAG).info("Alarm follow-up cancelled (user responded)")
+            self.logger.bind(tag=TAG).info("Follow-up cancelled (user responded)")
 
-    def chat(self, query, depth=0, extra_inputs=None):
+    def chat(self, query, depth=0, extra_inputs=None, is_user_input=True):
         self.logger.bind(tag=TAG).info(f"大模型收到用户消息: {query}")
         self.llm_finish_task = False
         
-        # Cancel alarm follow-up if user provides input
-        if query and self.alarm_followup_task and not self.alarm_followup_task.done():
-            self.alarm_followup_task.cancel()
-            self.logger.bind(tag=TAG).info("User responded - cancelling alarm follow-up")
+        # If we got genuine user input, mark that the user responded and cancel any pending follow-up timer
+        if query and is_user_input:
+            self.followup_user_has_responded = True
+            if self.followup_task and not self.followup_task.done():
+                self.followup_task.cancel()
+                self.logger.bind(tag=TAG).info("User responded - cancelling follow-up")
 
         # 为最顶层时新建会话ID和发送FIRST请求
         if depth == 0:
@@ -999,8 +1015,8 @@ class ConnectionHandler:
             instructions = ""
             if self.mode_specific_instructions:
                 instructions += self.mode_specific_instructions
-                # Clear after use UNLESS alarm follow-ups are active (need persistent context)
-                if not getattr(self, "alarm_followup_enabled", False):
+                # Clear after use UNLESS mode follow-ups are active (need persistent context)
+                if not getattr(self, "followup_enabled", False):
                     self.mode_specific_instructions = ""
             
             if memory_str:
@@ -1029,8 +1045,6 @@ class ConnectionHandler:
                 )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM 处理出错 {query}: {e}")
-            import traceback
-            self.logger.bind(tag=TAG).error(f"Traceback:\n{traceback.format_exc()}")
             return None
 
         # 处理流式响应
@@ -1140,22 +1154,12 @@ class ConnectionHandler:
                 }
 
                 # 使用统一工具处理器处理所有工具调用
-                try:
-                    self.logger.bind(tag=TAG).debug("Invoking handle_llm_function_call")
-                except Exception:
-                    pass
                 result = asyncio.run_coroutine_threadsafe(
                     self.func_handler.handle_llm_function_call(
                         self, function_call_data
                     ),
                     self.loop,
                 ).result()
-                try:
-                    self.logger.bind(tag=TAG).info(
-                        f"handle_llm_function_call returned: action={getattr(result,'action',None)}, has_response={bool(getattr(result,'response',None))}, has_result={bool(getattr(result,'result',None))}"
-                    )
-                except Exception:
-                    pass
                 self._handle_function_result(result, function_call_data, depth=depth)
 
         # 存储对话内容
@@ -1173,9 +1177,13 @@ class ConnectionHandler:
             )
         self.llm_finish_task = True
         
-        # Schedule alarm follow-up if enabled
-        if getattr(self, "alarm_followup_enabled", False) and self.alarm_followup_count < getattr(self, "alarm_followup_max", 5):
-            self._schedule_alarm_followup()
+        # Schedule follow-up if enabled and the user has not responded yet
+        if (
+            getattr(self, "followup_enabled", False)
+            and not getattr(self, "followup_user_has_responded", False)
+            and self.followup_count < getattr(self, "followup_max", 5)
+        ):
+            self._schedule_followup()
         
         # 使用lambda延迟计算，只有在DEBUG级别时才执行get_llm_dialogue()
         self.logger.bind(tag=TAG).debug(
@@ -1219,7 +1227,8 @@ class ConnectionHandler:
                 }
             ]
             self.logger.bind(tag=TAG).info(f"Passing function_call_output in next turn: id={function_id}, len={len(str(tool_output)) if tool_output is not None else 0}")
-            self.chat("", depth=depth + 1, extra_inputs=extra_inputs)
+            # This is a tool-driven continuation, not fresh user input
+            self.chat("", depth=depth + 1, extra_inputs=extra_inputs, is_user_input=False)
             return
 
         if result.action == Action.RESPONSE:  # 直接回复前端
@@ -1262,7 +1271,8 @@ class ConnectionHandler:
                         content=text,
                     )
                 )
-                self.chat(text, depth=depth + 1)
+                # This is a tool-driven continuation, not fresh user input
+                self.chat(text, depth=depth + 1, is_user_input=False)
         elif result.action == Action.NOTFOUND or result.action == Action.ERROR:
             text = result.response if result.response else result.result
             # more user friendly error reporting
@@ -1435,7 +1445,8 @@ class ConnectionHandler:
         """Chat with the user and then close the connection"""
         try:
             # Use the existing chat method
-            self.chat(text)
+            # Internal/server-initiated close; not fresh user input
+            self.chat(text, is_user_input=False)
 
             # After chat is complete, close the connection
             self.close_after_chat = True
