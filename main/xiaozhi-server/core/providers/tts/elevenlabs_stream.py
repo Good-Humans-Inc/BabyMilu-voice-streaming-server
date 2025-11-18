@@ -1,10 +1,11 @@
 import os
 import json
 import uuid
-import requests
 from config.logger import setup_logging
 from datetime import datetime
 from core.providers.tts.base import TTSProviderBase
+from elevenlabs.client import ElevenLabs
+from elevenlabs import VoiceSettings
 
 TAG = __name__
 logger = setup_logging()
@@ -12,34 +13,31 @@ logger = setup_logging()
 class TTSProvider(TTSProviderBase):
     def __init__(self, config, delete_audio_file):
         super().__init__(config, delete_audio_file)
-        self.url = config.get("url")
-        self.method = config.get("method", "GET")
-        self.headers = config.get("headers", {})
-        self.format = config.get("format", "wav")
-        self.audio_file_type = config.get("format", "wav")
-        self.output_file = config.get("output_dir", "tmp/")
-        self.params = config.get("params")
-        # Default voice fallback (used if connection doesn't provide one)
-        self.default_voice_id = config.get("default_voice_id") or config.get("voice_id")
+        self.api_key = config.get("xi-api-key")
+        if not self.api_key:
+            raise ValueError("xi-api-key is required in config for ElevenLabs TTS")
 
-        if isinstance(self.params, str):
-            try:
-                self.params = json.loads(self.params)
-            except json.JSONDecodeError:
-                raise ValueError("Custom TTS配置参数出错,无法将字符串解析为对象")
-        elif not isinstance(self.params, dict):
-            raise TypeError("Custom TTS配置参数出错, 请参考配置说明")
+        self.client = ElevenLabs(
+            api_key=self.api_key,
+            base_url=config.get("base_url", "https://api.elevenlabs.io")
+        )
+        
+        # Provider settings
+        self.output_dir = config.get("output_dir", "tmp/")
+        self.audio_file_type = config.get("format", "mp3")
+        
+        # API parameters
+        self.default_voice_id = config.get("default_voice_id")
+        self.model_id = config.get("model_id", "eleven_multilingual_v2")
+        self.optimize_streaming_latency = config.get("optimize_streaming_latency")
+        self.output_format = config.get("output_format")
+        self.voice_settings_dict = config.get("voice_settings")
+
 
     def generate_filename(self):
-        return os.path.join(self.output_file, f"tts-{datetime.now().date()}@{uuid.uuid4().hex}.{self.format}")
+        return os.path.join(self.output_dir, f"tts-{datetime.now().date()}@{uuid.uuid4().hex}.{self.audio_file_type}")
 
     async def text_to_speak(self, text, output_file):
-        request_params = {}
-        for k, v in self.params.items():
-            if isinstance(v, str) and "{prompt_text}" in v:
-                v = v.replace("{prompt_text}", text)
-            request_params[k] = v
-
         # Resolve voice_id: prefer connection value, then default from config
         voice_id = None
         if self.conn and getattr(self.conn, "voice_id", None):
@@ -47,48 +45,50 @@ class TTSProvider(TTSProviderBase):
         elif getattr(self, "default_voice_id", None):
             voice_id = str(self.default_voice_id)
 
-        # Build final URL from base + voice_id; abort if voice_id missing
+        # Abort if voice_id missing
         if not voice_id:
             logger.bind(tag=TAG).error("No voice_id resolved (conn/default). Abort TTS request")
             raise Exception("No voice_id resolved; cannot call TTS")
 
-        final_url = f"{self.url.rstrip('/')}/{voice_id}"
-
-        safe_headers = dict(self.headers or {})
-        for _k in list(safe_headers.keys()):
-            if _k.lower() in ("xi-api-key", "authorization"):
-                safe_headers[_k] = "***"
         logger.debug(
-            f"CustomTTS request: URL={final_url}, JSON={request_params}, HEADERS={safe_headers}"
+            f"ElevenLabs TTS request: voice_id={voice_id}, model_id={self.model_id}"
         )
 
-        if self.method.upper() == "POST":
-            resp = requests.post(
-                final_url, json=request_params, headers=self.headers, timeout=15, stream=True
+        try:
+            voice_settings = None
+            if self.voice_settings_dict:
+                voice_settings = VoiceSettings(**self.voice_settings_dict)
+
+            audio_stream = self.client.text_to_speech.stream(
+                text=text,
+                voice_id=voice_id,
+                model_id=self.model_id,
+                voice_settings=voice_settings,
+                optimize_streaming_latency=self.optimize_streaming_latency,
+                output_format=self.output_format
             )
-        else:
-            resp = requests.get(
-                final_url, params=request_params, headers=self.headers, timeout=15, stream=True
-            )
-        if resp.status_code == 200:
+
             if output_file:
                 with open(output_file, "wb") as file:
-                    for chunk in resp.iter_content(chunk_size=4096):
+                    for chunk in audio_stream:
                         if self.conn and self.conn.client_abort:
                             logger.bind(tag=TAG).info("TTS interrupted by client")
-                            resp.close()
+                            # We can't really 'close' the stream from the SDK in the same way.
+                            # We just stop iterating.
                             return
-                        file.write(chunk)
+                        if chunk:
+                            file.write(chunk)
             else:
                 audio_data = bytearray()
-                for chunk in resp.iter_content(chunk_size=4096):
+                for chunk in audio_stream:
                     if self.conn and self.conn.client_abort:
                         logger.bind(tag=TAG).info("TTS interrupted by client")
-                        resp.close()
                         return None
-                    audio_data.extend(chunk)
+                    if chunk:
+                        audio_data.extend(chunk)
                 return bytes(audio_data)
-        else:
-            error_msg = f"Custom TTS请求失败: {resp.status_code} - {resp.text}"
+
+        except Exception as e:
+            error_msg = f"ElevenLabs TTS request failed: {str(e)}"
             logger.bind(tag=TAG).error(error_msg)
-            raise Exception(error_msg)  # 抛出异常，让调用方捕获
+            raise Exception(error_msg)
