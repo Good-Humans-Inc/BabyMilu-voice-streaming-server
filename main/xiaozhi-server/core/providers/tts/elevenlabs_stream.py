@@ -55,6 +55,9 @@ class TTSProvider(TTSProviderBase):
         # Optional voice & generation config
         self.voice_settings_dict = config.get("voice_settings") or {}
         self.generation_config = config.get("generation_config") or {}
+        # 文本缓冲，用于避免将半个单词拆成多个片段发送
+        self.pending_text = ""
+
         # PCM(16k) -> Opus encoder, same as other streaming providers
         self.opus_encoder = opus_encoder_utils.OpusEncoderUtils(
             sample_rate=16000, channels=1, frame_size_ms=60
@@ -73,6 +76,8 @@ class TTSProvider(TTSProviderBase):
                 if message.sentence_type == SentenceType.FIRST:
                     # Reset abort flag at start of a turn
                     self.conn.client_abort = False
+                    # 清空上一轮残留文本缓冲
+                    self.pending_text = ""
 
                 # Global abort
                 if self.conn.client_abort:
@@ -89,6 +94,8 @@ class TTSProvider(TTSProviderBase):
                         logger.bind(tag=TAG).warning(
                             f"打断时关闭ElevenLabs会话失败: {e}"
                         )
+                    # 打断时清空文本缓冲
+                    self.pending_text = ""
                     continue
 
                 if message.sentence_type == SentenceType.FIRST:
@@ -117,19 +124,39 @@ class TTSProvider(TTSProviderBase):
 
                 elif ContentType.TEXT == message.content_type:
                     if message.content_detail:
-                        try:
-                            logger.bind(tag=TAG).debug(
-                                f"开始发送TTS文本: {message.content_detail}"
-                            )
-                            future = asyncio.run_coroutine_threadsafe(
-                                self.text_to_speak(message.content_detail, None),
-                                loop=self.conn.loop,
-                            )
-                            future.result()
-                            logger.bind(tag=TAG).debug("TTS文本发送成功")
-                        except Exception as e:
-                            logger.bind(tag=TAG).error(f"发送TTS文本失败: {str(e)}")
-                            continue
+                        # 将LLM增量片段追加到缓冲，避免半个单词拆分发送
+                        self.pending_text += message.content_detail
+
+                        # 查找最后一个“安全”分割点（空格、换行或常见标点）
+                        safe_chars = ["\n", "\t", ".", "!", "?", "！", "？"]
+                        last_idx = -1
+                        for ch in safe_chars:
+                            idx = self.pending_text.rfind(ch)
+                            if idx > last_idx:
+                                last_idx = idx
+
+                        # 如果找到安全边界，发送该边界之前的内容
+                        if last_idx != -1:
+                            to_send = self.pending_text[: last_idx + 1]
+                            self.pending_text = self.pending_text[last_idx + 1 :]
+
+                            segment = to_send.strip()
+                            if segment:
+                                try:
+                                    logger.bind(tag=TAG).info(
+                                        f"开始发送TTS文本: {to_send}"
+                                    )
+                                    future = asyncio.run_coroutine_threadsafe(
+                                        self.text_to_speak(to_send, None),
+                                        loop=self.conn.loop,
+                                    )
+                                    future.result()
+                                    logger.bind(tag=TAG).debug("TTS文本发送成功")
+                                except Exception as e:
+                                    logger.bind(tag=TAG).error(
+                                        f"发送TTS文本失败: {str(e)}"
+                                    )
+                                    continue
 
                 elif ContentType.FILE == message.content_type:
                     logger.bind(tag=TAG).info(
@@ -141,6 +168,25 @@ class TTSProvider(TTSProviderBase):
 
                 if message.sentence_type == SentenceType.LAST:
                     try:
+                        # flush 剩余缓冲文本（即使没有安全边界，也要让最后几字符被合成）
+                        if self.pending_text.strip():
+                            try:
+                                logger.bind(tag=TAG).info(
+                                    f"开始发送TTS文本(收尾): {self.pending_text}"
+                                )
+                                future = asyncio.run_coroutine_threadsafe(
+                                    self.text_to_speak(self.pending_text, None),
+                                    loop=self.conn.loop,
+                                )
+                                future.result()
+                                logger.bind(tag=TAG).debug("TTS文本发送成功(收尾)")
+                            except Exception as e:
+                                logger.bind(tag=TAG).error(
+                                    f"发送TTS收尾文本失败: {str(e)}"
+                                )
+                            finally:
+                                self.pending_text = ""
+
                         logger.bind(tag=TAG).info("开始结束TTS会话...")
                         future = asyncio.run_coroutine_threadsafe(
                             self.finish_session(self.conn.sentence_id),
@@ -337,10 +383,11 @@ class TTSProvider(TTSProviderBase):
 
                         audio_b64 = data.get("audio")
                         if audio_b64:
-                            # FIRST marker; we don't have per-sentence text here, so pass None
+                            # FIRST marker: 当第一次收到音频时，使用聚合后的LLM文本（如有）
                             if self.tts_audio_first_sentence:
+                                first_text = getattr(self.conn, "tts_MessageText", None)
                                 self.tts_audio_queue.put(
-                                    (SentenceType.FIRST, [], None)
+                                    (SentenceType.FIRST, [], first_text)
                                 )
                                 self.tts_audio_first_sentence = False
 
@@ -359,10 +406,16 @@ class TTSProvider(TTSProviderBase):
 
                         # isFinal indicates end of this generation
                         if data.get("isFinal"):
+                            # 在TTS完成时打印整段LLM输出（如果已聚合）
+                            final_text = getattr(self.conn, "tts_MessageText", None)
+                            if final_text:
+                                logger.bind(tag=TAG).info(
+                                    f"句子语音生成成功： {final_text}"
+                                )
                             logger.bind(tag=TAG).debug("ElevenLabs TTS任务完成~")
                             # 推送LAST标记，通知播放线程结束本轮TTS
                             self.tts_audio_queue.put(
-                                (SentenceType.LAST, [], None)
+                                (SentenceType.LAST, [], final_text)
                             )
                             session_finished = True
                             break
