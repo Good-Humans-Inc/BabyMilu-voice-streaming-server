@@ -3,6 +3,9 @@ from aiohttp import web
 from config.logger import setup_logging
 from core.api.ota_handler import OTAHandler
 from core.api.vision_handler import VisionHandler
+from core.mqtt_alarm import publish_ws_start
+import os
+import json
 
 TAG = __name__
 
@@ -56,6 +59,8 @@ class SimpleHttpServer:
                     web.get("/mcp/vision/explain", self.vision_handler.handle_get),
                     web.post("/mcp/vision/explain", self.vision_handler.handle_post),
                     web.options("/mcp/vision/explain", self.vision_handler.handle_post),
+                    # Minimal alarm trigger: publish ws_start to device via MQTT
+                    web.post("/alarm/ws_start", self.handle_alarm_ws_start),
                 ]
             )
 
@@ -68,3 +73,33 @@ class SimpleHttpServer:
             # 保持服务运行
             while True:
                 await asyncio.sleep(3600)  # 每隔 1 小时检查一次
+
+    async def handle_alarm_ws_start(self, request: web.Request) -> web.Response:
+        """HTTP endpoint to publish ws_start to a device via MQTT.
+        Body JSON:
+        {
+          "deviceId": "A4:CF:12:34:56:78",
+          "wsUrl": "ws://<server>:8000/xiaozhi/v1/",
+          "version": 3,
+          "broker": "mqtt://localhost:1883"   # optional, fallback env MQTT_URL
+        }
+        """
+        try:
+            data = await request.json()
+        except Exception:
+            text = await request.text()
+            try:
+                data = json.loads(text)
+            except Exception:
+                return web.json_response({"ok": False, "error": "invalid json"}, status=400)
+
+        device_id = (data.get("deviceId") or data.get("device_id") or "").strip()
+        ws_url = (data.get("wsUrl") or data.get("wss") or "").strip()
+        version = int(data.get("version") or 3)
+        broker = (data.get("broker") or os.environ.get("MQTT_URL") or "").strip()
+
+        if not device_id or not ws_url:
+            return web.json_response({"ok": False, "error": "deviceId and wsUrl are required"}, status=400)
+
+        ok = publish_ws_start(broker, device_id, ws_url, version=version)
+        return web.json_response({"ok": bool(ok)})
