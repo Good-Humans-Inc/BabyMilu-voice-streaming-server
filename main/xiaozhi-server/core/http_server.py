@@ -161,9 +161,10 @@ class SimpleHttpServer:
         except Exception as e:
             return web.json_response({"ok": False, "error": f"tts init failed: {e}"}, status=500)
 
-        # Synthesize to file (blocking call returning file path)
+        # Synthesize to file in a worker thread (avoid asyncio.run in event loop)
         try:
-            tts_file_path = tts_provider.to_tts(text_to_say)
+            loop = asyncio.get_running_loop()
+            tts_file_path = await loop.run_in_executor(None, tts_provider.to_tts, text_to_say)
         except Exception as e:
             return web.json_response({"ok": False, "error": f"tts synth failed: {e}"}, status=500)
 
@@ -289,7 +290,8 @@ class SimpleHttpServer:
                 pause_ms = int(step.get("pauseMs") or 0)
 
                 try:
-                    tts_file_path = tts_provider.to_tts(text_to_say)
+                    loop = asyncio.get_running_loop()
+                    tts_file_path = await loop.run_in_executor(None, tts_provider.to_tts, text_to_say)
                 except Exception as e:
                     results.append({"idx": idx, "error": f"tts synth failed: {e}"})
                     continue
@@ -368,7 +370,8 @@ class SimpleHttpServer:
 
                 # Synthesize TTS to file
                 try:
-                    tts_file_path = tts_provider.to_tts(text_to_say)
+                    loop = asyncio.get_running_loop()
+                    tts_file_path = await loop.run_in_executor(None, tts_provider.to_tts, text_to_say)
                 except Exception as e:
                     results.append({"idx": idx, "error": f"tts synth failed: {e}"})
                     continue
