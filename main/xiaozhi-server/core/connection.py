@@ -99,10 +99,8 @@ class ConnectionHandler:
         self.client_is_speaking = False
         self.client_listen_mode = "auto"
 
-        # Mode state (e.g., "morning_alarm") and generic follow-up behavior
-        self.mode = None
+        # Mode specific attributes
         self.mode_specific_instructions = ""
-        self.server_initiate_chat = False
         # For modes that may need proactive re-engagement
         self.followup_task = None
         self.followup_count = 0
@@ -1030,9 +1028,8 @@ class ConnectionHandler:
             instructions = ""
             if self.mode_specific_instructions:
                 instructions += self.mode_specific_instructions
-                # Clear after use UNLESS mode follow-ups are active (need persistent context)
-                if not getattr(self, "followup_enabled", False):
-                    self.mode_specific_instructions = ""
+                # Clear after use 
+                self.mode_specific_instructions = ""
             
             if memory_str:
                 instructions += f"\n\n<memory>\n{memory_str}\n</memory>"

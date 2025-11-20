@@ -64,8 +64,8 @@ async def handleHelloMessage(conn, msg_json):
         #     features["mode"] = "morning_alarm"
         #     conn.logger.bind(tag=TAG).warning("🚨 DEMO MODE: Forcing morning_alarm mode 🚨")
         if features.get("mode"):
-            conn.mode = features.get("mode").lower()
-            mode_config = conn.config.get("mode_config", {}).get(conn.mode, {})
+            mode = features.get("mode").lower()
+            mode_config = conn.config.get("mode_config", {}).get(mode, {})
             # Load instructions from file if specified
             instructions_file = mode_config.get("instructions_file")
             if instructions_file:
