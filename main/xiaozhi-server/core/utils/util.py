@@ -282,19 +282,39 @@ def audio_to_data(audio_file_path: str, is_opus: bool = True) -> list[bytes]:
 
 def audio_bytes_to_data_stream(audio_bytes, file_type, is_opus, callback: Callable[[Any], Any]) -> None:
     """
-    直接用音频二进制数据转为opus/pcm数据，支持wav、mp3、p3
+    直接用音频二进制数据转为opus/pcm数据，支持wav、mp3、p3、pcm
     """
-    if file_type == "p3":
+    normalized_type = (file_type or "").lower()
+    if normalized_type == "p3":
         # 直接用p3解码
         return p3.decode_opus_from_bytes_stream(audio_bytes, callback)
-    else:
-        # 其他格式用pydub
-        audio = AudioSegment.from_file(
-            BytesIO(audio_bytes), format=file_type, parameters=["-nostdin"]
+
+    if normalized_type.startswith("pcm"):
+        # 处理无头PCM数据，例如pcm、pcm_16000等
+        sample_rate = 16000
+        parts = normalized_type.split("_", 1)
+        if len(parts) == 2:
+            try:
+                sample_rate = int(parts[1])
+            except ValueError:
+                pass
+        audio = AudioSegment.from_raw(
+            BytesIO(audio_bytes),
+            sample_width=2,
+            frame_rate=sample_rate,
+            channels=1,
         )
-        audio = audio.set_channels(1).set_frame_rate(16000).set_sample_width(2)
-        raw_data = audio.raw_data
-        pcm_to_data_stream(raw_data, is_opus, callback)
+    else:
+        # 其他格式用pydub解码
+        audio = AudioSegment.from_file(
+            BytesIO(audio_bytes),
+            format=normalized_type if normalized_type else None,
+            parameters=["-nostdin"],
+        )
+
+    audio = audio.set_channels(1).set_frame_rate(16000).set_sample_width(2)
+    raw_data = audio.raw_data
+    pcm_to_data_stream(raw_data, is_opus, callback)
 
 
 def pcm_to_data_stream(raw_data, is_opus=True, callback: Callable[[Any], Any] = None):
