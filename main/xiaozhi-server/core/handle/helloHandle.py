@@ -60,9 +60,9 @@ async def handleHelloMessage(conn, msg_json):
         conn.features = features
         # Mode功能（如morning_alarm闹钟）
         # HACK: Force morning_alarm mode for demo (remove this line when device sends mode)
-        if not features.get("mode"):
-            features["mode"] = "morning_alarm"
-            conn.logger.bind(tag=TAG).warning("🚨 DEMO MODE: Forcing morning_alarm mode 🚨")
+        # if not features.get("mode"):
+        #     features["mode"] = "morning_alarm"
+        #     conn.logger.bind(tag=TAG).warning("🚨 DEMO MODE: Forcing morning_alarm mode 🚨")
         if features.get("mode"):
             conn.mode = features.get("mode").lower()
             mode_config = conn.config.get("mode_config", {}).get(conn.mode, {})
