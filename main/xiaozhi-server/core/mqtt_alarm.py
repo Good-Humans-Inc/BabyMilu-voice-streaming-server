@@ -65,3 +65,49 @@ def publish_ws_start(
         return False
 
 
+
+def publish_down_command(
+    broker_url: Optional[str],
+    device_mac: str,
+    payload: dict,
+) -> bool:
+    """
+    Publish a JSON command to device downlink topic.
+    Topic: xiaozhi/<MAC>/down
+    """
+    url = broker_url or os.environ.get("MQTT_URL", "mqtt://localhost:1883")
+    if url.startswith("mqtt://"):
+        url = url.replace("mqtt://", "tcp://", 1)
+    if not url.startswith(("tcp://", "ws://", "wss://", "ssl://")):
+        url = "tcp://" + url
+    # Parse host and port
+    try:
+        scheme, rest = url.split("://", 1)
+        if ":" in rest:
+            host, port_str = rest.split(":", 1)
+            port = int(port_str)
+        else:
+            host = rest
+            port = 1883
+    except Exception:
+        host, port = "localhost", 1883
+
+    topic = f"xiaozhi/{device_mac}/down"
+    client = mqtt_client.Client(mqtt_client.CallbackAPIVersion.VERSION2)
+    try:
+        client.connect(host, port, keepalive=30)
+        client.loop_start()
+        result = client.publish(topic, json.dumps(payload), qos=1)
+        result.wait_for_publish(2.0)
+        ok = result.is_published()
+        client.loop_stop()
+        client.disconnect()
+        return ok
+    except Exception:
+        try:
+            client.loop_stop()
+            client.disconnect()
+        except Exception:
+            pass
+        return False
+

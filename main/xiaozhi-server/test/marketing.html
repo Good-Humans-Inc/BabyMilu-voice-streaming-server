@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Marketing Say Tool</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; margin: 24px; color: #222; }
+    h1 { font-size: 20px; margin-bottom: 16px; }
+    .card { max-width: 720px; border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+    .row { display: flex; gap: 12px; margin-bottom: 12px; }
+    .row > .col { flex: 1; }
+    label { display: block; font-size: 12px; color: #555; margin-bottom: 6px; }
+    input, textarea, select { width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; outline: none; }
+    textarea { min-height: 120px; resize: vertical; }
+    input:focus, textarea:focus, select:focus { border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,0.15); }
+    .actions { display: flex; gap: 12px; align-items: center; }
+    button { background: #6366f1; color: #fff; border: 0; border-radius: 10px; padding: 10px 16px; font-size: 14px; cursor: pointer; }
+    button:disabled { background: #c7c9ff; cursor: not-allowed; }
+    .muted { color: #6b7280; font-size: 12px; }
+    .status { margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-size: 13px; }
+    .status.ok { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
+    .status.err { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+    .status.info { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+    .help { margin-top: 16px; font-size: 12px; color: #4b5563; }
+    .small { font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Marketing Say Tool</h1>
+  <div class="card">
+    <div class="row">
+      <div class="col">
+        <label>Device MAC (underscored) e.g. A4_CF_12_34_56_78</label>
+        <input id="deviceId" placeholder="A4_CF_12_34_56_78">
+      </div>
+      <div class="col">
+        <label>Emotion (optional)</label>
+        <input id="emotion" placeholder="happy">
+      </div>
+    </div>
+    <div class="row">
+      <div class="col">
+        <label>Gain</label>
+        <input id="gain" type="number" step="0.1" min="0" value="1.0">
+      </div>
+      <div class="col">
+        <label>MQTT Broker (optional)</label>
+        <input id="broker" placeholder="mqtt://localhost:1883">
+      </div>
+    </div>
+    <div class="row">
+      <div class="col">
+        <label>Base URL (device can HTTP GET; defaults to this server origin)</label>
+        <input id="baseUrl" placeholder="">
+      </div>
+    </div>
+    <div class="row">
+      <div class="col">
+        <label>Text to say</label>
+        <textarea id="text" placeholder="Enter the sentence to speak on device..."></textarea>
+      </div>
+    </div>
+    <div class="actions">
+      <button id="sendBtn">Send to Device</button>
+      <span class="muted">This synthesizes TTS, hosts it under /tts, sets emotion, then plays it via MQTT.</span>
+    </div>
+    <div id="status" class="status info" style="display:none;"></div>
+    <div class="help">
+      - Device must be online and subscribed to downlink topic.<br>
+      - If broker is omitted, server uses MQTT_URL env or defaults to localhost:1883.<br>
+      - If baseUrl is empty, we use window.location.origin.
+    </div>
+  </div>
+  <div class="card" style="margin-top:16px;">
+    <h2 class="small" style="margin:0 0 12px 0;">Script (multi-steps)</h2>
+    <div id="steps"></div>
+    <div class="actions" style="margin-top:8px;">
+      <button id="addStepBtn" type="button">Add Step</button>
+      <button id="runScriptBtn" type="button" style="background:#10b981">Run Script</button>
+      <span class="muted">Each step: Text (required), Emotion (optional), Gain, Pause after (ms).</span>
+    </div>
+    <div class="row" style="align-items:center;margin-top:6px;">
+      <div class="col" style="flex:0 0 auto;">
+        <label class="small" style="display:flex;gap:8px;align-items:center;">
+          <input id="combine" type="checkbox" checked>
+          Combine into single audio
+        </label>
+      </div>
+    </div>
+    <div id="scriptStatus" class="status info" style="display:none;"></div>
+  </div>
+  <script>
+    const el = id => document.getElementById(id);
+    const statusBox = el('status');
+    function showStatus(kind, msg) {
+      statusBox.className = 'status ' + (kind || 'info');
+      statusBox.textContent = msg;
+      statusBox.style.display = 'block';
+    }
+    async function postJSON(url, body) {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        const err = data && (data.error || data.message);
+        throw new Error(err || ('HTTP ' + resp.status));
+      }
+      return data;
+    }
+    function row(html) {
+      const wrap = document.createElement('div');
+      wrap.className = 'row';
+      wrap.innerHTML = html;
+      return wrap;
+    }
+    function addStep(prefill={}) {
+      const steps = document.getElementById('steps');
+      const idx = steps.children.length;
+      const r = row(`
+        <div class="col">
+          <label>Step ${idx+1} - Text</label>
+          <textarea class="step-text" placeholder="Sentence...">${prefill.text||''}</textarea>
+        </div>
+        <div class="col">
+          <label>Emotion</label>
+          <input class="step-emotion" placeholder="happy" value="${prefill.emotion||''}">
+          <div class="row" style="gap:8px;margin:8px 0 0 0;">
+            <div class="col">
+              <label class="small">Gain</label>
+              <input class="step-gain" type="number" step="0.1" min="0" value="${prefill.gain!=null?prefill.gain:1.0}">
+            </div>
+            <div class="col">
+              <label class="small">Pause after (ms)</label>
+              <input class="step-pause" type="number" step="100" min="0" value="${prefill.pauseMs||0}">
+            </div>
+          </div>
+          <button type="button" class="small" data-action="remove" style="margin-top:6px;background:#ef4444">Remove</button>
+        </div>
+      `);
+      steps.appendChild(r);
+      r.querySelector('[data-action="remove"]').addEventListener('click', () => {
+        r.remove();
+        // re-label remaining steps
+        [...steps.children].forEach((c, i) => {
+          const lab = c.querySelector('label');
+          if (lab) lab.textContent = `Step ${i+1} - Text`;
+        });
+      });
+    }
+    function showScriptStatus(kind, msg) {
+      const box = el('scriptStatus');
+      box.className = 'status ' + (kind || 'info');
+      box.textContent = msg;
+      box.style.display = 'block';
+    }
+    el('sendBtn').addEventListener('click', async () => {
+      const deviceId = el('deviceId').value.trim();
+      const text = el('text').value.trim();
+      const emotion = el('emotion').value.trim();
+      const gain = parseFloat(el('gain').value || '1.0');
+      const broker = el('broker').value.trim();
+      const baseUrl = (el('baseUrl').value || window.location.origin).trim();
+      if (!deviceId) {
+        showStatus('err', 'Please enter Device MAC (underscored).');
+        return;
+      }
+      if (!text) {
+        showStatus('err', 'Please enter text to say.');
+        return;
+      }
+      el('sendBtn').disabled = true;
+      showStatus('info', 'Sending...');
+      try {
+        const body = { deviceId, text, gain, baseUrl };
+        if (emotion) body.emotion = emotion;
+        if (broker) body.broker = broker;
+        const res = await postJSON('/marketing/say', body);
+        if (res.ok) {
+          const sent = res.sent || {};
+          const detail = `TTS URL: ${res.ttsUrl || '-'} | Emotion sent: ${!!sent.llm} | Play sent: ${!!sent.play_url}`;
+          showStatus('ok', 'Done. ' + detail);
+        } else {
+          showStatus('err', 'Request failed: ' + JSON.stringify(res));
+        }
+      } catch (e) {
+        showStatus('err', 'Error: ' + (e?.message || e));
+      } finally {
+        el('sendBtn').disabled = false;
+      }
+    });
+    el('addStepBtn').addEventListener('click', () => addStep({}));
+    el('runScriptBtn').addEventListener('click', async () => {
+      const deviceId = el('deviceId').value.trim();
+      const broker = el('broker').value.trim();
+      const baseUrl = (el('baseUrl').value || window.location.origin).trim();
+      if (!deviceId) {
+        showScriptStatus('err', 'Please enter Device MAC (underscored).');
+        return;
+      }
+      const stepsWrap = document.getElementById('steps');
+      const stepEls = [...stepsWrap.children];
+      if (stepEls.length === 0) {
+        showScriptStatus('err', 'Add at least one step.');
+        return;
+      }
+      const steps = stepEls.map(elm => {
+        const text = elm.querySelector('.step-text').value.trim();
+        const emotion = elm.querySelector('.step-emotion').value.trim();
+        const gain = parseFloat(elm.querySelector('.step-gain').value || '1.0');
+        const pauseMs = parseInt(elm.querySelector('.step-pause').value || '0', 10);
+        const step = { text, gain, pauseMs };
+        if (emotion) step.emotion = emotion;
+        return step;
+      }).filter(s => s.text);
+      if (steps.length === 0) {
+        showScriptStatus('err', 'Steps must include text.');
+        return;
+      }
+      const btn = el('runScriptBtn');
+      btn.disabled = true;
+      showScriptStatus('info', 'Running script...');
+      try {
+        const body = { deviceId, mode: 'download', steps, baseUrl, combine: document.getElementById('combine').checked };
+        if (broker) body.broker = broker;
+        const res = await postJSON('/marketing/script', body);
+        if (res.ok) {
+          const lines = (res.results || []).map(r =>
+            `#${r.idx+1} llm=${!!r.llm} play=${!!r.play_url} url=${r.ttsUrl||'-'}`
+          ).join('\n');
+          const combined = res.combinedUrl ? `\ncombined: ${res.combinedUrl}` : '';
+          showScriptStatus('ok', 'Done.\n' + lines + combined);
+        } else {
+          showScriptStatus('err', 'Request failed: ' + JSON.stringify(res));
+        }
+      } catch (e) {
+        showScriptStatus('err', 'Error: ' + (e?.message || e));
+      } finally {
+        btn.disabled = false;
+      }
+    });
+    // seed 3 steps for quick testing
+    addStep({ text: 'Welcome to our promotion!', emotion: 'happy', gain: 1.0, pauseMs: 300 });
+    addStep({ text: 'Up to 30% off this week.' });
+    addStep({ text: 'Don’t miss out!', emotion: 'excited' });
+  </script>
+</body>
+</html>
+
