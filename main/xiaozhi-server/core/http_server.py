@@ -171,8 +171,20 @@ class SimpleHttpServer:
         if not tts_file_path or not os.path.exists(tts_file_path):
             return web.json_response({"ok": False, "error": "tts file not generated"}, status=500)
 
-        # Compute device-accessible URL
-        basename = os.path.basename(tts_file_path)
+        # Normalize to device format (24k mono 16-bit WAV) and compute URL
+        wav_path = tts_file_path
+        try:
+            # Reuse script helper by inlining a small normalize here
+            root, ext = os.path.splitext(tts_file_path)
+            aud = AudioSegment.from_file(tts_file_path)
+            aud = aud.set_frame_rate(24000).set_channels(1).set_sample_width(2)
+            wav_path = f"{root}.wav" if ext.lower() != ".wav" else f"{root}.norm24k.wav"
+            aud.export(wav_path, format="wav")
+        except Exception:
+            # fall back to original if normalization fails
+            wav_path = tts_file_path
+
+        basename = os.path.basename(wav_path)
         # Prefer explicit baseUrl if provided, else construct from request.host and configured http_port
         provided_base = (data.get("baseUrl") or "").rstrip("/")
         if provided_base:
@@ -259,19 +271,19 @@ class SimpleHttpServer:
         results = []
         combined_url = None
 
-        def ensure_wav_16k_mono(src_path: str) -> str:
+        def ensure_wav_24k_mono(src_path: str) -> str:
             try:
                 root, ext = os.path.splitext(src_path)
                 if ext.lower() == ".wav":
-                    # normalize to 16k mono 16-bit in case source wav is different
+                    # normalize to 24k mono 16-bit in case source wav is different
                     aud = AudioSegment.from_file(src_path)
-                    aud = aud.set_frame_rate(16000).set_channels(1).set_sample_width(2)
-                    tmp = f"{root}.norm16k.wav"
+                    aud = aud.set_frame_rate(24000).set_channels(1).set_sample_width(2)
+                    tmp = f"{root}.norm24k.wav"
                     aud.export(tmp, format="wav")
                     return tmp
                 target = f"{root}.wav"
                 aud = AudioSegment.from_file(src_path)
-                aud = aud.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+                aud = aud.set_frame_rate(24000).set_channels(1).set_sample_width(2)
                 aud.export(target, format="wav")
                 return target
             except Exception:
@@ -304,9 +316,9 @@ class SimpleHttpServer:
                     results.append({"idx": idx, "error": "tts file not generated"})
                     continue
 
-                wav_path = ensure_wav_16k_mono(tts_file_path)
+                wav_path = ensure_wav_24k_mono(tts_file_path)
                 try:
-                    seg = AudioSegment.from_file(wav_path).set_frame_rate(16000).set_channels(1).set_sample_width(2)
+                    seg = AudioSegment.from_file(wav_path).set_frame_rate(24000).set_channels(1).set_sample_width(2)
                 except Exception:
                     results.append({"idx": idx, "error": "failed to load audio"})
                     continue
@@ -328,7 +340,7 @@ class SimpleHttpServer:
             combined = segments[0]
             for s in segments[1:]:
                 combined += s
-            combined = combined.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+            combined = combined.set_frame_rate(24000).set_channels(1).set_sample_width(2)
 
             os.makedirs("tmp", exist_ok=True)
             combined_name = f"tts-combined-{int(asyncio.get_running_loop().time()*1000)}.wav"
@@ -385,7 +397,7 @@ class SimpleHttpServer:
                     continue
 
                 # Ensure WAV 16k mono for device playback
-                wav_path = ensure_wav_16k_mono(tts_file_path)
+                wav_path = ensure_wav_24k_mono(tts_file_path)
                 basename = os.path.basename(wav_path)
                 tts_url = f"{base_url}/tts/{basename}"
 
