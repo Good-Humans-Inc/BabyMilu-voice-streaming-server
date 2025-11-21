@@ -6,6 +6,8 @@ from core.api.vision_handler import VisionHandler
 from core.mqtt_alarm import publish_ws_start, publish_down_command
 from core.utils.tts import create_instance
 from pydub import AudioSegment
+from core.utils.opus_encoder_utils import OpusEncoderUtils
+import struct
 import math
 import os
 import json
@@ -111,6 +113,7 @@ class SimpleHttpServer:
         ws_url = (data.get("wsUrl") or data.get("wss") or "").strip()
         version = int(data.get("version") or 3)
         broker = (data.get("broker") or os.environ.get("MQTT_URL") or "").strip()
+        out_format = (data.get("format") or "").strip().lower()  # "opus_file" to serve .p3
 
         if not device_id or not ws_url:
             return web.json_response({"ok": False, "error": "deviceId and wsUrl are required"}, status=400)
@@ -193,17 +196,42 @@ class SimpleHttpServer:
             # request.host may include host:port of this HTTP server
             base_url = f"http://{request.host}"
         tts_url = f"{base_url}/tts/{basename}"
+        # Optional: convert to BinaryProtocol3-framed Opus and use play_opus_url
+        if out_format == "opus_file":
+            try:
+                root, _ = os.path.splitext(wav_path)
+                p3_path = f"{root}.p3"
+                aud = AudioSegment.from_file(wav_path).set_frame_rate(16000).set_channels(1).set_sample_width(2)
+                pcm_bytes = aud.raw_data
+                enc = OpusEncoderUtils(sample_rate=16000, channels=1, frame_size_ms=60)
+                frames: list[bytes] = []
+                enc.encode_pcm_to_opus_stream(pcm_bytes, end_of_stream=True, callback=lambda pkt: frames.append(pkt))
+                with open(p3_path, "wb") as f:
+                    for pkt in frames:
+                        f.write(struct.pack(">BBH", 0, 0, len(pkt)))
+                        f.write(pkt)
+                basename = os.path.basename(p3_path)
+                tts_url = f"{base_url}/tts/{basename}"
+            except Exception as e:
+                return web.json_response({"ok": False, "error": f"opus encode failed: {e}"}, status=500)
 
         sent = {"llm": False, "play_url": False}
         # Send emotion first (optional)
         if emotion:
             sent["llm"] = publish_down_command(broker, device_id, {"type": "llm", "emotion": emotion})
         # Then play generated URL
-        sent["play_url"] = publish_down_command(
-            broker,
-            device_id,
-            {"type": "play_url", "url": tts_url, "gain": gain},
-        )
+        if out_format == "opus_file":
+            sent["play_url"] = publish_down_command(
+                broker,
+                device_id,
+                {"type": "play_opus_url", "url": tts_url},
+            )
+        else:
+            sent["play_url"] = publish_down_command(
+                broker,
+                device_id,
+                {"type": "play_url", "url": tts_url, "gain": gain},
+            )
 
         return web.json_response({"ok": bool(sent["play_url"]), "ttsUrl": tts_url, "sent": sent})
 
@@ -245,6 +273,7 @@ class SimpleHttpServer:
         broker = (data.get("broker") or os.environ.get("MQTT_URL") or "").strip()
         provided_base = (data.get("baseUrl") or "").rstrip("/")
         combine = bool(data.get("combine") or False)
+        out_format = (data.get("format") or "").strip().lower()  # "opus_file" -> .p3 + play_opus_url
 
         if not device_id:
             return web.json_response({"ok": False, "error": "deviceId required"}, status=400)
@@ -348,10 +377,29 @@ class SimpleHttpServer:
             combined.export(combined_path, format="wav")
             combined_url = f"{base_url}/tts/{combined_name}"
 
+            # Optional opus file (.p3)
+            if out_format == "opus_file":
+                try:
+                    p3_name = combined_name.replace(".wav", ".p3")
+                    p3_path = os.path.join("tmp", p3_name)
+                    aud = AudioSegment.from_file(combined_path).set_frame_rate(16000).set_channels(1).set_sample_width(2)
+                    pcm_bytes = aud.raw_data
+                    enc = OpusEncoderUtils(sample_rate=16000, channels=1, frame_size_ms=60)
+                    frames: list[bytes] = []
+                    enc.encode_pcm_to_opus_stream(pcm_bytes, end_of_stream=True, callback=lambda pkt: frames.append(pkt))
+                    with open(p3_path, "wb") as f:
+                        for pkt in frames:
+                            f.write(struct.pack(">BBH", 0, 0, len(pkt)))
+                            f.write(pkt)
+                    combined_url = f"{base_url}/tts/{p3_name}"
+                except Exception as e:
+                    return web.json_response({"ok": False, "error": f"opus encode failed: {e}"}, status=500)
+
             play_ok = publish_down_command(
                 broker,
                 device_id,
-                {"type": "play_url", "url": combined_url, "gain": 1.0},
+                ({"type": "play_opus_url", "url": combined_url} if out_format == "opus_file"
+                 else {"type": "play_url", "url": combined_url, "gain": 1.0}),
             )
             results.append({"idx": 0, "ttsUrl": combined_url, "play_url": bool(play_ok), "combined": True})
 
@@ -396,16 +444,37 @@ class SimpleHttpServer:
                     results.append({"idx": idx, "error": "tts file not generated"})
                     continue
 
-                # Ensure WAV 16k mono for device playback
+                # Ensure WAV 24k mono for device playback
                 wav_path = ensure_wav_24k_mono(tts_file_path)
                 basename = os.path.basename(wav_path)
                 tts_url = f"{base_url}/tts/{basename}"
+
+                # Optional per-step opus file
+                if out_format == "opus_file":
+                    try:
+                        root, _ = os.path.splitext(wav_path)
+                        p3_path = f"{root}.p3"
+                        aud = AudioSegment.from_file(wav_path).set_frame_rate(16000).set_channels(1).set_sample_width(2)
+                        pcm_bytes = aud.raw_data
+                        enc = OpusEncoderUtils(sample_rate=16000, channels=1, frame_size_ms=60)
+                        frames: list[bytes] = []
+                        enc.encode_pcm_to_opus_stream(pcm_bytes, end_of_stream=True, callback=lambda pkt: frames.append(pkt))
+                        with open(p3_path, "wb") as f:
+                            for pkt in frames:
+                                f.write(struct.pack(">BBH", 0, 0, len(pkt)))
+                                f.write(pkt)
+                        basename = os.path.basename(p3_path)
+                        tts_url = f"{base_url}/tts/{basename}"
+                    except Exception as e:
+                        results.append({"idx": idx, "error": f"opus encode failed: {e}"})
+                        continue
 
                 # Send play_url
                 play_ok = publish_down_command(
                     broker,
                     device_id,
-                    {"type": "play_url", "url": tts_url, "gain": gain},
+                    ({"type": "play_opus_url", "url": tts_url} if out_format == "opus_file"
+                     else {"type": "play_url", "url": tts_url, "gain": gain}),
                 )
 
                 results.append({"idx": idx, "ttsUrl": tts_url, "llm": bool(llm_ok), "play_url": bool(play_ok)})
