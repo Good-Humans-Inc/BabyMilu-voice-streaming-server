@@ -58,39 +58,6 @@ async def handleHelloMessage(conn, msg_json):
     if features:
         conn.logger.bind(tag=TAG).info(f"客户端特性features: {features}")
         conn.features = features
-        # Mode功能（如morning_alarm闹钟）
-        # HACK: Force morning_alarm mode for demo (remove this line when device sends mode)
-        # if not features.get("mode"):
-        #     features["mode"] = "morning_alarm"
-        #     conn.logger.bind(tag=TAG).warning("🚨 DEMO MODE: Forcing morning_alarm mode 🚨")
-        if features.get("mode"):
-            mode = features.get("mode").lower()
-            mode_config = conn.config.get("mode_config", {}).get(mode, {})
-            # Load instructions from file if specified
-            instructions_file = mode_config.get("instructions_file")
-            if instructions_file:
-                try:
-                    with open(instructions_file, 'r', encoding='utf-8') as f:
-                        conn.mode_specific_instructions = f.read().strip()
-                    conn.logger.bind(tag=TAG).info(f"Loaded mode specific instructions from {instructions_file}")
-                except Exception as e:
-                    conn.logger.bind(tag=TAG).warning(f"Failed to load mode specific instructions from {instructions_file}: {e}")
-                    conn.mode_specific_instructions = mode_config.get("instructions", "")
-            else:
-                conn.mode_specific_instructions = mode_config.get("instructions", "")
-            if conn.mode_specific_instructions:
-                conn.logger.bind(tag=TAG).info(f"Read mode specific instructions from mode config: {conn.mode_specific_instructions}")
-            else:
-                conn.logger.bind(tag=TAG).warning(f"No mode specific instructions found for mode: {conn.mode}")
-            # whether to initiate chat from server for this mode
-            conn.server_initiate_chat = mode_config.get("server_initiate_chat", False)
-            # Generic follow-up config for modes that may need proactive re-engagement
-            conn.followup_enabled = mode_config.get("followup_enabled", False)
-            conn.followup_delay = mode_config.get("followup_delay", 10)
-            conn.followup_max = mode_config.get("followup_max", 5)
-            if conn.server_initiate_chat:
-                # Trigger server-initiated greeting after TTS is ready
-                asyncio.create_task(_trigger_server_greeting(conn))
         if features.get("mcp"):
             conn.logger.bind(tag=TAG).info("客户端支持MCP")
             conn.mcp_client = MCPClient()
@@ -98,6 +65,12 @@ async def handleHelloMessage(conn, msg_json):
             asyncio.create_task(send_mcp_initialize_message(conn))
             # 发送mcp消息，获取tools列表
             asyncio.create_task(send_mcp_tools_list_request(conn))
+
+    if getattr(conn, "server_initiate_chat", False) and not getattr(
+        conn, "_server_greeting_scheduled", False
+    ):
+        conn._server_greeting_scheduled = True
+        asyncio.create_task(_trigger_server_greeting(conn))
 
     await conn.websocket.send(json.dumps(conn.welcome_msg))
 

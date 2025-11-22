@@ -11,13 +11,8 @@ import traceback
 import subprocess
 import websockets
 
-from core.utils.util import (
-    extract_json_from_string,
-    check_vad_update,
-    check_asr_update,
-    filter_sensitive_info,
-)
-from typing import Dict, Any
+from dataclasses import dataclass
+from typing import Dict, Any, Optional
 from collections import deque
 from core.utils.modules_initialize import (
     initialize_modules,
@@ -52,6 +47,8 @@ from core.utils.firestore_client import (
     set_conversation_id_for_device,
     get_most_recent_character_via_user_for_device,
 )
+from services.session_context import store as session_context_store
+from services.alarms.config import MODE_CONFIG
 
 TAG = __name__
 
@@ -60,6 +57,42 @@ auto_import_modules("plugins_func.functions")
 
 class TTSException(RuntimeError):
     pass
+
+
+@dataclass
+class ModeRuntimeState:
+    active_mode: Optional[str] = None
+    instructions: str = ""
+    server_initiate_chat: bool = False
+    greeting_scheduled: bool = False
+
+    def reset(self) -> None:
+        self.active_mode = None
+        self.instructions = ""
+        self.server_initiate_chat = False
+        self.greeting_scheduled = False
+
+
+@dataclass
+class FollowupState:
+    task: Optional[asyncio.Future] = None
+    count: int = 0
+    user_has_responded: bool = False
+    enabled: bool = False
+    delay: int = 10
+    max: int = 5
+    default_delay: int = 10
+    default_max: int = 5
+
+    def reset(self) -> None:
+        if self.task and not self.task.done():
+            self.task.cancel()
+        self.task = None
+        self.count = 0
+        self.user_has_responded = False
+        self.enabled = False
+        self.delay = self.default_delay
+        self.max = self.default_max
 
 
 class ConnectionHandler:
@@ -99,12 +132,9 @@ class ConnectionHandler:
         self.client_is_speaking = False
         self.client_listen_mode = "auto"
 
-        # Mode specific attributes
-        self.mode_specific_instructions = ""
-        # For modes that may need proactive re-engagement
-        self.followup_task = None
-        self.followup_count = 0
-        self.followup_user_has_responded = False
+        # Mode + follow-up runtime state
+        self._mode_state = ModeRuntimeState()
+        self._followup_state = FollowupState()
 
         # 线程任务相关
         self.loop = asyncio.get_event_loop()
@@ -176,6 +206,7 @@ class ConnectionHandler:
 
         # {"mcp":true} 表示启用MCP功能
         self.features = None
+        self.mode_session = None
 
         # 标记连接是否来自MQTT
         self.conn_from_mqtt_gateway = False
@@ -184,6 +215,94 @@ class ConnectionHandler:
         self.prompt_manager = PromptManager(config, self.logger)
         # 当新建会话时，首轮需要下发instructions
         self._seed_instructions_once = False
+
+    # ------------------------------------------------------------------
+    # Mode runtime accessors
+    # ------------------------------------------------------------------
+    @property
+    def mode_specific_instructions(self) -> str:
+        return self._mode_state.instructions
+
+    @mode_specific_instructions.setter
+    def mode_specific_instructions(self, value: str) -> None:
+        self._mode_state.instructions = value or ""
+
+    @property
+    def server_initiate_chat(self) -> bool:
+        return self._mode_state.server_initiate_chat
+
+    @server_initiate_chat.setter
+    def server_initiate_chat(self, value: bool) -> None:
+        self._mode_state.server_initiate_chat = bool(value)
+
+    @property
+    def active_mode(self) -> Optional[str]:
+        return self._mode_state.active_mode
+
+    @active_mode.setter
+    def active_mode(self, value: Optional[str]) -> None:
+        self._mode_state.active_mode = value
+
+    @property
+    def _server_greeting_scheduled(self) -> bool:
+        return self._mode_state.greeting_scheduled
+
+    @_server_greeting_scheduled.setter
+    def _server_greeting_scheduled(self, value: bool) -> None:
+        self._mode_state.greeting_scheduled = bool(value)
+
+    # ------------------------------------------------------------------
+    # Follow-up runtime accessors
+    # ------------------------------------------------------------------
+    @property
+    def followup_task(self):
+        return self._followup_state.task
+
+    @followup_task.setter
+    def followup_task(self, value):
+        self._followup_state.task = value
+
+    @property
+    def followup_count(self) -> int:
+        return self._followup_state.count
+
+    @followup_count.setter
+    def followup_count(self, value: int) -> None:
+        self._followup_state.count = value
+
+    @property
+    def followup_user_has_responded(self) -> bool:
+        return self._followup_state.user_has_responded
+
+    @followup_user_has_responded.setter
+    def followup_user_has_responded(self, value: bool) -> None:
+        self._followup_state.user_has_responded = bool(value)
+
+    @property
+    def followup_enabled(self) -> bool:
+        return self._followup_state.enabled
+
+    @followup_enabled.setter
+    def followup_enabled(self, value: bool) -> None:
+        self._followup_state.enabled = bool(value)
+
+    @property
+    def followup_delay(self) -> int:
+        return self._followup_state.delay
+
+    @followup_delay.setter
+    def followup_delay(self, value: int) -> None:
+        if value is not None:
+            self._followup_state.delay = int(value)
+
+    @property
+    def followup_max(self) -> int:
+        return self._followup_state.max
+
+    @followup_max.setter
+    def followup_max(self, value: int) -> None:
+        if value is not None:
+            self._followup_state.max = int(value)
 
     async def handle_connection(self, ws):
         try:
@@ -227,6 +346,7 @@ class ConnectionHandler:
             raw_device_id = self.headers.get("device-id", None)
             self.device_id = raw_device_id.upper() if isinstance(raw_device_id, str) else raw_device_id
             self.logger.bind(tag=TAG).info(f"device_id: {self.device_id}")
+            self._hydrate_mode_session()
 
             # Send server hello to satisfy firmware handshake
             try:
@@ -926,6 +1046,60 @@ class ConnectionHandler:
         self.prompt = prompt
         self.dialogue.update_system_message(self.prompt)
         self.logger.bind(tag=TAG).info(f"Ran change_system_prompt (new prompt length {len(prompt)}） with prompt:\n\n{prompt}\n")
+
+    def _hydrate_mode_session(self):
+        session = None
+        if not self.device_id:
+            self.mode_session = None
+            self._apply_mode_session_settings()
+            return
+        try:
+            session = session_context_store.get_session(self.device_id)
+            if session:
+                session_mode = (session.session_config or {}).get("mode")
+                self.logger.bind(tag=TAG).info(
+                    f"Mode session detected for device {self.device_id}: type={session.session_type}, mode={session_mode}"
+                )
+        except Exception as e:
+            self.logger.bind(tag=TAG).warning(
+                f"Failed to hydrate mode session for {self.device_id}: {e}"
+            )
+        finally:
+            self.mode_session = session
+            self._apply_mode_session_settings()
+
+    def _apply_mode_session_settings(self):
+        self._mode_state.reset()
+        self._followup_state.reset()
+
+        session = self.mode_session
+        session_config = (session.session_config if session else {}) or {}
+        mode = session_config.get("mode")
+        if not mode:
+            return
+
+        self.active_mode = mode
+        config = dict(MODE_CONFIG.get(mode, {}))
+        config.update(session_config.get("mode_config") or {})
+
+        instructions = config.get("instructions", "")
+        instructions_file = config.get("instructions_file")
+        if instructions_file:
+            try:
+                with open(instructions_file, "r", encoding="utf-8") as fp:
+                    instructions = fp.read().strip()
+            except Exception as exc:
+                self.logger.bind(tag=TAG).warning(
+                    f"Failed to load mode instructions from {instructions_file}: {exc}"
+            )
+
+        self.mode_specific_instructions = instructions
+        self.server_initiate_chat = config.get("server_initiate_chat", False)
+        self.followup_enabled = config.get("followup_enabled", False)
+        if "followup_delay" in config:
+            self.followup_delay = config["followup_delay"]
+        if "followup_max" in config:
+            self.followup_max = config["followup_max"]
 
     def _schedule_followup(self):
         """Schedule a mode follow-up chat after a delay if no user response"""
