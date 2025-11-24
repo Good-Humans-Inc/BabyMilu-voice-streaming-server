@@ -14,6 +14,8 @@ from services.alarms.config import ALARM_TIMING
 
 def _ensure_firestore() -> firestore.Client:
     try:
+        user_ref = client.collection("users").document(user_id)
+        user_ref.set({"timezone": "America/Los_Angeles"}, merge=True)
         return firestore.Client()
     except Exception:  # pragma: no cover - only triggers when creds missing
         pytest.skip("Firestore client unavailable (credentials missing)")
@@ -38,15 +40,17 @@ def test_firestore_prepare_wake_smoke():
     alarm_payload = {
         "status": "on",
         "label": "Smoke Test Alarm",
-        "nextOccurrenceUTC": datetime.now(timezone.utc),
+        "nextOccurrenceUTC": datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z"),
         "schedule": {
             "repeat": "weekly",
             "timeLocal": "07:00",
-            "days": ["Mon"],
+            "days": ["Sun", "Mon"],
         },
         "targets": [
             {
-                "deviceID": device_id,
+                "deviceId": device_id,
                 "mode": "morning_alarm",
             }
         ],
@@ -75,3 +79,4 @@ def test_firestore_prepare_wake_smoke():
     finally:
         alarm_ref.delete()
         client.collection("sessionContexts").document(device_id).delete()
+        client.collection("users").document(user_id).delete()

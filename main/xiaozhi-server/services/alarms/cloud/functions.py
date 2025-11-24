@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from services.logging import setup_logging
 from services.alarms import scheduler, tasks
@@ -21,13 +21,29 @@ def scan_due_alarms(request) -> Dict[str, Any]:
         now, lookahead=ALARM_TIMING["lookahead"]
     )
     triggered = 0
+    results: List[Dict[str, Any]] = []
     for wake_request in wake_requests:
-        if _wake_device(wake_request):
+        fired = _wake_device(wake_request)
+        if fired:
             triggered += 1
+        results.append(
+            {
+                "alarmId": wake_request.alarm.alarm_id,
+                "label": wake_request.alarm.label,
+                "deviceId": wake_request.target.device_id,
+                "mode": wake_request.target.mode,
+                "fired": bool(fired),
+            }
+        )
     logger.bind(tag=TAG).info(
         f"Processed {len(wake_requests)} wake requests; fired {triggered}"
     )
-    return {"ok": True, "count": len(wake_requests), "triggered": triggered}
+    return {
+        "ok": True,
+        "count": len(wake_requests),
+        "triggered": triggered,
+        "results": results,
+    }
 
 
 def _wake_device(wake_request: tasks.WakeRequest) -> bool:

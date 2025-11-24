@@ -56,6 +56,8 @@ class AlarmDoc:
     targets: List[AlarmTarget] = field(default_factory=list)
     updated_at: Optional[datetime] = None
     raw: Dict = field(default_factory=dict)
+    doc_path: Optional[str] = None
+    last_processed_utc: Optional[datetime] = None
 
 
 @dataclass

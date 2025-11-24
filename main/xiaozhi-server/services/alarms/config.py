@@ -4,7 +4,7 @@ from datetime import timedelta
 from typing import Any, Dict
 
 ALARM_TIMING = {
-    "lookahead": timedelta(minutes=1),
+    "lookahead": timedelta(minutes=3),
     "session_ttl": timedelta(minutes=5),
 }
 
