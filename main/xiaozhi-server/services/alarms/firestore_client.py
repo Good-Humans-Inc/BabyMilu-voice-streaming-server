@@ -72,24 +72,32 @@ def fetch_due_alarms(
             days=schedule_payload.get("days") or [],
         )
 
+        targets_payload = data.get("targets")
+        if not isinstance(targets_payload, list) or not targets_payload:
+            logger.bind(tag=TAG).warning(
+                "Skipping alarm %s (user=%s): targets payload missing or empty (%s)",
+                doc.reference.path,
+                _resolve_user_id(doc),
+                targets_payload,
+            )
+            continue
         try:
             targets = [
                 models.AlarmTarget(
                     device_id=_normalize_device_id(target["deviceId"]),
                     mode=target["mode"],
                 )
-                for target in data["targets"]
+                for target in targets_payload
             ]
         except (KeyError, ValueError) as exc:
-            logger.bind(tag=TAG).exception(
-                "Alarm {} has malformed target payload: {}",
+            logger.bind(tag=TAG).warning(
+                "Skipping alarm %s (user=%s) due to malformed target payload: %s (%s)",
                 doc.reference.path,
-                data.get("targets"),
+                _resolve_user_id(doc),
+                targets_payload,
+                exc,
             )
-            raise KeyError(
-                f"Alarm {doc.reference.path} target payload missing or invalid 'deviceId'. "
-                "Use a lowercase-able string under deviceId (camelCase) when writing alarm targets."
-            ) from exc
+            continue
 
         docs.append(_build_alarm_doc(doc, data, schedule, targets))
     logger.bind(tag=TAG).info(f"Fetched {len(docs)} due alarms")
