@@ -5,7 +5,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Optional, Sequence
 
-from config.logger import setup_logging
+from services.logging import setup_logging
 
 logger = setup_logging()
 

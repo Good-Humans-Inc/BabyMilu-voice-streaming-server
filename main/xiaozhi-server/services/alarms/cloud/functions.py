@@ -5,7 +5,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict
 
-from config.logger import setup_logging
+from services.logging import setup_logging
 from services.alarms import scheduler, tasks
 from services.messaging.mqtt import publish_ws_start
 from services.alarms.config import ALARM_TIMING

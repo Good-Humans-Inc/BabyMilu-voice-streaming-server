@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import List, Tuple
 
-from config.logger import setup_logging
+from services.logging import setup_logging
 from services.alarms import firestore_client, models, tasks
 from services.alarms.config import ALARM_TIMING
 from services.session_context import store as session_context_store

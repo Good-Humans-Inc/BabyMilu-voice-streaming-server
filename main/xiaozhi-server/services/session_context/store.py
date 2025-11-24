@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 
 from google.cloud import firestore
 
-from config.logger import setup_logging
+from services.logging import setup_logging
 from config.settings import get_gcp_credentials_path
 from services.session_context import models
 

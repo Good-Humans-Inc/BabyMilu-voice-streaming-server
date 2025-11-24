@@ -7,7 +7,7 @@ from google.cloud import firestore
 from google.cloud.firestore_v1 import FieldFilter
 
 from config.settings import get_gcp_credentials_path
-from config.logger import setup_logging
+from services.logging import setup_logging
 from services.alarms import models
 
 TAG = __name__
