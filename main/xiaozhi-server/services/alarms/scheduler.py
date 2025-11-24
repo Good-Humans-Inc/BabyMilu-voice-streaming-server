@@ -20,7 +20,7 @@ _DAY_TO_INDEX = {name: idx for idx, name in enumerate(models.DAY_NAMES)}
 def prepare_wake_requests(
     now: datetime,
     lookahead: timedelta,
-) -> List[tasks.WakeRequest]:
+    ) -> List[tasks.WakeRequest]:
     wake_requests: List[tasks.WakeRequest] = []
     alarms = firestore_client.fetch_due_alarms(now, lookahead=lookahead)
     for alarm in alarms:
@@ -91,7 +91,7 @@ def prepare_wake_requests(
 
 def compute_next_occurrence(
     alarm: models.AlarmDoc, *, now: Optional[datetime] = None
-) -> datetime:
+    ) -> datetime:
     tzinfo = ZoneInfo(_resolve_timezone(alarm))
     alarm_time = datetime.strptime(alarm.schedule.time_local, "%H:%M").time()
     allowed_days = sorted({_DAY_TO_INDEX[day] for day in alarm.schedule.days})

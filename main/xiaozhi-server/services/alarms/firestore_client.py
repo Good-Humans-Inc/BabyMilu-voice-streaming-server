@@ -75,20 +75,20 @@ def fetch_due_alarms(
         try:
             targets = [
                 models.AlarmTarget(
-                    device_id=target["deviceId"],
+                    device_id=_normalize_device_id(target["deviceId"]),
                     mode=target["mode"],
                 )
                 for target in data["targets"]
             ]
-        except KeyError as exc:
+        except (KeyError, ValueError) as exc:
             logger.bind(tag=TAG).exception(
                 "Alarm {} has malformed target payload: {}",
                 doc.reference.path,
                 data.get("targets"),
             )
             raise KeyError(
-                f"Alarm {doc.reference.path} target payload missing 'deviceId'. "
-                "Use deviceId (camelCase) when writing alarm targets."
+                f"Alarm {doc.reference.path} target payload missing or invalid 'deviceId'. "
+                "Use a lowercase-able string under deviceId (camelCase) when writing alarm targets."
             ) from exc
 
         docs.append(_build_alarm_doc(doc, data, schedule, targets))
@@ -169,6 +169,12 @@ def _format_datetime(value: datetime) -> str:
     else:
         value = value.astimezone(timezone.utc)
     return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _normalize_device_id(value) -> str:
+    if not isinstance(value, str):
+        raise ValueError("Alarm target deviceId must be a string")
+    return value.lower()
 
 
 def mark_alarm_processed(

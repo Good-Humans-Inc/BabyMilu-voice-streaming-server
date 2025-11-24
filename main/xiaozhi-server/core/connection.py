@@ -342,11 +342,17 @@ class ConnectionHandler:
 
             # 认证通过,继续处理
             self.websocket = ws
-            # Normalize device-id to uppercase to match Firestore doc IDs
+            # Normalize device-id casing: uppercase for legacy device lookups,
+            # lowercase copy for session context interactions
             raw_device_id = self.headers.get("device-id", None)
-            self.device_id = raw_device_id.upper() if isinstance(raw_device_id, str) else raw_device_id
+            self.device_id = (
+                raw_device_id.upper() if isinstance(raw_device_id, str) else raw_device_id
+            )
+            session_device_id = (
+                raw_device_id.lower() if isinstance(raw_device_id, str) else raw_device_id
+            )
             self.logger.bind(tag=TAG).info(f"device_id: {self.device_id}")
-            self._hydrate_mode_session()
+            self._hydrate_mode_session(session_device_id=session_device_id)
 
             # Send server hello to satisfy firmware handshake
             try:
@@ -1047,14 +1053,21 @@ class ConnectionHandler:
         self.dialogue.update_system_message(self.prompt)
         self.logger.bind(tag=TAG).info(f"Ran change_system_prompt (new prompt length {len(prompt)}） with prompt:\n\n{prompt}\n")
 
-    def _hydrate_mode_session(self):
+    def _hydrate_mode_session(self, session_device_id: Optional[str] = None):
         session = None
-        if not self.device_id:
+        if not (session_device_id or self.device_id):
             self.mode_session = None
             self._apply_mode_session_settings()
             return
+        lookup_device_id = session_device_id
+        if not lookup_device_id and isinstance(self.device_id, str):
+            lookup_device_id = self.device_id.lower()
         try:
-            session = session_context_store.get_session(self.device_id)
+            session = (
+                session_context_store.get_session(lookup_device_id)
+                if lookup_device_id
+                else None
+            )
             if session:
                 session_mode = (session.session_config or {}).get("mode")
                 self.logger.bind(tag=TAG).info(
@@ -1079,6 +1092,12 @@ class ConnectionHandler:
             return
 
         self.active_mode = mode
+        if session and session.session_type == "alarm":
+            self.logger.bind(tag=TAG).info(
+                f"Alarm session activated for device {self.device_id}: "
+                f"mode={mode}, alarmId={session_config.get('alarmId')}, "
+                f"label={session_config.get('label')}"
+            )
         config = dict(MODE_CONFIG.get(mode, {}))
         config.update(session_config.get("mode_config") or {})
 
