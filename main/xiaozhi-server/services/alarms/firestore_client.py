@@ -36,12 +36,10 @@ def fetch_due_alarms(
     user_cache: Dict[str, Dict[str, Any]] = {}
     upper_bound = now + lookahead
     upper_bound_str = _format_datetime(upper_bound)
+    window_start = _format_datetime(now)
     logger.bind(tag=TAG).debug(
-        "Scanning alarms where status='on' and nextOccurrenceUTC <= %s "
-        "(window start=%s, lookahead=%s)",
-        upper_bound_str,
-        _format_datetime(now),
-        lookahead,
+        "Scanning alarms where status='on' and nextOccurrenceUTC <= "
+        f"{upper_bound_str} (window start={window_start}, lookahead={lookahead})"
     )
     query = _collection_group(client)
     query = query.where(filter=FieldFilter("status", "==", "on"))
@@ -49,6 +47,7 @@ def fetch_due_alarms(
 
     docs: List[models.AlarmDoc] = []
     for doc in query.stream():
+        user_id = _resolve_user_id(doc)
         data = doc.to_dict() or {}
         user_meta = _get_user_metadata(doc, user_cache)
         if user_meta:
@@ -56,13 +55,12 @@ def fetch_due_alarms(
             data["user"] = user_meta
         raw_next_occurrence = data.get("nextOccurrenceUTC")
         logger.bind(tag=TAG).debug(
-            "Alarm %s status=%s nextOccurrenceUTC=%s (type=%s) label=%s targets=%s",
-            doc.reference.path,
-            data.get("status"),
-            raw_next_occurrence,
-            type(raw_next_occurrence).__name__,
-            data.get("label"),
-            len(data.get("targets", [])),
+            (
+                f"Alarm {doc.reference.path} status={data.get('status')} "
+                f"nextOccurrenceUTC={raw_next_occurrence} "
+                f"(type={type(raw_next_occurrence).__name__}) "
+                f"label={data.get('label')} targets={len(data.get('targets', []))}"
+            )
         )
         schedule_payload = data["schedule"]
         repeat = models.AlarmRepeat(str(schedule_payload["repeat"]).lower())
@@ -75,10 +73,10 @@ def fetch_due_alarms(
         targets_payload = data.get("targets")
         if not isinstance(targets_payload, list) or not targets_payload:
             logger.bind(tag=TAG).warning(
-                "Skipping alarm %s (user=%s): targets payload missing or empty (%s)",
-                doc.reference.path,
-                _resolve_user_id(doc),
-                targets_payload,
+                (
+                    f"Skipping alarm {doc.reference.path} (user={user_id}): "
+                    f"targets payload missing or empty ({targets_payload})"
+                )
             )
             continue
         try:
@@ -91,11 +89,10 @@ def fetch_due_alarms(
             ]
         except (KeyError, ValueError) as exc:
             logger.bind(tag=TAG).warning(
-                "Skipping alarm %s (user=%s) due to malformed target payload: %s (%s)",
-                doc.reference.path,
-                _resolve_user_id(doc),
-                targets_payload,
-                exc,
+                (
+                    f"Skipping alarm {doc.reference.path} (user={user_id}) "
+                    f"due to malformed target payload: {targets_payload} ({exc})"
+                )
             )
             continue
 
@@ -152,9 +149,7 @@ def _get_user_metadata(
         return meta
     except Exception as exc:
         logger.bind(tag=TAG).warning(
-            "Failed to load user metadata for %s: %s",
-            parent.path,
-            exc,
+            f"Failed to load user metadata for {parent.path}: {exc}"
         )
         cache[user_id] = {}
         return {}

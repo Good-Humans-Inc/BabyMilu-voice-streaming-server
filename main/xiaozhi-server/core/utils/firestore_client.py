@@ -155,7 +155,7 @@ def get_timezone_for_device(device_id: str, timeout: float = 3.0) -> Optional[st
 
 
 def get_conversation_id_for_device(device_id: str, timeout: float = 3.0) -> Optional[str]:
-    """Return devices/{device_id}.conversationId if present."""
+    """Return devices/{device_id}.conversation.id if present."""
     try:
         client = _build_client()
         doc = client.collection("devices").document(device_id).get(timeout=timeout)
@@ -163,18 +163,47 @@ def get_conversation_id_for_device(device_id: str, timeout: float = 3.0) -> Opti
             logger.bind(tag=TAG).warning(f"Firestore devices/{device_id} not found")
             return None
         data = doc.to_dict() or {}
-        return data.get("conversationId")
+        conversation = data.get("conversation")
+        if isinstance(conversation, dict):
+            return conversation.get("id")
+        return None
     except Exception as e:
         logger.bind(tag=TAG).error(f"Firestore get conversationId error: {e}")
         return None
 
 
-def set_conversation_id_for_device(device_id: str, conversation_id: str, timeout: float = 3.0) -> bool:
-    """Upsert devices/{deviceId}.conversationId = conversation_id."""
+def set_conversation_id_for_device(
+    device_id: str,
+    conversation_id: str,
+    last_used: Optional[str] = None,
+    last_interaction_summary: Optional[str] = None,
+    timeout: float = 3.0,
+) -> bool:
+    """
+    Upsert devices/{deviceId}.conversation metadata using the nested structure:
+
+        conversation: {
+            id: str,
+            last_used: Optional[str],
+            last_interaction_summary: Optional[str]
+        }
+    """
     try:
         client = _build_client()
+        conversation_payload: Dict[str, Any] = {"id": conversation_id}
+        if last_used is not None:
+            conversation_payload["last_used"] = last_used
+        if last_interaction_summary is not None:
+            conversation_payload["last_interaction_summary"] = last_interaction_summary
+
         client.collection("devices").document(device_id).set(
-            {"conversationId": conversation_id}, merge=True, timeout=timeout
+            {
+                "conversation": conversation_payload,
+                # Remove legacy flat field if present to keep the document consistent
+                "conversationId": firestore.DELETE_FIELD,
+            },
+            merge=True,
+            timeout=timeout,
         )
         return True
     except Exception as e:
