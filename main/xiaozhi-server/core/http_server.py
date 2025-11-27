@@ -3,7 +3,7 @@ from aiohttp import web
 from config.logger import setup_logging
 from core.api.ota_handler import OTAHandler
 from core.api.vision_handler import VisionHandler
-from core.mqtt_alarm import publish_ws_start
+from services.messaging.mqtt import publish_ws_start
 import os
 import json
 
