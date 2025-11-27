@@ -3,6 +3,8 @@ import time
 from aiohttp import web
 from core.utils.util import get_local_ip
 from core.api.base_handler import BaseHandler
+import os
+import aiohttp
 
 TAG = __name__
 
@@ -10,6 +12,64 @@ TAG = __name__
 class OTAHandler(BaseHandler):
     def __init__(self, config: dict):
         super().__init__(config)
+
+    async def _fetch_json(self, url: str) -> dict | None:
+        try:
+            timeout = aiohttp.ClientTimeout(total=5)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as resp:
+                    if resp.status != 200:
+                        self.logger.bind(tag=TAG).warning(f"Fetch manifest failed: {url} {resp.status}")
+                        return None
+                    text = await resp.text()
+                    return json.loads(text)
+        except Exception as e:
+            self.logger.bind(tag=TAG).warning(f"Fetch manifest exception: {e}")
+            return None
+
+    async def _load_ota_manifest(self, device_report: dict) -> dict | None:
+        """
+        Returns a dict like: {"version": "1.7.6", "url": "https://.../xiaozhi.bin", "force": 0}
+        Priority:
+          1) OTA_MANIFEST_URL (HTTP/HTTPS JSON), fetched per request (no restart needed)
+          2) OTA_MANIFEST_PATH (local JSON file), read per request
+          3) OTA_URL (+ optional OTA_VERSION, OTA_FORCE) from env (requires restart if changed)
+        """
+        manifest_url = os.environ.get("OTA_MANIFEST_URL", "").strip()
+        if manifest_url:
+            data = await self._fetch_json(manifest_url)
+            if isinstance(data, dict) and ("url" in data or "version" in data):
+                return {
+                    "version": str(data.get("version") or device_report.get("application", {}).get("version", "1.0.0")),
+                    "url": str(data.get("url") or ""),
+                    "force": int(data.get("force") or 0),
+                }
+
+        manifest_path = os.environ.get("OTA_MANIFEST_PATH", "").strip()
+        if manifest_path:
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and ("url" in data or "version" in data):
+                    return {
+                        "version": str(data.get("version") or device_report.get("application", {}).get("version", "1.0.0")),
+                        "url": str(data.get("url") or ""),
+                        "force": int(data.get("force") or 0),
+                    }
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(f"Read manifest file failed: {manifest_path} err={e}")
+
+        ota_url = os.environ.get("OTA_URL", "").strip()
+        if ota_url:
+            version = os.environ.get("OTA_VERSION", "").strip() or device_report.get("application", {}).get("version", "1.0.0")
+            force = int(os.environ.get("OTA_FORCE", "0").strip() or "0")
+            return {
+                "version": version,
+                "url": ota_url,
+                "force": force,
+            }
+
+        return None
 
     def _get_websocket_url(self, local_ip: str, port: int) -> str:
         """获取websocket地址
@@ -51,14 +111,26 @@ class OTAHandler(BaseHandler):
             mac_upper = (device_id or "").strip().upper()
             publish_topic = f"xiaozhi/{mac_upper}/up" if mac_upper else ""
 
+            # Load dynamic OTA manifest (no server restart needed)
+            manifest = await self._load_ota_manifest(data_json)  # may be None
+            if manifest:
+                fw_version = manifest.get("version") or data_json["application"].get("version", "1.0.0")
+                fw_url = manifest.get("url", "")
+                fw_force = int(manifest.get("force", 0))
+            else:
+                fw_version = data_json["application"].get("version", "1.0.0")
+                fw_url = ""
+                fw_force = 0
+
             return_json = {
                 "server_time": {
                     "timestamp": int(round(time.time() * 1000)),
                     "timezone_offset": server_config.get("timezone_offset", 8) * 60,
                 },
                 "firmware": {
-                    "version": data_json["application"].get("version", "1.0.0"),
-                    "url": "",
+                    "version": fw_version,
+                    "url": fw_url,
+                    "force": fw_force,
                 },
                 "websocket": {
                     "url": self._get_websocket_url(local_ip, port),
