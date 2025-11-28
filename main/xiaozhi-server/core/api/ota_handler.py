@@ -27,23 +27,45 @@ class OTAHandler(BaseHandler):
             self.logger.bind(tag=TAG).warning(f"Fetch manifest exception: {e}")
             return None
 
-    async def _load_ota_manifest(self, device_report: dict) -> dict | None:
+    async def _load_ota_manifest(self, device_report: dict, device_id: str = "") -> dict | None:
         """
-        Returns a dict like: {"version": "1.7.6", "url": "https://.../xiaozhi.bin", "force": 0}
+        Returns a dict like: {
+            "version": "1.7.6", 
+            "url": "https://.../xiaozhi.bin", 
+            "force": 0,
+            "mqtt": {"endpoint": "...", "client_id": "...", "publish_topic": "..."}
+        }
         Priority:
           1) OTA_MANIFEST_URL (HTTP/HTTPS JSON), fetched per request (no restart needed)
           2) OTA_MANIFEST_PATH (local JSON file), read per request
           3) OTA_URL (+ optional OTA_VERSION, OTA_FORCE) from env (requires restart if changed)
+        
+        Supports device-specific config via "devices" key in manifest:
+        {
+            "version": "1.7.6",
+            "url": "...",
+            "mqtt": {"endpoint": "global:1883"},  // Global default
+            "devices": {
+                "AA:BB:CC:DD:EE:FF": {
+                    "mqtt": {"endpoint": "device-specific:1883"}
+                }
+            }
+        }
         """
         manifest_url = os.environ.get("OTA_MANIFEST_URL", "").strip()
         if manifest_url:
             data = await self._fetch_json(manifest_url)
             if isinstance(data, dict) and ("url" in data or "version" in data):
-                return {
+                result = {
                     "version": str(data.get("version") or device_report.get("application", {}).get("version", "1.0.0")),
                     "url": str(data.get("url") or ""),
                     "force": int(data.get("force") or 0),
                 }
+                # Extract MQTT config (device-specific or global)
+                mqtt_config = self._extract_mqtt_config(data, device_id)
+                if mqtt_config:
+                    result["mqtt"] = mqtt_config
+                return result
 
         manifest_path = os.environ.get("OTA_MANIFEST_PATH", "").strip()
         if manifest_path:
@@ -51,11 +73,16 @@ class OTAHandler(BaseHandler):
                 with open(manifest_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, dict) and ("url" in data or "version" in data):
-                    return {
+                    result = {
                         "version": str(data.get("version") or device_report.get("application", {}).get("version", "1.0.0")),
                         "url": str(data.get("url") or ""),
                         "force": int(data.get("force") or 0),
                     }
+                    # Extract MQTT config (device-specific or global)
+                    mqtt_config = self._extract_mqtt_config(data, device_id)
+                    if mqtt_config:
+                        result["mqtt"] = mqtt_config
+                    return result
             except Exception as e:
                 self.logger.bind(tag=TAG).warning(f"Read manifest file failed: {manifest_path} err={e}")
 
@@ -69,6 +96,37 @@ class OTAHandler(BaseHandler):
                 "force": force,
             }
 
+        return None
+
+    def _extract_mqtt_config(self, manifest_data: dict, device_id: str = "") -> dict | None:
+        """
+        Extract MQTT configuration from manifest.
+        Priority: device-specific > global mqtt config
+        
+        Args:
+            manifest_data: The manifest JSON data
+            device_id: Device ID (MAC address) in uppercase, e.g. "AA:BB:CC:DD:EE:FF"
+        
+        Returns:
+            MQTT config dict or None
+        """
+        # Check for device-specific MQTT config first
+        if device_id:
+            devices = manifest_data.get("devices", {})
+            if isinstance(devices, dict):
+                device_config = devices.get(device_id, {})
+                if isinstance(device_config, dict) and "mqtt" in device_config:
+                    mqtt_config = device_config.get("mqtt", {})
+                    if isinstance(mqtt_config, dict) and mqtt_config:
+                        self.logger.bind(tag=TAG).info(f"Using device-specific MQTT config for {device_id}")
+                        return mqtt_config
+        
+        # Fall back to global MQTT config
+        mqtt_config = manifest_data.get("mqtt", {})
+        if isinstance(mqtt_config, dict) and mqtt_config:
+            self.logger.bind(tag=TAG).info("Using global MQTT config from manifest")
+            return mqtt_config
+        
         return None
 
     def _get_websocket_url(self, local_ip: str, port: int) -> str:
@@ -112,15 +170,36 @@ class OTAHandler(BaseHandler):
             publish_topic = f"xiaozhi/{mac_upper}/up" if mac_upper else ""
 
             # Load dynamic OTA manifest (no server restart needed)
-            manifest = await self._load_ota_manifest(data_json)  # may be None
+            manifest = await self._load_ota_manifest(data_json, mac_upper)  # may be None
             if manifest:
                 fw_version = manifest.get("version") or data_json["application"].get("version", "1.0.0")
                 fw_url = manifest.get("url", "")
                 fw_force = int(manifest.get("force", 0))
+                manifest_mqtt = manifest.get("mqtt")
             else:
                 fw_version = data_json["application"].get("version", "1.0.0")
                 fw_url = ""
                 fw_force = 0
+                manifest_mqtt = None
+
+            # Build MQTT config: manifest > environment variable > hardcoded default
+            mqtt_endpoint = "34.30.176.148:1883"  # Default fallback
+            if manifest_mqtt and isinstance(manifest_mqtt, dict):
+                # Use endpoint from manifest if provided
+                mqtt_endpoint = manifest_mqtt.get("endpoint", mqtt_endpoint)
+                # Use client_id from manifest if provided, otherwise use MAC
+                mqtt_client_id = manifest_mqtt.get("client_id", mac_upper)
+                # Use publish_topic from manifest if provided, otherwise derive from MAC
+                mqtt_publish_topic = manifest_mqtt.get("publish_topic", publish_topic)
+                self.logger.bind(tag=TAG).info(f"Using MQTT config from manifest: endpoint={mqtt_endpoint}")
+            else:
+                # Check environment variable as fallback
+                env_mqtt_endpoint = os.environ.get("MQTT_ENDPOINT", "").strip()
+                if env_mqtt_endpoint:
+                    mqtt_endpoint = env_mqtt_endpoint
+                    self.logger.bind(tag=TAG).info(f"Using MQTT endpoint from environment: {mqtt_endpoint}")
+                mqtt_client_id = mac_upper
+                mqtt_publish_topic = publish_topic
 
             return_json = {
                 "server_time": {
@@ -136,10 +215,11 @@ class OTAHandler(BaseHandler):
                     "url": self._get_websocket_url(local_ip, port),
                 },
                 # Provide MQTT settings so device can switch to MQTT protocol
+                # Configurable via OTA manifest (per-device or global) or MQTT_ENDPOINT env var
                 "mqtt": {
-                    "endpoint": "136.117.60.16:1883",
-                    "client_id": mac_upper,
-                    "publish_topic": publish_topic,
+                    "endpoint": mqtt_endpoint,
+                    "client_id": mqtt_client_id,
+                    "publish_topic": mqtt_publish_topic,
                 },
             }
             response = web.Response(
