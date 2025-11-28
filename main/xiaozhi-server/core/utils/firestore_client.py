@@ -154,8 +154,8 @@ def get_timezone_for_device(device_id: str, timeout: float = 3.0) -> Optional[st
         return None
 
 
-def get_conversation_id_for_device(device_id: str, timeout: float = 3.0) -> Optional[str]:
-    """Return devices/{device_id}.conversation.id if present."""
+def get_conversation_state_for_device(device_id: str, timeout: float = 3.0) -> Optional[Dict[str, Any]]:
+    """Return the full conversation metadata block for devices/{device_id} if present."""
     try:
         client = _build_client()
         doc = client.collection("devices").document(device_id).get(timeout=timeout)
@@ -164,44 +164,45 @@ def get_conversation_id_for_device(device_id: str, timeout: float = 3.0) -> Opti
             return None
         data = doc.to_dict() or {}
         conversation = data.get("conversation")
-        if isinstance(conversation, dict):
-            return conversation.get("id")
+        if isinstance(conversation, dict) and conversation:
+            return conversation
         return None
     except Exception as e:
         logger.bind(tag=TAG).error(f"Firestore get conversationId error: {e}")
         return None
 
 
-def set_conversation_id_for_device(
+def update_conversation_state_for_device(
     device_id: str,
-    conversation_id: str,
+    *,
+    conversation_id: Optional[str] = None,
     last_used: Optional[str] = None,
     last_interaction_summary: Optional[str] = None,
     timeout: float = 3.0,
 ) -> bool:
-    """
-    Upsert devices/{deviceId}.conversation metadata using the nested structure:
-
-        conversation: {
-            id: str,
-            last_used: Optional[str],
-            last_interaction_summary: Optional[str]
-        }
-    """
+    """Upsert or clear devices/{deviceId}.conversation metadata."""
     try:
         client = _build_client()
-        conversation_payload: Dict[str, Any] = {"id": conversation_id}
-        if last_used is not None:
-            conversation_payload["last_used"] = last_used
-        if last_interaction_summary is not None:
-            conversation_payload["last_interaction_summary"] = last_interaction_summary
+        if not conversation_id and last_used is None and last_interaction_summary is None:
+            # Delete the conversation metadata entirely.
+            payload = {"conversation": firestore.DELETE_FIELD}
+        else:
+            conversation_payload: Dict[str, Any] = {}
+            if conversation_id:
+                conversation_payload["id"] = conversation_id
+            if last_used is not None:
+                conversation_payload["last_used"] = last_used
+            if last_interaction_summary is not None:
+                conversation_payload["last_interaction_summary"] = last_interaction_summary
+            payload = {
+                "conversation": conversation_payload or firestore.DELETE_FIELD,
+            }
+
+        # Remove legacy flat field if present to keep the document consistent
+        payload["conversationId"] = firestore.DELETE_FIELD
 
         client.collection("devices").document(device_id).set(
-            {
-                "conversation": conversation_payload,
-                # Remove legacy flat field if present to keep the document consistent
-                "conversationId": firestore.DELETE_FIELD,
-            },
+            payload,
             merge=True,
             timeout=timeout,
         )

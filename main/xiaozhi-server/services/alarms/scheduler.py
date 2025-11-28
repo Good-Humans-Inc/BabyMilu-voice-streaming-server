@@ -110,12 +110,11 @@ def compute_next_occurrence(
         if candidate_local > start_local:
             result = candidate_local.astimezone(timezone.utc)
             logger.bind(tag=TAG).info(
-                "Next occurrence for alarm %s (user=%s, tz=%s, local=%s) is %s UTC",
-                alarm.alarm_id,
-                alarm.user_id,
-                tzinfo.key,
-                candidate_local.isoformat(),
-                result.isoformat(),
+                (
+                    f"Next occurrence for alarm {alarm.alarm_id} (user={alarm.user_id}, "
+                    f"tz={tzinfo.key}, local={candidate_local.isoformat()}) "
+                    f"is {result.isoformat()} UTC"
+                )
             )
             return result
 
@@ -123,12 +122,11 @@ def compute_next_occurrence(
     candidate_local = datetime.combine(candidate_date, alarm_time, tzinfo=tzinfo)
     fallback = candidate_local.astimezone(timezone.utc)
     logger.bind(tag=TAG).info(
-        "Fallback next occurrence for alarm %s (user=%s, tz=%s, local=%s) is %s UTC",
-        alarm.alarm_id,
-        alarm.user_id,
-        tzinfo.key,
-        candidate_local.isoformat(),
-        fallback.isoformat(),
+        (
+            f"Fallback next occurrence for alarm {alarm.alarm_id} "
+            f"(user={alarm.user_id}, tz={tzinfo.key}, "
+            f"local={candidate_local.isoformat()}) is {fallback.isoformat()} UTC"
+        )
     )
     return fallback
 

@@ -18,6 +18,7 @@ MODE_CONFIG: Dict[str, Dict[str, Any]] = {
         "followup_enabled": True,
         "followup_delay": 10,  # seconds between follow-ups
         "followup_max": 5,  # max number of follow-ups
+        "use_separate_conversation": True,
     },
 }
 
