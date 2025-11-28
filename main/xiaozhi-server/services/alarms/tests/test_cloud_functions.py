@@ -23,7 +23,7 @@ class _DummyWakeRequest(tasks.WakeRequest):
             next_occurrence_utc=datetime.now(timezone.utc),
             targets=[],
             updated_at=None,
-            raw={},
+            raw={"timezone": "UTC"},
         )
         target = scheduler.models.AlarmTarget(device_id=device_id, mode="morning_alarm")
         session = session_models.ModeSession(
@@ -56,7 +56,10 @@ def test_scan_due_alarms_triggers_publish(monkeypatch):
 
     response = cloud_functions.scan_due_alarms(request={})  # type: ignore[arg-type]
 
-    assert response == {"ok": True, "count": 2, "triggered": 2}
+    assert response["ok"] is True
+    assert response["count"] == 2
+    assert response["triggered"] == 2
+    assert [item["deviceId"] for item in response["results"]] == ["DEV1", "DEV2"]
     assert len(published) == 2
     assert published[0][1] == "DEV1"
     assert published[1][1] == "DEV2"

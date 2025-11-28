@@ -20,6 +20,18 @@ from `core.*` so it can be lifted into a standalone service later.
 - `cloud/functions.py` – Cloud Scheduler entrypoint that prepares wake requests
   and publishes MQTT `ws_start`.
 
+## Cloud Function deployment
+
+The HTTP entrypoint `services.alarms.cloud.functions.scan_due_alarms` is deployed
+as separate first-gen Cloud Functions per environment:
+
+- `scan-due-alarms-dev`
+- `scan-due-alarms-staging`
+- `scan-due-alarms-prod`
+
+Each deployment re-exports the same handler via a minimal `main.py` wrapper in
+the upload bundle, keeping the source of truth under `services/alarms/cloud/`.
+
 ## Session-Centered Architecture
 
 Alarm wake-ups now rely on the shared `services.session_context` package. When a
