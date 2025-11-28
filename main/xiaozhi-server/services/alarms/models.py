@@ -5,7 +5,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Optional, Sequence
 
-from config.logger import setup_logging
+from services.logging import setup_logging
 
 logger = setup_logging()
 
@@ -56,6 +56,8 @@ class AlarmDoc:
     targets: List[AlarmTarget] = field(default_factory=list)
     updated_at: Optional[datetime] = None
     raw: Dict = field(default_factory=dict)
+    doc_path: Optional[str] = None
+    last_processed_utc: Optional[datetime] = None
 
 
 @dataclass

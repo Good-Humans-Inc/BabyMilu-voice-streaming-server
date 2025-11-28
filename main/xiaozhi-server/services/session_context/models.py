@@ -17,6 +17,8 @@ class ModeSession:
     ttl_seconds: int = DEFAULT_SESSION_TTL_SECONDS
     expires_at: Optional[datetime] = None
     session_config: Dict[str, Any] = field(default_factory=dict)
+    conversation: Dict[str, Any] = field(default_factory=dict)
+    is_snooze_follow_up: bool = False
 
     def __post_init__(self) -> None:
         if self.expires_at is None and self.ttl_seconds:
@@ -36,6 +38,8 @@ class ModeSession:
             "ttlSeconds": self.ttl_seconds,
             "expiresAt": self.expires_at.isoformat() if self.expires_at else None,
             "sessionConfig": self.session_config,
+            "conversation": self.conversation,
+            "isSnoozeFollowUp": self.is_snooze_follow_up,
         }
 
 

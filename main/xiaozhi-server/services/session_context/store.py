@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Dict, Optional, Any
 
 from google.cloud import firestore
 
-from config.logger import setup_logging
+from services.logging import setup_logging
 from config.settings import get_gcp_credentials_path
 from services.session_context import models
+
+_UNSET = object()
 
 TAG = __name__
 logger = setup_logging()
@@ -40,6 +42,8 @@ class SessionContextStore:
         session_config: Optional[Dict[str, Any]] = None,
         ttl: Optional[timedelta] = None,
         triggered_at: Optional[datetime] = None,
+        conversation: Optional[Dict[str, Any]] = None,
+        is_snooze_follow_up: bool = False,
         ) -> models.ModeSession:
         triggered_at = triggered_at or datetime.now(timezone.utc)
         ttl_seconds = models.ttl_seconds_from_delta(ttl)
@@ -49,6 +53,8 @@ class SessionContextStore:
             triggered_at=triggered_at,
             ttl_seconds=ttl_seconds,
             session_config=session_config or {},
+            conversation=conversation or {},
+            is_snooze_follow_up=is_snooze_follow_up,
         )
         self._collection().document(device_id).set(
             {
@@ -57,6 +63,8 @@ class SessionContextStore:
                 "ttlSeconds": session.ttl_seconds,
                 "expiresAt": session.expires_at,
                 "sessionConfig": session.session_config,
+                "conversation": session.conversation,
+                "isSnoozeFollowUp": session.is_snooze_follow_up,
             },
             merge=True,
         )
@@ -90,6 +98,34 @@ class SessionContextStore:
     def delete_session(self, device_id: str) -> None:
         self._collection().document(device_id).delete()
 
+    def update_session(
+        self,
+        device_id: str,
+        *,
+        session_config: Optional[Dict[str, Any]] = None,
+        conversation: Any = _UNSET,
+        is_snooze_follow_up: Optional[bool] = None,
+    ) -> None:
+        updates: Dict[str, Any] = {}
+        if session_config is not None:
+            updates["sessionConfig"] = session_config
+        if conversation is not _UNSET:
+            if conversation is None:
+                updates["conversation"] = firestore.DELETE_FIELD
+                logger.bind(tag=TAG).debug(
+                    f"Deleting conversation field for session {device_id}"
+                )
+            else:
+                updates["conversation"] = conversation
+                logger.bind(tag=TAG).debug(
+                    f"Setting conversation for session {device_id}: {conversation}"
+                )
+        if is_snooze_follow_up is not None:
+            updates["isSnoozeFollowUp"] = bool(is_snooze_follow_up)
+        if not updates:
+            return
+        self._collection().document(device_id).set(updates, merge=True)
+
     def _hydrate_session(
         self, device_id: str, payload: Dict[str, Any]
     ) -> Optional[models.ModeSession]:
@@ -105,6 +141,14 @@ class SessionContextStore:
         session_config = payload.get("sessionConfig")
         if not isinstance(session_config, dict):
             session_config = {}
+        conversation = payload.get("conversation")
+        if not isinstance(conversation, dict):
+            conversation = {}
+        is_snooze_follow_up = bool(payload.get("isSnoozeFollowUp", False))
+        logger.bind(tag=TAG).debug(
+            f"Hydrating session for {device_id}: conversation={conversation}, "
+            f"is_snooze_follow_up={is_snooze_follow_up}"
+        )
         try:
             return models.ModeSession(
                 device_id=device_id,
@@ -113,6 +157,8 @@ class SessionContextStore:
                 ttl_seconds=int(ttl_seconds),
                 expires_at=expires_at,
                 session_config=session_config,
+                conversation=conversation,
+                is_snooze_follow_up=is_snooze_follow_up,
             )
         except Exception as exc:
             logger.bind(tag=TAG).warning(
@@ -138,4 +184,8 @@ def get_session(device_id: str, **kwargs) -> Optional[models.ModeSession]:
 
 def delete_session(device_id: str) -> None:
     _DEFAULT_STORE.delete_session(device_id)
+
+
+def update_session(device_id: str, **kwargs) -> None:
+    _DEFAULT_STORE.update_session(device_id, **kwargs)
 

@@ -4,7 +4,7 @@ from datetime import timedelta
 from typing import Any, Dict
 
 ALARM_TIMING = {
-    "lookahead": timedelta(minutes=1),
+    "lookahead": timedelta(minutes=2),
     "session_ttl": timedelta(minutes=5),
 }
 
@@ -18,6 +18,7 @@ MODE_CONFIG: Dict[str, Dict[str, Any]] = {
         "followup_enabled": True,
         "followup_delay": 10,  # seconds between follow-ups
         "followup_max": 5,  # max number of follow-ups
+        "use_separate_conversation": True,
     },
 }
 

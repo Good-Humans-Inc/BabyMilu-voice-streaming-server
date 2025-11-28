@@ -12,6 +12,7 @@ import subprocess
 import websockets
 
 from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional
 from collections import deque
 from core.utils.modules_initialize import (
@@ -43,8 +44,8 @@ from core.utils.firestore_client import (
     get_owner_phone_for_device,
     get_user_profile_by_phone,
     extract_user_profile_fields,
-    get_conversation_id_for_device,
-    set_conversation_id_for_device,
+    get_conversation_state_for_device,
+    update_conversation_state_for_device,
     get_most_recent_character_via_user_for_device,
 )
 from services.session_context import store as session_context_store
@@ -178,6 +179,9 @@ class ConnectionHandler:
         # llm相关变量
         self.llm_finish_task = True
         self.dialogue = Dialogue()
+        self.device_conversation_ttl = self._derive_conversation_ttl()
+        self.current_conversation_id: Optional[str] = None
+        self.use_mode_conversation = False
 
         # 组件初始化完成事件
         self.components_initialized = asyncio.Event()
@@ -342,9 +346,11 @@ class ConnectionHandler:
 
             # 认证通过,继续处理
             self.websocket = ws
-            # Normalize device-id to uppercase to match Firestore doc IDs
+            # Normalize device-id casing with a lower-case lookup key for Firestore/session state
             raw_device_id = self.headers.get("device-id", None)
-            self.device_id = raw_device_id.upper() if isinstance(raw_device_id, str) else raw_device_id
+            self.device_id = (
+                raw_device_id.lower() if isinstance(raw_device_id, str) else raw_device_id
+            )
             self.logger.bind(tag=TAG).info(f"device_id: {self.device_id}")
             self._hydrate_mode_session()
 
@@ -484,37 +490,7 @@ class ConnectionHandler:
                         )
             except Exception as e:
                 self.logger.bind(tag=TAG).warning(f"同步构建系统提示词失败: {e}")
-            # 拉取并注入持久会话ID
-            try:
-                if self.llm and self.device_id:
-                    conv_id = get_conversation_id_for_device(self.device_id)
-                    if conv_id:
-                        if hasattr(self.llm, "adopt_conversation_id_for_session"):
-                            self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
-                            self.logger.bind(tag=TAG).info(f"Loaded conversationId for device: {conv_id}")
-                    else:
-                        # 未找到则创建新会话，并回写到Firestore
-                        try:
-                            if hasattr(self.llm, "ensure_conversation_with_system"):
-                                # 在创建会话时，直接以系统消息作为首条item
-                                new_conv_id = self.llm.ensure_conversation_with_system(self.session_id, self.prompt)
-                            elif hasattr(self.llm, "ensure_conversation"):
-                                new_conv_id = self.llm.ensure_conversation(self.session_id)
-                            else:
-                                # 兜底：调用一次对话以触发创建
-                                new_conv_id = None
-                            if new_conv_id:
-                                ok = set_conversation_id_for_device(self.device_id, new_conv_id)
-                                if ok:
-                                    self.logger.bind(tag=TAG).info(f"Created and saved conversationId for device: {new_conv_id}")
-                                    # 标记需要在首轮发送instructions
-                                    self._seed_instructions_once = True
-                                else:
-                                    self.logger.bind(tag=TAG).warning("Failed to save conversationId to Firestore")
-                        except Exception as create_err:
-                            self.logger.bind(tag=TAG).warning(f"Create conversationId failed: {create_err}")
-            except Exception as e:
-                self.logger.bind(tag=TAG).warning(f"Failed to load conversationId: {e}")
+            self._initialize_conversation_binding()
             # 异步初始化
             self.executor.submit(self._initialize_components)
 
@@ -547,6 +523,12 @@ class ConnectionHandler:
     async def _save_and_close(self, ws):
         """保存记忆并关闭连接"""
         try:
+            try:
+                self._persist_conversation_state_before_close()
+            except Exception as conv_err:
+                self.logger.bind(tag=TAG).warning(
+                    f"Failed to persist conversation metadata: {conv_err}"
+                )
             if self.memory:
                 # 使用线程池异步保存记忆
                 def save_memory_task():
@@ -1079,8 +1061,15 @@ class ConnectionHandler:
             return
 
         self.active_mode = mode
+        if session and session.session_type == "alarm":
+            self.logger.bind(tag=TAG).info(
+                f"Alarm session activated for device {self.device_id}: "
+                f"mode={mode}, alarmId={session_config.get('alarmId')}, "
+                f"label={session_config.get('label')}"
+            )
         config = dict(MODE_CONFIG.get(mode, {}))
         config.update(session_config.get("mode_config") or {})
+        self.use_mode_conversation = bool(config.get("use_separate_conversation", False))
 
         instructions = config.get("instructions", "")
         instructions_file = config.get("instructions_file")
@@ -1100,6 +1089,190 @@ class ConnectionHandler:
             self.followup_delay = config["followup_delay"]
         if "followup_max" in config:
             self.followup_max = config["followup_max"]
+
+    def _initialize_conversation_binding(self):
+        try:
+            if not self.llm or not self.device_id:
+                return
+            if self.use_mode_conversation and self.mode_session:
+                self._ensure_mode_scoped_conversation()
+            else:
+                self._ensure_device_scoped_conversation()
+        except Exception as exc:
+            self.logger.bind(tag=TAG).warning(f"Failed to load conversation state: {exc}")
+
+    def _ensure_mode_scoped_conversation(self):
+        session = self.mode_session
+        if not session:
+            self._ensure_device_scoped_conversation()
+            return
+
+        conversation = session.conversation or {}
+        conv_id = conversation.get("id")
+        self.logger.bind(tag=TAG).debug(
+            f"Mode session conversation state: conversation={conversation}, "
+            f"conv_id={conv_id}, is_snooze_follow_up={session.is_snooze_follow_up}"
+        )
+        if conv_id and hasattr(self.llm, "adopt_conversation_id_for_session"):
+            self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
+            self.logger.bind(tag=TAG).info(
+                f"Loaded mode-scoped conversation {conv_id} for device {self.device_id}"
+            )
+            self.current_conversation_id = conv_id
+            return
+
+        new_conv_id = self._create_llm_conversation()
+        if not new_conv_id:
+            return
+
+        self.logger.bind(tag=TAG).info(
+            f"Created mode-scoped conversation {new_conv_id} for device {self.device_id}"
+        )
+        self._seed_instructions_once = True
+        self._update_mode_session_conversation({"id": new_conv_id})
+        self.current_conversation_id = new_conv_id
+
+    def _ensure_device_scoped_conversation(self):
+        state = get_conversation_state_for_device(self.device_id)
+        conv_id = state.get("id") if state else None
+        if state and self._device_conversation_expired(state.get("last_used")):
+            preserved_summary = state.get("last_interaction_summary")
+            update_conversation_state_for_device(
+                self.device_id,
+                conversation_id=None,
+                last_used=None,
+                last_interaction_summary=preserved_summary,
+            )
+            conv_id = None
+        if conv_id and hasattr(self.llm, "adopt_conversation_id_for_session"):
+            self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
+            self.logger.bind(tag=TAG).info(
+                f"Loaded conversationId for device: {conv_id}"
+            )
+            self.current_conversation_id = conv_id
+            return
+
+        new_conv_id = self._create_llm_conversation()
+        if not new_conv_id:
+            return
+
+        ok = update_conversation_state_for_device(
+            self.device_id,
+            conversation_id=new_conv_id,
+            last_used=datetime.now(timezone.utc).isoformat(),
+        )
+        if ok:
+            self.logger.bind(tag=TAG).info(
+                f"Created and saved conversationId for device: {new_conv_id}"
+            )
+            self._seed_instructions_once = True
+            self.current_conversation_id = new_conv_id
+        else:
+            self.logger.bind(tag=TAG).warning("Failed to save conversationId to Firestore")
+
+    def _create_llm_conversation(self) -> Optional[str]:
+        if hasattr(self.llm, "ensure_conversation_with_system"):
+            return self.llm.ensure_conversation_with_system(self.session_id, self.prompt)
+        if hasattr(self.llm, "ensure_conversation"):
+            return self.llm.ensure_conversation(self.session_id)
+        return None
+
+    def _update_mode_session_conversation(
+        self,
+        conversation: Optional[Dict[str, Any]],
+        is_snooze_follow_up: Optional[bool] = None,
+    ) -> None:
+        if not self.device_id:
+            return
+        try:
+            self.logger.bind(tag=TAG).debug(
+                f"Updating mode session conversation: device={self.device_id}, "
+                f"conversation={conversation}, is_snooze_follow_up={is_snooze_follow_up}"
+            )
+            session_context_store.update_session(
+                self.device_id,
+                conversation=conversation if conversation is not None else None,
+                is_snooze_follow_up=is_snooze_follow_up,
+            )
+            if self.mode_session:
+                self.mode_session.conversation = conversation or {}
+                if is_snooze_follow_up is not None:
+                    self.mode_session.is_snooze_follow_up = bool(is_snooze_follow_up)
+        except Exception as exc:
+            self.logger.bind(tag=TAG).warning(
+                f"Failed to persist mode conversation for {self.device_id}: {exc}"
+            )
+
+    def _persist_conversation_state_before_close(self):
+        conv_id = self.current_conversation_id
+        if not conv_id:
+            self.logger.bind(tag=TAG).debug("No conversation ID to persist on close")
+            return
+
+        last_used = datetime.now(timezone.utc).isoformat()
+        summary = self._build_last_interaction_summary()
+
+        if self.use_mode_conversation and self.mode_session:
+            # Persist the mode conversation so it can be resumed (e.g., after snooze)
+            self.logger.bind(tag=TAG).info(
+                f"Persisting mode conversation {conv_id} for device {self.device_id}"
+            )
+            self._update_mode_session_conversation({"id": conv_id, "last_used": last_used})
+            return
+
+        # Normal device conversation: persist state
+        update_conversation_state_for_device(
+            self.device_id,
+            conversation_id=conv_id,
+            last_used=last_used,
+            last_interaction_summary=summary or None,
+        )
+
+    def _build_last_interaction_summary(self, max_chars: int = 256) -> str:
+        parts = []
+        total = 0
+        for message in reversed(self.dialogue.dialogue):
+            if message.role not in ("user", "assistant"):
+                continue
+            if not message.content:
+                continue
+            fragment = f"{message.role}: {message.content.strip()}"
+            parts.append(fragment)
+            total += len(fragment)
+            if total >= max_chars * 2:
+                break
+        if not parts:
+            return ""
+        summary = " | ".join(reversed(parts))
+        if len(summary) > max_chars:
+            summary = summary[-max_chars:]
+        return summary
+
+    def _derive_conversation_ttl(self) -> timedelta:
+        try:
+            selected_llm = (self.config.get("selected_module") or {}).get("LLM")
+            llm_config = (self.config.get("LLM") or {}).get(selected_llm or "", {})
+            hours = llm_config.get("conversation_ttl_hours", 6)
+            hours_val = float(hours)
+            if hours_val <= 0:
+                return timedelta(0)
+            return timedelta(hours=hours_val)
+        except (TypeError, ValueError):
+            return timedelta(hours=6)
+
+    def _device_conversation_expired(self, last_used_iso: Optional[str]) -> bool:
+        if not last_used_iso:
+            return False
+        if not self.device_conversation_ttl or self.device_conversation_ttl <= timedelta(0):
+            return False
+        try:
+            last_used = datetime.fromisoformat(last_used_iso)
+            if last_used.tzinfo is None:
+                last_used = last_used.replace(tzinfo=timezone.utc)
+        except Exception:
+            return False
+        now = datetime.now(timezone.utc)
+        return now - last_used > self.device_conversation_ttl
 
     def _schedule_followup(self):
         """Schedule a mode follow-up chat after a delay if no user response"""
