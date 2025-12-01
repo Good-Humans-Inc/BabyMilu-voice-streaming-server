@@ -119,3 +119,59 @@ def _parse_broker(broker_url: Optional[str]) -> Tuple[str, int]:
     except Exception:
         return "localhost", 1883
 
+
+def publish_auto_update(
+    broker_url: Optional[str],
+    device_mac: str,
+    download_url: str,
+) -> bool:
+    """
+    Publish an auto_update control message to the device downlink topic.
+    Topic convention: xiaozhi/<MAC>/down
+
+    Args:
+        broker_url: MQTT broker URL (e.g., "mqtt://host:1883"). Falls back to env MQTT_URL.
+        device_mac: Device MAC address (keep exact casing/format the device subscribes with)
+        download_url: Public URL to mega.bin/device.bin the firmware should download
+
+    Returns:
+        True if publish succeeded, False otherwise
+    """
+    host, port = _parse_broker(broker_url)
+    topic = f"xiaozhi/{device_mac}/down"
+    payload = {
+        "type": "auto_update",
+        "url": download_url,
+    }
+
+    client = mqtt_client.Client(mqtt_client.CallbackAPIVersion.VERSION2)
+    try:
+        _log("info", f"Connecting to MQTT broker {host}:{port} for device {device_mac}")
+        client.connect(host, port, keepalive=30)
+        client.loop_start()
+
+        _log("info", f"Publishing auto_update to topic {topic} for device {device_mac}")
+        result = client.publish(topic, json.dumps(payload), qos=1)
+
+        if result.wait_for_publish(5.0):
+            ok = result.is_published()
+            if ok:
+                _log("info", f"Successfully published auto_update to {device_mac}")
+            else:
+                _log("warning", f"Publish completed but not confirmed for {device_mac}")
+            client.loop_stop()
+            client.disconnect()
+            return ok
+        else:
+            _log("error", f"MQTT publish timeout (5s) for device {device_mac} on topic {topic}")
+            client.loop_stop()
+            client.disconnect()
+            return False
+    except Exception as e:
+        _log("error", f"MQTT auto_update publish failed for device {device_mac}: {type(e).__name__}: {e}")
+        try:
+            client.loop_stop()
+            client.disconnect()
+        except Exception:
+            pass
+        return False
