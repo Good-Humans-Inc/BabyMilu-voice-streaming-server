@@ -157,6 +157,8 @@ class OTAHandler(BaseHandler):
 
             device_id = request.headers.get("device-id", "")
             if device_id:
+                # 标准化：小写并使用冒号分隔
+                device_id = device_id.lower().replace("-", ":")
                 self.logger.bind(tag=TAG).info(f"OTA请求设备ID: {device_id}")
             else:
                 raise Exception("OTA请求设备ID为空")

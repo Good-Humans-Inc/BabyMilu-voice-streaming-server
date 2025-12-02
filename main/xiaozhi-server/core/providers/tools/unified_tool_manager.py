@@ -43,6 +43,14 @@ class ToolManager:
             except Exception as e:
                 self.logger.error(f"获取{tool_type.value}工具时出错: {e}")
 
+        # 移除不允许的工具
+        try:
+            if "change_role" in all_tools:
+                self.logger.info("已禁用工具: change_role")
+                del all_tools["change_role"]
+        except Exception:
+            pass
+
         self._cached_tools = all_tools
         return all_tools
 

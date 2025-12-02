@@ -11,9 +11,13 @@ import traceback
 import subprocess
 import websockets
 
-from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, Optional
+from core.utils.util import (
+    extract_json_from_string,
+    check_vad_update,
+    check_asr_update,
+    filter_sensitive_info,
+)
+from typing import Dict, Any
 from collections import deque
 from core.utils.modules_initialize import (
     initialize_modules,
@@ -47,9 +51,8 @@ from core.utils.firestore_client import (
     get_conversation_state_for_device,
     update_conversation_state_for_device,
     get_most_recent_character_via_user_for_device,
+    get_device_doc,
 )
-from services.session_context import store as session_context_store
-from services.alarms.config import MODE_CONFIG
 
 TAG = __name__
 
@@ -58,42 +61,6 @@ auto_import_modules("plugins_func.functions")
 
 class TTSException(RuntimeError):
     pass
-
-
-@dataclass
-class ModeRuntimeState:
-    active_mode: Optional[str] = None
-    instructions: str = ""
-    server_initiate_chat: bool = False
-    greeting_scheduled: bool = False
-
-    def reset(self) -> None:
-        self.active_mode = None
-        self.instructions = ""
-        self.server_initiate_chat = False
-        self.greeting_scheduled = False
-
-
-@dataclass
-class FollowupState:
-    task: Optional[asyncio.Future] = None
-    count: int = 0
-    user_has_responded: bool = False
-    enabled: bool = False
-    delay: int = 10
-    max: int = 5
-    default_delay: int = 10
-    default_max: int = 5
-
-    def reset(self) -> None:
-        if self.task and not self.task.done():
-            self.task.cancel()
-        self.task = None
-        self.count = 0
-        self.user_has_responded = False
-        self.enabled = False
-        self.delay = self.default_delay
-        self.max = self.default_max
 
 
 class ConnectionHandler:
@@ -133,9 +100,12 @@ class ConnectionHandler:
         self.client_is_speaking = False
         self.client_listen_mode = "auto"
 
-        # Mode + follow-up runtime state
-        self._mode_state = ModeRuntimeState()
-        self._followup_state = FollowupState()
+        # Mode state (e.g., "morning_alarm")
+        self.mode = None
+        self.mode_specific_instructions = ""
+        self.server_initiate_chat = False
+        self.alarm_followup_task = None
+        self.alarm_followup_count = 0
 
         # 线程任务相关
         self.loop = asyncio.get_event_loop()
@@ -179,9 +149,6 @@ class ConnectionHandler:
         # llm相关变量
         self.llm_finish_task = True
         self.dialogue = Dialogue()
-        self.device_conversation_ttl = self._derive_conversation_ttl()
-        self.current_conversation_id: Optional[str] = None
-        self.use_mode_conversation = False
 
         # 组件初始化完成事件
         self.components_initialized = asyncio.Event()
@@ -210,7 +177,6 @@ class ConnectionHandler:
 
         # {"mcp":true} 表示启用MCP功能
         self.features = None
-        self.mode_session = None
 
         # 标记连接是否来自MQTT
         self.conn_from_mqtt_gateway = False
@@ -219,94 +185,6 @@ class ConnectionHandler:
         self.prompt_manager = PromptManager(config, self.logger)
         # 当新建会话时，首轮需要下发instructions
         self._seed_instructions_once = False
-
-    # ------------------------------------------------------------------
-    # Mode runtime accessors
-    # ------------------------------------------------------------------
-    @property
-    def mode_specific_instructions(self) -> str:
-        return self._mode_state.instructions
-
-    @mode_specific_instructions.setter
-    def mode_specific_instructions(self, value: str) -> None:
-        self._mode_state.instructions = value or ""
-
-    @property
-    def server_initiate_chat(self) -> bool:
-        return self._mode_state.server_initiate_chat
-
-    @server_initiate_chat.setter
-    def server_initiate_chat(self, value: bool) -> None:
-        self._mode_state.server_initiate_chat = bool(value)
-
-    @property
-    def active_mode(self) -> Optional[str]:
-        return self._mode_state.active_mode
-
-    @active_mode.setter
-    def active_mode(self, value: Optional[str]) -> None:
-        self._mode_state.active_mode = value
-
-    @property
-    def _server_greeting_scheduled(self) -> bool:
-        return self._mode_state.greeting_scheduled
-
-    @_server_greeting_scheduled.setter
-    def _server_greeting_scheduled(self, value: bool) -> None:
-        self._mode_state.greeting_scheduled = bool(value)
-
-    # ------------------------------------------------------------------
-    # Follow-up runtime accessors
-    # ------------------------------------------------------------------
-    @property
-    def followup_task(self):
-        return self._followup_state.task
-
-    @followup_task.setter
-    def followup_task(self, value):
-        self._followup_state.task = value
-
-    @property
-    def followup_count(self) -> int:
-        return self._followup_state.count
-
-    @followup_count.setter
-    def followup_count(self, value: int) -> None:
-        self._followup_state.count = value
-
-    @property
-    def followup_user_has_responded(self) -> bool:
-        return self._followup_state.user_has_responded
-
-    @followup_user_has_responded.setter
-    def followup_user_has_responded(self, value: bool) -> None:
-        self._followup_state.user_has_responded = bool(value)
-
-    @property
-    def followup_enabled(self) -> bool:
-        return self._followup_state.enabled
-
-    @followup_enabled.setter
-    def followup_enabled(self, value: bool) -> None:
-        self._followup_state.enabled = bool(value)
-
-    @property
-    def followup_delay(self) -> int:
-        return self._followup_state.delay
-
-    @followup_delay.setter
-    def followup_delay(self, value: int) -> None:
-        if value is not None:
-            self._followup_state.delay = int(value)
-
-    @property
-    def followup_max(self) -> int:
-        return self._followup_state.max
-
-    @followup_max.setter
-    def followup_max(self, value: int) -> None:
-        if value is not None:
-            self._followup_state.max = int(value)
 
     async def handle_connection(self, ws):
         try:
@@ -346,13 +224,44 @@ class ConnectionHandler:
 
             # 认证通过,继续处理
             self.websocket = ws
-            # Normalize device-id casing with a lower-case lookup key for Firestore/session state
+            # 规范化 device-id：小写并将 '-' 替换为 ':'
             raw_device_id = self.headers.get("device-id", None)
-            self.device_id = (
-                raw_device_id.lower() if isinstance(raw_device_id, str) else raw_device_id
-            )
+            if isinstance(raw_device_id, str):
+                normalized_device_id = raw_device_id.lower().replace("-", ":")
+            else:
+                normalized_device_id = raw_device_id
+            self.device_id = normalized_device_id
+            if normalized_device_id is not None:
+                self.headers["device-id"] = normalized_device_id
             self.logger.bind(tag=TAG).info(f"device_id: {self.device_id}")
-            self._hydrate_mode_session()
+
+            # 严格的 Firestore 校验：设备文档不存在则返回错误并关闭连接
+            try:
+                if self.device_id:
+                    device_doc = get_device_doc(self.device_id)
+                    if not device_doc:
+                        error_payload = {
+                            "error": "invalid_device",
+                            "reason": "No Firestore config",
+                        }
+                        try:
+                            await self.websocket.send(json.dumps(error_payload, ensure_ascii=False))
+                        except Exception:
+                            pass
+                        await self.close(ws)
+                        return
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(f"Device validation failed: {e}")
+                error_payload = {
+                    "error": "invalid_device",
+                    "reason": "No Firestore config",
+                }
+                try:
+                    await self.websocket.send(json.dumps(error_payload, ensure_ascii=False))
+                except Exception:
+                    pass
+                await self.close(ws)
+                return
 
             # Send server hello to satisfy firmware handshake
             try:
@@ -373,7 +282,7 @@ class ConnectionHandler:
             request_path = ws.request.path
             self.conn_from_mqtt_gateway = request_path.endswith("?from=mqtt_gateway")
             if self.conn_from_mqtt_gateway:
-                self.logger.bind(tag=TAG).info("连接来自:MQTT网关")
+                self.logger.bind(tag=TAG).info("Link:MQTT Broker")
 
             # 初始化活动时间戳
             self.last_activity_time = time.time() * 1000
@@ -490,7 +399,37 @@ class ConnectionHandler:
                         )
             except Exception as e:
                 self.logger.bind(tag=TAG).warning(f"同步构建系统提示词失败: {e}")
-            self._initialize_conversation_binding()
+            # 拉取并注入持久会话ID
+            try:
+                if self.llm and self.device_id:
+                    conv_id = get_conversation_state_for_device(self.device_id)
+                    if conv_id:
+                        if hasattr(self.llm, "adopt_conversation_id_for_session"):
+                            self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
+                            self.logger.bind(tag=TAG).info(f"Loaded conversationId for device: {conv_id}")
+                    else:
+                        # 未找到则创建新会话，并回写到Firestore
+                        try:
+                            if hasattr(self.llm, "ensure_conversation_with_system"):
+                                # 在创建会话时，直接以系统消息作为首条item
+                                new_conv_id = self.llm.ensure_conversation_with_system(self.session_id, self.prompt)
+                            elif hasattr(self.llm, "ensure_conversation"):
+                                new_conv_id = self.llm.ensure_conversation(self.session_id)
+                            else:
+                                # 兜底：调用一次对话以触发创建
+                                new_conv_id = None
+                            if new_conv_id:
+                                ok = update_conversation_state_for_device(self.device_id, new_conv_id)
+                                if ok:
+                                    self.logger.bind(tag=TAG).info(f"Created and saved conversationId for device: {new_conv_id}")
+                                    # 标记需要在首轮发送instructions
+                                    self._seed_instructions_once = True
+                                else:
+                                    self.logger.bind(tag=TAG).warning("Failed to save conversationId to Firestore")
+                        except Exception as create_err:
+                            self.logger.bind(tag=TAG).warning(f"Create conversationId failed: {create_err}")
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(f"Failed to load conversationId: {e}")
             # 异步初始化
             self.executor.submit(self._initialize_components)
 
@@ -523,12 +462,6 @@ class ConnectionHandler:
     async def _save_and_close(self, ws):
         """保存记忆并关闭连接"""
         try:
-            try:
-                self._persist_conversation_state_before_close()
-            except Exception as conv_err:
-                self.logger.bind(tag=TAG).warning(
-                    f"Failed to persist conversation metadata: {conv_err}"
-                )
             if self.memory:
                 # 使用线程池异步保存记忆
                 def save_memory_task():
@@ -1029,300 +962,41 @@ class ConnectionHandler:
         self.dialogue.update_system_message(self.prompt)
         self.logger.bind(tag=TAG).info(f"Ran change_system_prompt (new prompt length {len(prompt)}） with prompt:\n\n{prompt}\n")
 
-    def _hydrate_mode_session(self):
-        session = None
-        if not self.device_id:
-            self.mode_session = None
-            self._apply_mode_session_settings()
-            return
-        try:
-            session = session_context_store.get_session(self.device_id)
-            if session:
-                session_mode = (session.session_config or {}).get("mode")
-                self.logger.bind(tag=TAG).info(
-                    f"Mode session detected for device {self.device_id}: type={session.session_type}, mode={session_mode}"
-                )
-        except Exception as e:
-            self.logger.bind(tag=TAG).warning(
-                f"Failed to hydrate mode session for {self.device_id}: {e}"
-            )
-        finally:
-            self.mode_session = session
-            self._apply_mode_session_settings()
-
-    def _apply_mode_session_settings(self):
-        self._mode_state.reset()
-        self._followup_state.reset()
-
-        session = self.mode_session
-        session_config = (session.session_config if session else {}) or {}
-        mode = session_config.get("mode")
-        if not mode:
-            return
-
-        self.active_mode = mode
-        if session and session.session_type == "alarm":
-            self.logger.bind(tag=TAG).info(
-                f"Alarm session activated for device {self.device_id}: "
-                f"mode={mode}, alarmId={session_config.get('alarmId')}, "
-                f"label={session_config.get('label')}"
-            )
-        config = dict(MODE_CONFIG.get(mode, {}))
-        config.update(session_config.get("mode_config") or {})
-        self.use_mode_conversation = bool(config.get("use_separate_conversation", False))
-
-        instructions = config.get("instructions", "")
-        instructions_file = config.get("instructions_file")
-        if instructions_file:
-            try:
-                with open(instructions_file, "r", encoding="utf-8") as fp:
-                    instructions = fp.read().strip()
-            except Exception as exc:
-                self.logger.bind(tag=TAG).warning(
-                    f"Failed to load mode instructions from {instructions_file}: {exc}"
-            )
-
-        self.mode_specific_instructions = instructions
-        self.server_initiate_chat = config.get("server_initiate_chat", False)
-        self.followup_enabled = config.get("followup_enabled", False)
-        if "followup_delay" in config:
-            self.followup_delay = config["followup_delay"]
-        if "followup_max" in config:
-            self.followup_max = config["followup_max"]
-
-    def _initialize_conversation_binding(self):
-        try:
-            if not self.llm or not self.device_id:
-                return
-            if self.use_mode_conversation and self.mode_session:
-                self._ensure_mode_scoped_conversation()
-            else:
-                self._ensure_device_scoped_conversation()
-        except Exception as exc:
-            self.logger.bind(tag=TAG).warning(f"Failed to load conversation state: {exc}")
-
-    def _ensure_mode_scoped_conversation(self):
-        session = self.mode_session
-        if not session:
-            self._ensure_device_scoped_conversation()
-            return
-
-        conversation = session.conversation or {}
-        conv_id = conversation.get("id")
-        self.logger.bind(tag=TAG).debug(
-            f"Mode session conversation state: conversation={conversation}, "
-            f"conv_id={conv_id}, is_snooze_follow_up={session.is_snooze_follow_up}"
-        )
-        if conv_id and hasattr(self.llm, "adopt_conversation_id_for_session"):
-            self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
-            self.logger.bind(tag=TAG).info(
-                f"Loaded mode-scoped conversation {conv_id} for device {self.device_id}"
-            )
-            self.current_conversation_id = conv_id
-            return
-
-        new_conv_id = self._create_llm_conversation()
-        if not new_conv_id:
-            return
-
-        self.logger.bind(tag=TAG).info(
-            f"Created mode-scoped conversation {new_conv_id} for device {self.device_id}"
-        )
-        self._seed_instructions_once = True
-        self._update_mode_session_conversation({"id": new_conv_id})
-        self.current_conversation_id = new_conv_id
-
-    def _ensure_device_scoped_conversation(self):
-        state = get_conversation_state_for_device(self.device_id)
-        conv_id = state.get("id") if state else None
-        if state and self._device_conversation_expired(state.get("last_used")):
-            preserved_summary = state.get("last_interaction_summary")
-            update_conversation_state_for_device(
-                self.device_id,
-                conversation_id=None,
-                last_used=None,
-                last_interaction_summary=preserved_summary,
-            )
-            conv_id = None
-        if conv_id and hasattr(self.llm, "adopt_conversation_id_for_session"):
-            self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
-            self.logger.bind(tag=TAG).info(
-                f"Loaded conversationId for device: {conv_id}"
-            )
-            self.current_conversation_id = conv_id
-            return
-
-        new_conv_id = self._create_llm_conversation()
-        if not new_conv_id:
-            return
-
-        ok = update_conversation_state_for_device(
-            self.device_id,
-            conversation_id=new_conv_id,
-            last_used=datetime.now(timezone.utc).isoformat(),
-        )
-        if ok:
-            self.logger.bind(tag=TAG).info(
-                f"Created and saved conversationId for device: {new_conv_id}"
-            )
-            self._seed_instructions_once = True
-            self.current_conversation_id = new_conv_id
-        else:
-            self.logger.bind(tag=TAG).warning("Failed to save conversationId to Firestore")
-
-    def _create_llm_conversation(self) -> Optional[str]:
-        if hasattr(self.llm, "ensure_conversation_with_system"):
-            return self.llm.ensure_conversation_with_system(self.session_id, self.prompt)
-        if hasattr(self.llm, "ensure_conversation"):
-            return self.llm.ensure_conversation(self.session_id)
-        return None
-
-    def _update_mode_session_conversation(
-        self,
-        conversation: Optional[Dict[str, Any]],
-        is_snooze_follow_up: Optional[bool] = None,
-    ) -> None:
-        if not self.device_id:
-            return
-        try:
-            self.logger.bind(tag=TAG).debug(
-                f"Updating mode session conversation: device={self.device_id}, "
-                f"conversation={conversation}, is_snooze_follow_up={is_snooze_follow_up}"
-            )
-            session_context_store.update_session(
-                self.device_id,
-                conversation=conversation if conversation is not None else None,
-                is_snooze_follow_up=is_snooze_follow_up,
-            )
-            if self.mode_session:
-                self.mode_session.conversation = conversation or {}
-                if is_snooze_follow_up is not None:
-                    self.mode_session.is_snooze_follow_up = bool(is_snooze_follow_up)
-        except Exception as exc:
-            self.logger.bind(tag=TAG).warning(
-                f"Failed to persist mode conversation for {self.device_id}: {exc}"
-            )
-
-    def _persist_conversation_state_before_close(self):
-        conv_id = self.current_conversation_id
-        if not conv_id:
-            self.logger.bind(tag=TAG).debug("No conversation ID to persist on close")
-            return
-
-        last_used = datetime.now(timezone.utc).isoformat()
-        summary = self._build_last_interaction_summary()
-
-        if self.use_mode_conversation and self.mode_session:
-            # Persist the mode conversation so it can be resumed (e.g., after snooze)
-            self.logger.bind(tag=TAG).info(
-                f"Persisting mode conversation {conv_id} for device {self.device_id}"
-            )
-            self._update_mode_session_conversation({"id": conv_id, "last_used": last_used})
-            return
-
-        # Normal device conversation: persist state
-        update_conversation_state_for_device(
-            self.device_id,
-            conversation_id=conv_id,
-            last_used=last_used,
-            last_interaction_summary=summary or None,
-        )
-
-    def _build_last_interaction_summary(self, max_chars: int = 256) -> str:
-        parts = []
-        total = 0
-        for message in reversed(self.dialogue.dialogue):
-            if message.role not in ("user", "assistant"):
-                continue
-            if not message.content:
-                continue
-            fragment = f"{message.role}: {message.content.strip()}"
-            parts.append(fragment)
-            total += len(fragment)
-            if total >= max_chars * 2:
-                break
-        if not parts:
-            return ""
-        summary = " | ".join(reversed(parts))
-        if len(summary) > max_chars:
-            summary = summary[-max_chars:]
-        return summary
-
-    def _derive_conversation_ttl(self) -> timedelta:
-        try:
-            selected_llm = (self.config.get("selected_module") or {}).get("LLM")
-            llm_config = (self.config.get("LLM") or {}).get(selected_llm or "", {})
-            hours = llm_config.get("conversation_ttl_hours", 6)
-            hours_val = float(hours)
-            if hours_val <= 0:
-                return timedelta(0)
-            return timedelta(hours=hours_val)
-        except (TypeError, ValueError):
-            return timedelta(hours=6)
-
-    def _device_conversation_expired(self, last_used_iso: Optional[str]) -> bool:
-        if not last_used_iso:
-            return False
-        if not self.device_conversation_ttl or self.device_conversation_ttl <= timedelta(0):
-            return False
-        try:
-            last_used = datetime.fromisoformat(last_used_iso)
-            if last_used.tzinfo is None:
-                last_used = last_used.replace(tzinfo=timezone.utc)
-        except Exception:
-            return False
-        now = datetime.now(timezone.utc)
-        return now - last_used > self.device_conversation_ttl
-
-    def _schedule_followup(self):
-        """Schedule a mode follow-up chat after a delay if no user response"""
+    def _schedule_alarm_followup(self):
+        """Schedule a follow-up chat after delay if no user response"""
         # Cancel any existing follow-up task
-        if self.followup_task and not self.followup_task.done():
-            self.followup_task.cancel()
-
+        if self.alarm_followup_task and not self.alarm_followup_task.done():
+            self.alarm_followup_task.cancel()
+        
         # Schedule new follow-up
-        delay = getattr(self, "followup_delay", 10)
-        self.followup_task = asyncio.run_coroutine_threadsafe(
-            self._followup_trigger(delay), self.loop
+        delay = getattr(self, "alarm_followup_delay", 10)
+        self.alarm_followup_task = asyncio.run_coroutine_threadsafe(
+            self._alarm_followup_trigger(delay), self.loop
         )
-        self.logger.bind(tag=TAG).info(f"Scheduled follow-up #{self.followup_count + 1} in {delay}s")
+        self.logger.bind(tag=TAG).info(f"Scheduled alarm follow-up #{self.alarm_followup_count + 1} in {delay}s")
     
-    async def _followup_trigger(self, delay):
-        """Wait and trigger mode follow-up if not cancelled
-
-        This uses the internal `is_user_input` flag when calling `chat()` so that:
-        - Server-initiated follow-up turns are clearly distinguished from real user input.
-        - Only genuine user messages (ASR/text paths that call `chat(..., is_user_input=True)`)
-          will flip `followup_user_has_responded` and permanently stop future follow-ups.
-        """
+    async def _alarm_followup_trigger(self, delay):
+        """Wait and trigger follow-up if not cancelled"""
         try:
             await asyncio.sleep(delay)
-            # Only trigger if user still hasn't responded and LLM is idle
-            if not getattr(self, "followup_user_has_responded", False) and self.llm_finish_task:
-                self.followup_count += 1
-                self.logger.bind(tag=TAG).info(f"Triggering follow-up #{self.followup_count}")
+            # Only trigger if LLM is still idle
+            if self.llm_finish_task:
+                self.alarm_followup_count += 1
+                self.logger.bind(tag=TAG).info(f"Triggering alarm follow-up #{self.alarm_followup_count}")
                 # Include context in the query to ensure it's seen even with conversation persistence
-                followup_query = f"[No response from user - follow-up #{self.followup_count}]"
-                self.executor.submit(
-                    self.chat,
-                    followup_query,
-                    depth=0,
-                    extra_inputs=None,
-                    is_user_input=False,
-                )
+                followup_query = f"[No response from user - alarm follow-up #{self.alarm_followup_count}]"
+                self.executor.submit(self.chat, followup_query)
         except asyncio.CancelledError:
-            self.logger.bind(tag=TAG).info("Follow-up cancelled (user responded)")
+            self.logger.bind(tag=TAG).info("Alarm follow-up cancelled (user responded)")
 
-    def chat(self, query, depth=0, extra_inputs=None, is_user_input=True):
+    def chat(self, query, depth=0, extra_inputs=None):
         self.logger.bind(tag=TAG).info(f"大模型收到用户消息: {query}")
         self.llm_finish_task = False
         
-        # If we got genuine user input, mark that the user responded and cancel any pending follow-up timer
-        if query and is_user_input:
-            self.followup_user_has_responded = True
-            if self.followup_task and not self.followup_task.done():
-                self.followup_task.cancel()
-                self.logger.bind(tag=TAG).info("User responded - cancelling follow-up")
+        # Cancel alarm follow-up if user provides input
+        if query and self.alarm_followup_task and not self.alarm_followup_task.done():
+            self.alarm_followup_task.cancel()
+            self.logger.bind(tag=TAG).info("User responded - cancelling alarm follow-up")
 
         # 为最顶层时新建会话ID和发送FIRST请求
         if depth == 0:
@@ -1375,8 +1049,9 @@ class ConnectionHandler:
             instructions = ""
             if self.mode_specific_instructions:
                 instructions += self.mode_specific_instructions
-                # Clear after use 
-                self.mode_specific_instructions = ""
+                # Clear after use UNLESS alarm follow-ups are active (need persistent context)
+                if not getattr(self, "alarm_followup_enabled", False):
+                    self.mode_specific_instructions = ""
             
             if memory_str:
                 instructions += f"\n\n<memory>\n{memory_str}\n</memory>"
@@ -1404,6 +1079,8 @@ class ConnectionHandler:
                 )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM 处理出错 {query}: {e}")
+            import traceback
+            self.logger.bind(tag=TAG).error(f"Traceback:\n{traceback.format_exc()}")
             return None
 
         # 处理流式响应
@@ -1513,12 +1190,22 @@ class ConnectionHandler:
                 }
 
                 # 使用统一工具处理器处理所有工具调用
+                try:
+                    self.logger.bind(tag=TAG).debug("Invoking handle_llm_function_call")
+                except Exception:
+                    pass
                 result = asyncio.run_coroutine_threadsafe(
                     self.func_handler.handle_llm_function_call(
                         self, function_call_data
                     ),
                     self.loop,
                 ).result()
+                try:
+                    self.logger.bind(tag=TAG).info(
+                        f"handle_llm_function_call returned: action={getattr(result,'action',None)}, has_response={bool(getattr(result,'response',None))}, has_result={bool(getattr(result,'result',None))}"
+                    )
+                except Exception:
+                    pass
                 self._handle_function_result(result, function_call_data, depth=depth)
 
         # 存储对话内容
@@ -1536,13 +1223,9 @@ class ConnectionHandler:
             )
         self.llm_finish_task = True
         
-        # Schedule follow-up if enabled and the user has not responded yet
-        if (
-            getattr(self, "followup_enabled", False)
-            and not getattr(self, "followup_user_has_responded", False)
-            and self.followup_count < getattr(self, "followup_max", 5)
-        ):
-            self._schedule_followup()
+        # Schedule alarm follow-up if enabled
+        if getattr(self, "alarm_followup_enabled", False) and self.alarm_followup_count < getattr(self, "alarm_followup_max", 5):
+            self._schedule_alarm_followup()
         
         # 使用lambda延迟计算，只有在DEBUG级别时才执行get_llm_dialogue()
         self.logger.bind(tag=TAG).debug(
@@ -1586,8 +1269,7 @@ class ConnectionHandler:
                 }
             ]
             self.logger.bind(tag=TAG).info(f"Passing function_call_output in next turn: id={function_id}, len={len(str(tool_output)) if tool_output is not None else 0}")
-            # This is a tool-driven continuation, not fresh user input
-            self.chat("", depth=depth + 1, extra_inputs=extra_inputs, is_user_input=False)
+            self.chat("", depth=depth + 1, extra_inputs=extra_inputs)
             return
 
         if result.action == Action.RESPONSE:  # 直接回复前端
@@ -1630,8 +1312,7 @@ class ConnectionHandler:
                         content=text,
                     )
                 )
-                # This is a tool-driven continuation, not fresh user input
-                self.chat(text, depth=depth + 1, is_user_input=False)
+                self.chat(text, depth=depth + 1)
         elif result.action == Action.NOTFOUND or result.action == Action.ERROR:
             text = result.response if result.response else result.result
             # more user friendly error reporting
@@ -1804,8 +1485,7 @@ class ConnectionHandler:
         """Chat with the user and then close the connection"""
         try:
             # Use the existing chat method
-            # Internal/server-initiated close; not fresh user input
-            self.chat(text, is_user_input=False)
+            self.chat(text)
 
             # After chat is complete, close the connection
             self.close_after_chat = True

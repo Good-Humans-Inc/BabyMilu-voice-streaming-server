@@ -171,6 +171,13 @@ class UnifiedToolHandler:
             function_name = function_call_data["name"]
             arguments = function_call_data.get("arguments", {})
 
+            # 阻止切换角色工具
+            if function_name == "change_role":
+                return ActionResponse(
+                    action=Action.ERROR,
+                    response="Role switching disabled",
+                )
+
             # 如果arguments是字符串，尝试解析为JSON
             if isinstance(arguments, str):
                 try:
