@@ -50,7 +50,7 @@ def publish_ws_start(
         "version": version,
     }
 
-    client = mqtt_client.Client(mqtt_client.CallbackAPIVersion.VERSION2)
+    client = mqtt_client.Client()
     try:
         _log("info", f"Connecting to MQTT broker {host}:{port} for device {device_mac}")
         client.connect(host, port, keepalive=30)
@@ -144,7 +144,7 @@ def publish_auto_update(
         "url": download_url,
     }
 
-    client = mqtt_client.Client(mqtt_client.CallbackAPIVersion.VERSION2)
+    client = mqtt_client.Client()
     try:
         _log("info", f"Connecting to MQTT broker {host}:{port} for device {device_mac}")
         client.connect(host, port, keepalive=30)
