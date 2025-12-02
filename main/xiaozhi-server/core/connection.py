@@ -148,6 +148,10 @@ class ConnectionHandler:
         # Mode + follow-up runtime state
         self._mode_state = ModeRuntimeState()
         self._followup_state = FollowupState()
+        self.followup_delays = None  # Optional[List[int]] escalating delays
+        self.followup_exit_after = 120  # seconds since last speech before exit
+        self.last_tts_stop_ms = 0
+        self.last_stt_activity_ms = 0
 
         # 线程/任务
         self.loop = asyncio.get_event_loop()
@@ -1038,6 +1042,19 @@ class ConnectionHandler:
             self.followup_delay = config["followup_delay"]
         if "followup_max" in config:
             self.followup_max = config["followup_max"]
+        # Optional escalating delays array
+        delays = config.get("followup_delays")
+        if isinstance(delays, list) and len(delays) > 0:
+            try:
+                self.followup_delays = [int(d) for d in delays]
+            except Exception:
+                self.followup_delays = None
+        else:
+            # sensible defaults per product guidance
+            self.followup_delays = [25, 35, 60]
+        # Optional exit timeout after last speech
+        if isinstance(config.get("followup_exit_after"), (int, float)):
+            self.followup_exit_after = int(config["followup_exit_after"])
 
     def _initialize_conversation_binding(self):
         """Bind this connection to either a mode-scoped or device-scoped conversation."""
@@ -1236,45 +1253,56 @@ class ConnectionHandler:
     # Follow-up scheduling (for modes like alarms)
     # ------------------------------------------------------------------
     def _schedule_followup(self):
-        """Schedule a mode follow-up chat after a delay if no user response."""
+        """Schedule a mode follow-up check based on silence since last TTS stop and STT."""
         if self.followup_task and not self.followup_task.done():
             self.followup_task.cancel()
 
-        delay = getattr(self, "followup_delay", 10)
-        self.followup_task = asyncio.run_coroutine_threadsafe(
-            self._followup_trigger(delay), self.loop
-        )
-        self.logger.bind(tag=TAG).info(
-            f"Scheduled follow-up #{self.followup_count + 1} in {delay}s"
-        )
+        # determine the next escalating delay
+        next_index = self.followup_count
+        if isinstance(self.followup_delays, list) and next_index < len(self.followup_delays):
+            next_delay = int(self.followup_delays[next_index])
+        else:
+            base = int(getattr(self, "followup_delay", 25) or 25)
+            # simple escalation if we lack a list
+            next_delay = base + next_index * 10
+
+        self.followup_task = asyncio.run_coroutine_threadsafe(self._followup_trigger(next_delay), self.loop)
+        self.logger.bind(tag=TAG).info(f"Scheduled follow-up #{self.followup_count + 1} (silence-based) with target delay {next_delay}s")
 
     async def _followup_trigger(self, delay):
         """
-        Wait and trigger mode follow-up if not cancelled.
-
-        This uses `is_user_input=False` when calling chat(), so only real user
-        input paths (ASR/text) flip `followup_user_has_responded`.
+        Wait and trigger mode follow-up after TTS stop only if:
+        - no user speaking,
+        - no STT activity since TTS stop,
+        - silence window exceeds the configured delay,
+        - and LLM is idle.
         """
         try:
-            await asyncio.sleep(delay)
-            if (
-                not getattr(self, "followup_user_has_responded", False)
-                and self.llm_finish_task
-            ):
-                self.followup_count += 1
-                self.logger.bind(tag=TAG).info(
-                    f"Triggering follow-up #{self.followup_count}"
-                )
-                followup_query = (
-                    f"[No response from user - follow-up #{self.followup_count}]"
-                )
-                self.executor.submit(
-                    self.chat,
-                    followup_query,
-                    depth=0,
-                    extra_inputs=None,
-                    is_user_input=False,
-                )
+            # poll conditions rather than blind-sleep to avoid racing with user input
+            start_ms = self.last_tts_stop_ms or int(time.time() * 1000)
+            while True:
+                await asyncio.sleep(0.5)
+                now_ms = int(time.time() * 1000)
+                # if conversation progressed or user responded, abort
+                if getattr(self, "followup_user_has_responded", False):
+                    raise asyncio.CancelledError()
+                if getattr(self, "client_is_speaking", False):
+                    raise asyncio.CancelledError()
+                # check idle
+                if not self.llm_finish_task:
+                    continue
+                # compute silence since last speech or STT activity, measured from end of TTS
+                last_activity_ms = max(self.last_tts_stop_ms, self.last_stt_activity_ms)
+                if last_activity_ms == 0:
+                    last_activity_ms = start_ms
+                silence_secs = max(0, (now_ms - last_activity_ms) / 1000.0)
+                if silence_secs >= delay:
+                    # trigger follow-up
+                    self.followup_count += 1
+                    self.logger.bind(tag=TAG).info(f"Triggering follow-up #{self.followup_count} after {silence_secs:.1f}s of silence")
+                    followup_query = f"[No response from user - follow-up #{self.followup_count}]"
+                    self.executor.submit(self.chat, followup_query, depth=0, extra_inputs=None, is_user_input=False)
+                    break
         except asyncio.CancelledError:
             self.logger.bind(tag=TAG).info("Follow-up cancelled (user responded)")
 
@@ -1508,12 +1536,7 @@ class ConnectionHandler:
             )
         self.llm_finish_task = True
 
-        if (
-            getattr(self, "followup_enabled", False)
-            and not getattr(self, "followup_user_has_responded", False)
-            and self.followup_count < getattr(self, "followup_max", 5)
-        ):
-            self._schedule_followup()
+        # Do not schedule here; follow-ups are driven by TTS 'stop' in alarm mode
 
         self.logger.bind(tag=TAG).debug(
             lambda: json.dumps(
@@ -1779,3 +1802,23 @@ class ConnectionHandler:
             self.logger.bind(tag=TAG).error(f"超时检查任务出错: {e}")
         finally:
             self.logger.bind(tag=TAG).info("超时检查任务已退出")
+
+    # ------------------------------------------------------------------
+    # Listen control helpers
+    # ------------------------------------------------------------------
+    async def _send_listen_start(self, mode: str = "manual", state: str = "start"):
+        """
+        Ask client to start listening/recording. Used to force reactivation after TTS in alarm mode.
+        """
+        try:
+            if not self.websocket:
+                return
+            message = {
+                "type": "listen",
+                "mode": mode,
+                "state": state,
+            }
+            await self.websocket.send(json.dumps(message))
+            self.logger.bind(tag=TAG).info(f"Sent listen control: {message}")
+        except Exception as e:
+            self.logger.bind(tag=TAG).warning(f"Failed to send listen start: {e}")

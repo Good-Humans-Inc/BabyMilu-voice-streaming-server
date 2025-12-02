@@ -198,6 +198,11 @@ async def send_tts_message(conn, state, text=None):
 
     # TTS播放结束
     if state == "stop":
+        # 标记TTS停止时间，用于后续“静音窗口”计算
+        try:
+            conn.last_tts_stop_ms = int(time.time() * 1000)
+        except Exception:
+            pass
         # 播放提示音
         tts_notify = conn.config.get("enable_stop_tts_notify", False)
         if tts_notify:
@@ -208,6 +213,17 @@ async def send_tts_message(conn, state, text=None):
             await sendAudio(conn, audios)
         # 清除服务端讲话状态
         conn.clearSpeakStatus()
+        # 在闹钟模式下，TTS结束后强制设备进入监听
+        try:
+            if getattr(conn, "mode_session", None) and getattr(conn.mode_session, "session_type", None) == "alarm":
+                await conn._send_listen_start(mode="manual")
+                # 在闹钟模式、启用跟进且未响应时，按静音规则安排后续跟进
+                if getattr(conn, "followup_enabled", False) and not getattr(conn, "followup_user_has_responded", False):
+                    if conn.followup_count < getattr(conn, "followup_max", 5):
+                        conn._schedule_followup()
+        except Exception:
+            # 监听恢复失败不应中断主流程
+            pass
 
     # 发送消息到客户端
     await conn.websocket.send(json.dumps(message))
@@ -240,4 +256,12 @@ async def send_stt_message(conn, text):
         json.dumps({"type": "stt", "text": stt_text, "session_id": conn.session_id})
     )
     conn.client_is_speaking = True
+    # 标记用户有语音活动，取消任何闹钟跟进
+    try:
+        conn.last_stt_activity_ms = int(time.time() * 1000)
+        conn.followup_user_has_responded = True
+        if getattr(conn, "followup_task", None) and not conn.followup_task.done():
+            conn.followup_task.cancel()
+    except Exception:
+        pass
     await send_tts_message(conn, "start")
