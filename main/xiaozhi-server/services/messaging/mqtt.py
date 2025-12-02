@@ -63,22 +63,11 @@ def publish_ws_start(
         
         _log("info", f"Publishing ws_start to topic {topic} for device {device_mac}")
         result = client.publish(topic, json.dumps(payload), qos=0)
-        
-        # Increased timeout from 2.0 to 5.0 seconds for better reliability
-        if result.wait_for_publish(5.0):
-            ok = result.is_published()
-            if ok:
-                _log("info", f"Successfully published ws_start to {device_mac}")
-            else:
-                _log("warning", f"Publish completed but not confirmed for {device_mac}")
-            client.loop_stop()
-            client.disconnect()
-            return ok
-        else:
-            _log("error", f"MQTT publish timeout (5s) for device {device_mac} on topic {topic}")
-            client.loop_stop()
-            client.disconnect()
-            return False
+        # QoS 0 is fire-and-forget. Avoid false negatives from is_published timing.
+        result.wait_for_publish(1.0)
+        client.loop_stop()
+        client.disconnect()
+        return True
             
     except ConnectionRefusedError as e:
         _log("error", f"MQTT connection refused to {host}:{port} for device {device_mac}: {e}")
@@ -160,21 +149,11 @@ def publish_auto_update(
 
         _log("info", f"Publishing auto_update to topic {topic} for device {device_mac}")
         result = client.publish(topic, json.dumps(payload), qos=0)
-
-        if result.wait_for_publish(5.0):
-            ok = result.is_published()
-            if ok:
-                _log("info", f"Successfully published auto_update to {device_mac}")
-            else:
-                _log("warning", f"Publish completed but not confirmed for {device_mac}")
-            client.loop_stop()
-            client.disconnect()
-            return ok
-        else:
-            _log("error", f"MQTT publish timeout (5s) for device {device_mac} on topic {topic}")
-            client.loop_stop()
-            client.disconnect()
-            return False
+        # QoS 0 is fire-and-forget. Avoid false negatives from is_published timing.
+        result.wait_for_publish(1.0)
+        client.loop_stop()
+        client.disconnect()
+        return True
     except Exception as e:
         _log("error", f"MQTT auto_update publish failed for device {device_mac}: {type(e).__name__}: {e}")
         try:
