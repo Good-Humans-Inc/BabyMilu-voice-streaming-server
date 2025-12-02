@@ -1814,6 +1814,7 @@ class ConnectionHandler:
             if not self.websocket:
                 return
             message = {
+                "session_id": self.session_id,
                 "type": "listen",
                 "mode": mode,
                 "state": state,
