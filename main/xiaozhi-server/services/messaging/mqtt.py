@@ -57,7 +57,7 @@ def publish_ws_start(
         client.loop_start()
         
         _log("info", f"Publishing ws_start to topic {topic} for device {device_mac}")
-        result = client.publish(topic, json.dumps(payload), qos=1)
+        result = client.publish(topic, json.dumps(payload), qos=0)
         
         # Increased timeout from 2.0 to 5.0 seconds for better reliability
         if result.wait_for_publish(5.0):
@@ -151,7 +151,7 @@ def publish_auto_update(
         client.loop_start()
 
         _log("info", f"Publishing auto_update to topic {topic} for device {device_mac}")
-        result = client.publish(topic, json.dumps(payload), qos=1)
+        result = client.publish(topic, json.dumps(payload), qos=0)
 
         if result.wait_for_publish(5.0):
             ok = result.is_published()
