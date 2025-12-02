@@ -1,22 +1,69 @@
-# Docker安装Server
+name: current
 
-version: '3'
 services:
-  xiaozhi-esp32-server:
-    image: ghcr.nju.edu.cn/xinnan-tech/xiaozhi-esp32-server:server_latest
-    container_name: xiaozhi-esp32-server
-    restart: always
-    security_opt:
-      - seccomp:unconfined
-    environment:
-      - TZ=Asia/Shanghai
+  mqtt:
+    image: eclipse-mosquitto:2.0
+    networks:
+      default: null
     ports:
-      # ws服务端
-      - "8000:8000"
-      # http服务的端口，用于简单OTA接口(单服务部署)，以及视觉分析接口
-      - "8003:8003"
+      - "1883:1883"
+    restart: unless-stopped
     volumes:
-      # 配置文件目录
-      - ./data:/opt/xiaozhi-esp32-server/data
-      # 模型文件挂接，很重要
-      - ./models/SenseVoiceSmall/model.pt:/opt/xiaozhi-esp32-server/models/SenseVoiceSmall/model.pt
+      - type: bind
+        source: /srv/staging/current/mosquitto.conf
+        target: /mosquitto/config/mosquitto.conf
+        read_only: true
+        bind:
+          create_host_path: true
+
+  server:
+    build:
+      context: /srv/staging/current
+      dockerfile: Dockerfile-server
+
+    command: ["python", "app.py"]
+
+    working_dir: /opt/xiaozhi-esp32-server
+
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp_sa.json
+      GOOGLE_CLOUD_PROJECT: composed-augury-469200-g6
+      MQTT_URL: mqtt://mqtt:1883
+      OTA_MANIFEST_URL: https://storage.googleapis.com/milu-public/OTA/ota_manifest.json
+      PYTHONUNBUFFERED: "1"
+      TZ: America/Los_Angeles
+
+    ports:
+      - "8000:8000"
+      - "8003:8003"
+
+    restart: unless-stopped
+    networks:
+      default: null
+
+    volumes:
+      # 1) Source code (so code changes apply without rebuild)
+      - type: bind
+        source: /srv/staging/current/main/xiaozhi-server
+        target: /opt/xiaozhi-esp32-server
+        bind:
+          create_host_path: true
+
+      # 2) Runtime config & data
+      - type: bind
+        source: /srv/staging/current/data
+        target: /opt/xiaozhi-esp32-server/data
+        bind:
+          create_host_path: true
+
+      # 3) GCP Service Account
+      - type: bind
+        source: /srv/staging/current/data/.gcp/sa.json
+        target: /run/secrets/gcp_sa.json
+        read_only: true
+        bind:
+          create_host_path: true
+
+networks:
+  default:
+    name: current_default
