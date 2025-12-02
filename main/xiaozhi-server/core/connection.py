@@ -39,7 +39,7 @@ from config.manage_api_client import DeviceNotFoundException, DeviceBindExceptio
 from core.utils.prompt_manager import PromptManager
 from core.utils.voiceprint_provider import VoiceprintProvider
 from core.utils import textUtils
-from core.utils.config_utils import filter_sensitive_info, check_vad_update, check_asr_update
+from core.utils.util import filter_sensitive_info, check_vad_update, check_asr_update
 from core.utils.firestore_client import (
     get_active_character_for_device,
     get_character_profile,
