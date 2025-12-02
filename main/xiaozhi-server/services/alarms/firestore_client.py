@@ -8,6 +8,7 @@ from google.cloud.firestore_v1 import FieldFilter
 
 from config.settings import get_gcp_credentials_path
 from services.logging import setup_logging
+from core.utils.mac import normalize_mac
 from services.alarms import models
 
 TAG = __name__
@@ -177,7 +178,7 @@ def _format_datetime(value: datetime) -> str:
 def _normalize_device_id(value) -> str:
     if not isinstance(value, str):
         raise ValueError("Alarm target deviceId must be a string")
-    return value.lower()
+    return normalize_mac(value)
 
 
 def mark_alarm_processed(

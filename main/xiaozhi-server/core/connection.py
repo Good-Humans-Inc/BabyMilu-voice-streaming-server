@@ -24,6 +24,7 @@ from core.utils.modules_initialize import (
     initialize_tts,
     initialize_asr,
 )
+from core.utils.mac import normalize_mac
 from core.handle.reportHandle import report
 from core.providers.tts.default import DefaultTTS
 from concurrent.futures import ThreadPoolExecutor
@@ -224,10 +225,10 @@ class ConnectionHandler:
 
             # 认证通过,继续处理
             self.websocket = ws
-            # 规范化 device-id：小写并将 '-' 替换为 ':'
+            # 规范化 device-id：强制冒号分隔小写
             raw_device_id = self.headers.get("device-id", None)
             if isinstance(raw_device_id, str):
-                normalized_device_id = raw_device_id.lower().replace("-", ":")
+                normalized_device_id = normalize_mac(raw_device_id)
             else:
                 normalized_device_id = raw_device_id
             self.device_id = normalized_device_id
@@ -262,6 +263,30 @@ class ConnectionHandler:
                     pass
                 await self.close(ws)
                 return
+
+            # WebSocket flood protection: ensure single active WS per device
+            try:
+                if self.server and self.device_id:
+                    async with self.server.ws_lock:
+                        prev = self.server.active_ws_by_device.get(self.device_id)
+                        if prev is not None:
+                            try:
+                                if hasattr(prev, "closed"):
+                                    already_closed = bool(prev.closed)
+                                else:
+                                    # Fall back to state check if available
+                                    already_closed = (
+                                        hasattr(prev, "state")
+                                        and getattr(getattr(prev, "state", None), "name", "") == "CLOSED"
+                                    )
+                                if not already_closed:
+                                    await prev.close()
+                                    await asyncio.sleep(0.2)  # allow TCP to close cleanly
+                            except Exception:
+                                pass
+                        self.server.active_ws_by_device[self.device_id] = self.websocket
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(f"WS flood-protect setup failed: {e}")
 
             # Send server hello to satisfy firmware handshake
             try:
@@ -458,6 +483,19 @@ class ConnectionHandler:
                     self.logger.bind(tag=TAG).error(
                         f"强制关闭连接时出错: {close_error}"
                     )
+            # Unregister WS and mark last disconnect time
+            try:
+                if self.server and self.device_id:
+                    async with self.server.ws_lock:
+                        current = self.server.active_ws_by_device.get(self.device_id)
+                        if current is self.websocket:
+                            try:
+                                del self.server.active_ws_by_device[self.device_id]
+                            except Exception:
+                                pass
+                        self.server.last_disconnect_ms[self.device_id] = int(time.time() * 1000)
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(f"WS flood-protect teardown failed: {e}")
 
     async def _save_and_close(self, ws):
         """保存记忆并关闭连接"""

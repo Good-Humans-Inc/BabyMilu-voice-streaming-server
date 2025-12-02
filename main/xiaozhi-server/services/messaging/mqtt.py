@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import os
 from typing import Optional, Tuple
+import time
 
 from paho.mqtt import client as mqtt_client
+from core.utils.mac import normalize_mac
 
 # Try to import logger, but make it optional for backward compatibility
 try:
@@ -43,14 +45,17 @@ def publish_ws_start(
         True if publish succeeded, False otherwise
     """
     host, port = _parse_broker(broker_url)
-    topic = f"xiaozhi/{device_mac}/down"
+    normalized_mac = normalize_mac(device_mac or "")
+    topic = f"xiaozhi/{normalized_mac}/down"
     payload = {
         "type": "ws_start",
         "wss": ws_url,
         "version": version,
     }
 
-    client = mqtt_client.Client()
+    # Unique, explicit client-id with device suffix for traceability
+    cid = f"serverpub-{(device_mac or '').replace(':','')}-{int(time.time()*1000)}"
+    client = mqtt_client.Client(client_id=cid, clean_session=True)
     try:
         _log("info", f"Connecting to MQTT broker {host}:{port} for device {device_mac}")
         client.connect(host, port, keepalive=30)
@@ -138,13 +143,16 @@ def publish_auto_update(
         True if publish succeeded, False otherwise
     """
     host, port = _parse_broker(broker_url)
-    topic = f"xiaozhi/{device_mac}/down"
+    normalized_mac = normalize_mac(device_mac or "")
+    topic = f"xiaozhi/{normalized_mac}/down"
     payload = {
         "type": "auto_update",
         "url": download_url,
     }
 
-    client = mqtt_client.Client()
+    # Unique, explicit client-id with device suffix for traceability
+    cid = f"serverpub-{(device_mac or '').replace(':','')}-{int(time.time()*1000)}"
+    client = mqtt_client.Client(client_id=cid, clean_session=True)
     try:
         _log("info", f"Connecting to MQTT broker {host}:{port} for device {device_mac}")
         client.connect(host, port, keepalive=30)

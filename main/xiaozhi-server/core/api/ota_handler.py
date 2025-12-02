@@ -5,6 +5,7 @@ from core.utils.util import get_local_ip
 from core.api.base_handler import BaseHandler
 import os
 import aiohttp
+from core.utils.mac import normalize_mac
 
 TAG = __name__
 
@@ -157,8 +158,8 @@ class OTAHandler(BaseHandler):
 
             device_id = request.headers.get("device-id", "")
             if device_id:
-                # 标准化：小写并使用冒号分隔
-                device_id = device_id.lower().replace("-", ":")
+                # 标准化：始终输出冒号分隔小写
+                device_id = normalize_mac(device_id)
                 self.logger.bind(tag=TAG).info(f"OTA请求设备ID: {device_id}")
             else:
                 raise Exception("OTA请求设备ID为空")
@@ -169,7 +170,9 @@ class OTAHandler(BaseHandler):
             port = int(server_config.get("port", 8000))
             local_ip = get_local_ip()
             mac_upper = (device_id or "").strip().upper()
-            publish_topic = f"xiaozhi/{mac_upper}/up" if mac_upper else ""
+            # 主题使用标准化小写冒号格式，避免大小写/分隔符不一致
+            normalized_mac = normalize_mac(device_id or "")
+            publish_topic = f"xiaozhi/{normalized_mac}/up" if normalized_mac else ""
 
             # Load dynamic OTA manifest (no server restart needed)
             manifest = await self._load_ota_manifest(data_json, mac_upper)  # may be None

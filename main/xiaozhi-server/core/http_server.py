@@ -6,6 +6,7 @@ from core.api.vision_handler import VisionHandler
 from services.messaging.mqtt import publish_ws_start, publish_auto_update
 import os
 import json
+from core.utils.mac import normalize_mac
 
 TAG = __name__
 
@@ -96,6 +97,7 @@ class SimpleHttpServer:
                 return web.json_response({"ok": False, "error": "invalid json"}, status=400)
 
         device_id = (data.get("deviceId") or data.get("device_id") or "").strip()
+        device_id = normalize_mac(device_id) if device_id else device_id
         ws_url = (data.get("wsUrl") or data.get("wss") or "").strip()
         version = int(data.get("version") or 3)
         broker = (data.get("broker") or os.environ.get("MQTT_URL") or "").strip()
@@ -125,6 +127,7 @@ class SimpleHttpServer:
                 return web.json_response({"ok": False, "error": "invalid json"}, status=400)
 
         device_id = (data.get("deviceId") or data.get("device_id") or "").strip()
+        device_id = normalize_mac(device_id) if device_id else device_id
         url = (data.get("url") or "").strip()
         broker = (data.get("broker") or os.environ.get("MQTT_URL") or "").strip()
 
