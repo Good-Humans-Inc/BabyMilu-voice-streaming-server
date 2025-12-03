@@ -213,17 +213,11 @@ async def send_tts_message(conn, state, text=None):
             await sendAudio(conn, audios)
         # 清除服务端讲话状态
         conn.clearSpeakStatus()
-        # 在闹钟模式下，TTS结束后强制设备进入监听
-        try:
-            if getattr(conn, "mode_session", None) and getattr(conn.mode_session, "session_type", None) == "alarm":
-                await conn._send_listen_start(mode="manual")
-                # 在闹钟模式、启用跟进且未响应时，按静音规则安排后续跟进
-                if getattr(conn, "followup_enabled", False) and not getattr(conn, "followup_user_has_responded", False):
-                    if conn.followup_count < getattr(conn, "followup_max", 5):
-                        conn._schedule_followup()
-        except Exception:
-            # 监听恢复失败不应中断主流程
-            pass
+        # 闹钟模式由固件在TTS stop后自动恢复监听；此处仅按静音规则安排后续跟进
+        if getattr(conn, "mode_session", None) and getattr(conn.mode_session, "session_type", None) == "alarm":
+            if getattr(conn, "followup_enabled", False) and not getattr(conn, "followup_user_has_responded", False):
+                if conn.followup_count < getattr(conn, "followup_max", 5):
+                    conn._schedule_followup()
 
     # 发送消息到客户端
     await conn.websocket.send(json.dumps(message))
