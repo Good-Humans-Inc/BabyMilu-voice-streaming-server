@@ -17,9 +17,8 @@ def _decode_mac_from_path(object_name: str) -> str | None:
     if parts[0] != "device_bin" or parts[2] != "mega.bin":
         return None
     mac_enc = parts[1]
-    # Decode percent-encoding and convert %3A back to ':'
-    mac_decoded = urllib.parse.unquote(mac_enc).replace("%3A", ":")
-    return mac_decoded
+    # Decode percent-encoding (handles both %3a and %3A)
+    return urllib.parse.unquote(mac_enc)
 
 
 @functions_framework.cloud_event

@@ -110,10 +110,10 @@ class SimpleHttpServer:
 
     async def handle_animation_auto_updates(self, request: web.Request) -> web.Response:
         """HTTP endpoint to publish animation auto_update to a device via MQTT.
-        Body JSON:
+        Body JSON (MAC is lowercase with ':' percent-encoded in storage path):
         {
-          "deviceId": "A4:CF:12:34:56:78",
-          "url": "https://storage.googleapis.com/milu-public/device_bin/<MAC_ENC>/mega.bin",
+          "deviceId": "a4:cf:12:34:56:78",
+          "url": "https://storage.googleapis.com/milu-public/device_bin/<mac_enc>/mega.bin",
           "broker": "mqtt://host:1883"   # optional, fallback env MQTT_URL
         }
         """

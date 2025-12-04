@@ -1051,7 +1051,7 @@ class ConnectionHandler:
                 self.followup_delays = None
         else:
             # sensible defaults per product guidance
-            self.followup_delays = [25, 35, 60]
+            self.followup_delays = [10, 15, 20]
         # Optional exit timeout after last speech
         if isinstance(config.get("followup_exit_after"), (int, float)):
             self.followup_exit_after = int(config["followup_exit_after"])

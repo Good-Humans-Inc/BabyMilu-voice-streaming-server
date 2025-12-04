@@ -4,7 +4,8 @@ Deploy a finalize trigger that calls the xiaozhi-server to publish MQTT auto_upd
 
 Prereqs:
 - gcloud configured for your project and region
-- Bucket with objects at `device_bin/<MAC_ENC>/mega.bin` (MAC uppercased, `:` encoded as `%3A`)
+- Bucket with objects at `device_bin/<mac_enc>/mega.bin`
+  - mac_enc format: lowercase MAC with `:` percent-encoded (e.g. `a4%3acf%3a12%3a34%3a56%3a78`)
 
 Deploy:
 
@@ -25,6 +26,6 @@ Local layout (run deploy from this folder):
 - `requirements.txt`
 
 Notes:
-- Any object not matching `device_bin/<MAC_ENC>/mega.bin` is ignored.
+- Any object not matching `device_bin/<mac_enc>/mega.bin` is ignored.
 - The function posts to `/animation/auto_updates` on xiaozhi-server with `{ deviceId, url, broker }`.
 
