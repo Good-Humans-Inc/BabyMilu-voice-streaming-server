@@ -54,8 +54,7 @@ from core.utils.firestore_client import (
 
 from services.session_context import store as session_context_store
 from services.alarms.config import MODE_CONFIG
-
-
+from core.utils.api_client import query_task
 TAG = __name__
 
 auto_import_modules("plugins_func.functions")
@@ -116,6 +115,7 @@ class ConnectionHandler:
         _asr,
         _llm,
         _memory,
+        _task,
         _intent,
         server=None,
     ):
@@ -172,6 +172,7 @@ class ConnectionHandler:
         self._vad = _vad
         self.llm = _llm
         self.memory = _memory
+        self.task = _task
         self.intent = _intent
 
         # 声纹识别
@@ -380,7 +381,6 @@ class ConnectionHandler:
 
             # 初始化活动时间戳
             self.last_activity_time = time.time() * 1000
-
             # 从云端获取角色配置（voice, bio 等），并应用到本次会话
             try:
                 char_id = None
@@ -444,7 +444,11 @@ class ConnectionHandler:
                         if user_parts:
                             user_profile = "\n- ".join(user_parts)
                             new_prompt = new_prompt + f"\nUser profile:\n {user_profile}"
-
+                        # 使用未完成任务的记忆
+                        task_str = query_task(owner_phone, fields.get("name"), user_fields.get("name"))
+                        print("task_str", task_str)
+                        if task_str:
+                            new_prompt = new_prompt + f"\n{user_fields.get('name')} might be trying to accomplish these tasks:\n {task_str}"
                     if new_prompt != self.config.get("prompt", ""):
                         self.config["prompt"] = new_prompt
                         self.change_system_prompt(new_prompt)
@@ -550,9 +554,34 @@ class ConnectionHandler:
                     try:
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
-                        loop.run_until_complete(
-                            self.memory.save_memory(self.dialogue.dialogue)
-                        )
+                        owner_phone = get_owner_phone_for_device(self.device_id)
+                        
+                        # Build list of coroutines to run
+                        coroutines = [self.memory.save_memory(self.dialogue.dialogue)]
+                        char_id = None
+                        if self.device_id:
+                            char_id = get_active_character_for_device(self.device_id)
+                            if not char_id:
+                                fallback_id = get_most_recent_character_via_user_for_device(self.device_id)
+                                if fallback_id:
+                                    self.logger.bind(tag=TAG, device_id=self.device_id).warning(
+                                        f"activeCharacterId missing; falling back to most recent user character: {fallback_id}"
+                                    )
+                                    char_id = fallback_id
+                        if char_id:
+                            self.logger.info(f"char_id={char_id!r}")
+                            char_doc = get_character_profile(char_id)
+                            self.logger.info(f"char_doc_keys={list((char_doc or {}).keys())}")
+                            fields = extract_character_profile_fields(char_doc or {})
+                            character_name = fields.get("name")
+                        # Only add task detection if task provider has the method
+                        if self.task and hasattr(self.task, 'detect_task'):
+                            coroutines.append(
+                                self.task.detect_task(self.dialogue.dialogue, user_id=owner_phone)
+                            )
+                        
+                        # Run all coroutines concurrently
+                        loop.run_until_complete(asyncio.gather(*coroutines))
                     except Exception as e:
                         self.logger.bind(tag=TAG).error(f"保存记忆失败: {e}")
                     finally:
@@ -805,7 +834,13 @@ class ConnectionHandler:
             self.logger.bind(tag=TAG).error(f"获取差异化配置失败: {e}")
             private_config = {}
 
-        init_llm = init_tts = init_memory = init_intent = False
+        init_llm, init_tts, init_memory, init_intent, init_task = (
+            False,
+            False,
+            False,
+            False,
+            False,
+        )
         init_vad = check_vad_update(self.common_config, private_config)
         init_asr = check_asr_update(self.common_config, private_config)
 
@@ -834,7 +869,10 @@ class ConnectionHandler:
             init_memory = True
             self.config["Memory"] = private_config["Memory"]
             self.config["selected_module"]["Memory"] = private_config["selected_module"]["Memory"]
-
+        if private_config.get("Task", None) is not None:
+            init_task = True
+            self.config["Task"] = private_config["Task"]
+            self.config["selected_module"]["Task"] = private_config["selected_module"]["Task"]
         if private_config.get("Intent") is not None:
             init_intent = True
             self.config["Intent"] = private_config["Intent"]
@@ -872,6 +910,7 @@ class ConnectionHandler:
                 init_tts,
                 init_memory,
                 init_intent,
+                init_task,
             )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"初始化组件失败: {e}")
@@ -899,7 +938,13 @@ class ConnectionHandler:
             summary_memory=self.config.get("summaryMemory", None),
             save_to_file=not self.read_config_from_api,
         )
-
+        # 初始化任务模块（如果存在）
+        if self.task:
+            self.task.init_task(
+                role_id=self.device_id,
+                llm=self.llm,
+            )
+        # 获取记忆总结配置
         memory_config = self.config["Memory"]
         memory_type = memory_config[self.config["selected_module"]["Memory"]]["type"]
 
@@ -920,8 +965,14 @@ class ConnectionHandler:
                 self.logger.bind(tag=TAG).info(
                     f"为记忆总结创建了专用LLM: {memory_llm_name}, 类型: {memory_llm_type}"
                 )
+                # 设置任务/记忆模块的LLM
+                if self.task and hasattr(self.task, "set_llm"):
+                    self.task.set_llm(memory_llm)
                 self.memory.set_llm(memory_llm)
             else:
+                # 否则使用主LLM
+                if self.task and hasattr(self.task, "set_llm"):
+                    self.task.set_llm(self.llm)
                 self.memory.set_llm(self.llm)
                 self.logger.bind(tag=TAG).info("使用主LLM作为意图识别模型")
 
@@ -1338,6 +1389,7 @@ class ConnectionHandler:
         try:
             memory_str = None
             if self.memory is not None:
+<<<<<<< HEAD
                 try:
                     future = asyncio.run_coroutine_threadsafe(
                         self.memory.query_memory(query), self.loop
@@ -1346,6 +1398,14 @@ class ConnectionHandler:
                 except Exception as e:
                     self.logger.bind(tag=TAG).warning(f"记忆查询失败或超时: {e}")
 
+=======
+                future = asyncio.run_coroutine_threadsafe(
+                    self.memory.query_memory(query), self.loop
+                )
+                memory_str = future.result()
+           
+            # 根据是否有持久会话决定是否传递全历史
+>>>>>>> origin/tasks
             use_full_history = True
             try:
                 if hasattr(self.llm, "has_conversation") and self.llm.has_conversation(
