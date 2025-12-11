@@ -38,6 +38,10 @@
         <label>Emotion (optional)</label>
         <input id="emotion" placeholder="happy">
       </div>
+      <div class="col">
+        <label>ElevenLabs Voice ID (optional)</label>
+        <input id="voice" placeholder="g6uQR0Q9ieSD9KFclcZB">
+      </div>
     </div>
     <div class="row">
       <div class="col">
@@ -164,6 +168,7 @@
       const gain = parseFloat(el('gain').value || '1.0');
       const broker = el('broker').value.trim();
       const baseUrl = (el('baseUrl').value || window.location.origin).trim();
+      const voice = el('voice').value.trim();
       if (!deviceId) {
         showStatus('err', 'Please enter Device MAC (underscored).');
         return;
@@ -178,6 +183,7 @@
         const body = { deviceId, text, gain, baseUrl };
         if (emotion) body.emotion = emotion;
         if (broker) body.broker = broker;
+        if (voice) body.voice = voice;
         const res = await postJSON('/marketing/say', body);
         if (res.ok) {
           const sent = res.sent || {};
@@ -197,6 +203,7 @@
       const deviceId = el('deviceId').value.trim();
       const broker = el('broker').value.trim();
       const baseUrl = (el('baseUrl').value || window.location.origin).trim();
+      const voice = el('voice').value.trim();
       if (!deviceId) {
         showScriptStatus('err', 'Please enter Device MAC (underscored).');
         return;
@@ -226,6 +233,7 @@
       try {
         const body = { deviceId, mode: 'download', steps, baseUrl, combine: document.getElementById('combine').checked };
         if (broker) body.broker = broker;
+        if (voice) body.voice = voice;
         const res = await postJSON('/marketing/script', body);
         if (res.ok) {
           const lines = (res.results || []).map(r =>

@@ -150,6 +150,8 @@ class SimpleHttpServer:
         emotion = (data.get("emotion") or "").strip()
         gain = float(data.get("gain") or 1.0)
         broker = (data.get("broker") or os.environ.get("MQTT_URL") or "").strip()
+        voice = (data.get("voice") or data.get("voiceId") or "").strip()
+        out_format = (data.get("format") or "").strip().lower()  # "opus_file" to serve .p3
 
         if not device_id or not text_to_say:
             return web.json_response({"ok": False, "error": "deviceId and text are required"}, status=400)
@@ -161,6 +163,9 @@ class SimpleHttpServer:
             provider_type = tts_conf.get("type") or "edge"
             # Keep file after synthesis so device can download
             tts_provider = create_instance(provider_type, tts_conf, delete_audio_file=False)
+            # Optional: override default voice_id per request (e.g., ElevenLabs)
+            if voice and hasattr(tts_provider, "default_voice_id"):
+                tts_provider.default_voice_id = voice
         except Exception as e:
             return web.json_response({"ok": False, "error": f"tts init failed: {e}"}, status=500)
 
@@ -274,6 +279,7 @@ class SimpleHttpServer:
         provided_base = (data.get("baseUrl") or "").rstrip("/")
         combine = bool(data.get("combine") or False)
         out_format = (data.get("format") or "").strip().lower()  # "opus_file" -> .p3 + play_opus_url
+        voice = (data.get("voice") or data.get("voiceId") or "").strip()
 
         if not device_id:
             return web.json_response({"ok": False, "error": "deviceId required"}, status=400)
@@ -288,6 +294,9 @@ class SimpleHttpServer:
             tts_conf = self.config.get("TTS", {}).get(selected_tts) or {}
             provider_type = tts_conf.get("type") or "edge"
             tts_provider = create_instance(provider_type, tts_conf, delete_audio_file=False)
+            # Optional: override default voice_id for whole script run
+            if voice and hasattr(tts_provider, "default_voice_id"):
+                tts_provider.default_voice_id = voice
         except Exception as e:
             return web.json_response({"ok": False, "error": f"tts init failed: {e}"}, status=500)
 
