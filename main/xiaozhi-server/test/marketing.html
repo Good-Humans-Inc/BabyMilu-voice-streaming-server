@@ -31,7 +31,7 @@
   <div class="card">
     <div class="row">
       <div class="col">
-        <label>Device MAC (underscored) e.g. A4_CF_12_34_56_78</label>
+        <label>Device MAC (e.g. FC:01:2C:DA:19:30)</label>
         <input id="deviceId" placeholder="A4_CF_12_34_56_78">
       </div>
       <div class="col">
@@ -50,7 +50,7 @@
       </div>
       <div class="col">
         <label>MQTT Broker (optional)</label>
-        <input id="broker" placeholder="mqtt://localhost:1883">
+        <input id="broker" placeholder="mqtt://<server>:1883">
       </div>
     </div>
     <div class="row">
@@ -132,6 +132,10 @@
         <div class="col">
           <label>Emotion</label>
           <input class="step-emotion" placeholder="happy" value="${prefill.emotion||''}">
+          <label class="small" style="display:flex;gap:8px;align-items:center;margin-top:8px;">
+            <input class="step-emotion-only" type="checkbox" ${prefill.emotionOnly?'checked':''}>
+            Emotion only (no audio)
+          </label>
           <div class="row" style="gap:8px;margin:8px 0 0 0;">
             <div class="col">
               <label class="small">Gain</label>
@@ -217,12 +221,13 @@
       const steps = stepEls.map(elm => {
         const text = elm.querySelector('.step-text').value.trim();
         const emotion = elm.querySelector('.step-emotion').value.trim();
+        const emotionOnly = !!elm.querySelector('.step-emotion-only')?.checked;
         const gain = parseFloat(elm.querySelector('.step-gain').value || '1.0');
         const pauseMs = parseInt(elm.querySelector('.step-pause').value || '0', 10);
-        const step = { text, gain, pauseMs };
+        const step = { text, gain, pauseMs, emotionOnly };
         if (emotion) step.emotion = emotion;
         return step;
-      }).filter(s => s.text);
+      }).filter(s => s.text || s.emotionOnly);
       if (steps.length === 0) {
         showScriptStatus('err', 'Steps must include text.');
         return;
@@ -254,6 +259,15 @@
     addStep({ text: 'Welcome to our promotion!', emotion: 'happy', gain: 1.0, pauseMs: 300 });
     addStep({ text: 'Up to 30% off this week.' });
     addStep({ text: 'Don’t miss out!', emotion: 'excited' });
+
+    // Prefill broker to current host:1883 if empty
+    (function seedBrokerDefault(){
+      const b = el('broker');
+      if (b && !b.value) {
+        const host = window.location.hostname || 'localhost';
+        b.value = `mqtt://${host}:1883`;
+      }
+    })();
   </script>
 </body>
 </html>

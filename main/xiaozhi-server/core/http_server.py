@@ -337,12 +337,24 @@ class SimpleHttpServer:
                     results.append({"idx": idx, "error": "invalid step"})
                     continue
                 text_to_say = (step.get("text") or "").strip()
+                emotion = (step.get("emotion") or "").strip()
+                emotion_only = bool(step.get("emotionOnly") or step.get("emotion_only"))
+                gain = float(step.get("gain") or 1.0)
+                pause_ms = int(step.get("pauseMs") or 0)
+
+                # Emotion-only block: schedule emotion and append optional pause; skip audio
+                if emotion_only:
+                    if emotion:
+                        schedule.append((current_offset, emotion))
+                    if pause_ms > 0:
+                        segments.append(AudioSegment.silent(duration=pause_ms))
+                        current_offset += pause_ms
+                    results.append({"idx": idx, "llm": bool(bool(emotion)), "emotion_only": True})
+                    continue
+
                 if not text_to_say:
                     results.append({"idx": idx, "error": "missing text"})
                     continue
-                emotion = (step.get("emotion") or "").strip()
-                gain = float(step.get("gain") or 1.0)
-                pause_ms = int(step.get("pauseMs") or 0)
 
                 try:
                     loop = asyncio.get_running_loop()
@@ -430,10 +442,8 @@ class SimpleHttpServer:
                     results.append({"idx": idx, "error": "invalid step"})
                     continue
                 text_to_say = (step.get("text") or "").strip()
-                if not text_to_say:
-                    results.append({"idx": idx, "error": "missing text"})
-                    continue
                 emotion = (step.get("emotion") or "").strip()
+                emotion_only = bool(step.get("emotionOnly") or step.get("emotion_only"))
                 gain = float(step.get("gain") or 1.0)
                 pause_ms = int(step.get("pauseMs") or 0)
 
@@ -441,6 +451,20 @@ class SimpleHttpServer:
                 llm_ok = True
                 if emotion:
                     llm_ok = publish_down_command(broker, device_id, {"type": "llm", "emotion": emotion})
+
+                # Emotion-only block: no audio; optional pause; continue
+                if emotion_only:
+                    results.append({"idx": idx, "ttsUrl": None, "llm": bool(llm_ok), "play_url": False, "emotion_only": True})
+                    if pause_ms > 0:
+                        try:
+                            await asyncio.sleep(pause_ms / 1000.0)
+                        except Exception:
+                            pass
+                    continue
+
+                if not text_to_say:
+                    results.append({"idx": idx, "error": "missing text"})
+                    continue
 
                 # Synthesize TTS to file
                 try:
