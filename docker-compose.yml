@@ -29,7 +29,8 @@ services:
       GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp_sa.json
       GOOGLE_CLOUD_PROJECT: composed-augury-469200-g6
       MQTT_URL: mqtt://mqtt:1883
-      OTA_MANIFEST_URL: https://storage.googleapis.com/milu-public/OTA/ota_manifest.json
+      SERVER_EXTERNAL_IP: 136.111.52.199
+      OTA_MANIFEST_URL: https://storage.googleapis.com/milu-public/OTA_MIAO/ota_manifest.json
       PYTHONUNBUFFERED: "1"
       TZ: America/Los_Angeles
 
