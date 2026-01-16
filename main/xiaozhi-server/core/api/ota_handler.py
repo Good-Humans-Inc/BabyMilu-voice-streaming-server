@@ -187,8 +187,9 @@ class OTAHandler(BaseHandler):
                 fw_force = 0
                 manifest_mqtt = None
 
-            # Build MQTT config: manifest > environment variable > hardcoded default
-            mqtt_endpoint = "34.30.176.148:1883"  # Default fallback
+            # Build MQTT config: manifest > environment variable > server's own IP (clean environment)
+            # Default: use server's own IP + MQTT port (since MQTT runs on same server)
+            mqtt_endpoint = f"{local_ip}:1883"
             if manifest_mqtt and isinstance(manifest_mqtt, dict):
                 # Use endpoint from manifest if provided
                 mqtt_endpoint = manifest_mqtt.get("endpoint", mqtt_endpoint)

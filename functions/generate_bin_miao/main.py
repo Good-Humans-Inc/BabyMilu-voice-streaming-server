@@ -9,6 +9,8 @@ import functions_framework
 from PIL import Image, ImageSequence
 from google.cloud import storage
 from flask import Request, make_response
+import requests
+import paho.mqtt.client as mqtt
 
 
 # Crop/Resize configuration
@@ -536,10 +538,51 @@ def generate_bin_miao(request: Request):
         except Exception as e:
             return _err(f"Upload failed: {e}", 500)
 
+    # 5) Publish notification
+    # Preference: direct MQTT publish (to mirror test_mqtt_publish.py). Fallback: HTTP AMQTT endpoint.
+    amqtt_type = (body.get("amqtt_type") or "remote_anim_update").strip()
+    amqtt_message = (body.get("amqtt_message") or "update").strip()
+    mqtt_broker = (body.get("mqtt_broker") or os.environ.get("MQTT_BROKER_HOST") or "").strip()
+    mqtt_port_val = body.get("mqtt_port") or os.environ.get("MQTT_BROKER_PORT") or 1883
+    try:
+        mqtt_port = int(mqtt_port_val)
+    except Exception:
+        mqtt_port = 1883
+
+    publish_info = None
+    if device_id and mqtt_broker:
+        try:
+            topic = f"xiaozhi/{device_id.lower()}/down"
+            payload = json.dumps({"type": amqtt_type, "message": amqtt_message})
+            client = mqtt.Client()
+            client.connect(mqtt_broker, mqtt_port, 30)
+            # Publish QoS 1 similar to test script
+            result = client.publish(topic, payload, qos=1)
+            # Drive network loop briefly to ensure publish
+            client.loop(timeout=2.0)
+            client.disconnect()
+            publish_info = {"method": "mqtt", "broker": mqtt_broker, "port": mqtt_port, "topic": topic, "rc": int(result.rc)}
+        except Exception as e:
+            publish_info = {"method": "mqtt", "error": str(e)}
+    else:
+        # Fallback HTTP AMQTT if provided
+        amqtt_url = (body.get("amqtt_url") or os.environ.get("AMQTT_ENDPOINT_URL") or "").strip()
+        if amqtt_url and device_id:
+            try:
+                resp = requests.post(
+                    amqtt_url,
+                    json={"type": amqtt_type, "message": amqtt_message, "mac": device_id.upper()},
+                    timeout=5,
+                )
+                publish_info = {"method": "http", "statusCode": resp.status_code, "text": resp.text[:500]}
+            except Exception as e:
+                publish_info = {"method": "http", "error": str(e)}
+
     result = {
         "status": "ok",
         "upload": upload_info,
         "summary": summary,
+        "publish": publish_info,
         "options": {
             "cropped": not no_crop,
             "sourceBucket": source_bucket,
@@ -551,6 +594,9 @@ def generate_bin_miao(request: Request):
             "sourceFolderUrl": source_folder_url or None,
             "destinationFolderUrl": destination_folder_url or None,
             "deviceId": device_id or None,
+            "amqttType": amqtt_type,
+            "mqttBroker": mqtt_broker or None,
+            "mqttPort": mqtt_port,
         },
     }
     return _ok(result, 200)
