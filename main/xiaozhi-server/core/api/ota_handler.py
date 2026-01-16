@@ -99,6 +99,26 @@ class OTAHandler(BaseHandler):
 
         return None
 
+    def _get_external_ip(self) -> str:
+        """Get server's external IP address for MQTT endpoint.
+        Priority: SERVER_EXTERNAL_IP env var > MQTT_EXTERNAL_IP env var > fallback to local_ip with warning
+        """
+        # Check environment variables first (best practice - required for external device access)
+        external_ip = os.environ.get("SERVER_EXTERNAL_IP", "").strip()
+        if not external_ip:
+            external_ip = os.environ.get("MQTT_EXTERNAL_IP", "").strip()
+        
+        if external_ip:
+            return external_ip
+        
+        # Fallback to local_ip with warning (devices may not be able to connect)
+        self.logger.bind(tag=TAG).warning(
+            "SERVER_EXTERNAL_IP or MQTT_EXTERNAL_IP not set. "
+            "Using local_ip which may not be accessible from external devices. "
+            "Please set SERVER_EXTERNAL_IP environment variable with your server's public IP."
+        )
+        return get_local_ip()
+
     def _extract_mqtt_config(self, manifest_data: dict, device_id: str = "") -> dict | None:
         """
         Extract MQTT configuration from manifest.
@@ -187,9 +207,10 @@ class OTAHandler(BaseHandler):
                 fw_force = 0
                 manifest_mqtt = None
 
-            # Build MQTT config: manifest > environment variable > server's own IP (clean environment)
-            # Default: use server's own IP + MQTT port (since MQTT runs on same server)
-            mqtt_endpoint = f"{local_ip}:1883"
+            # Build MQTT config: manifest > environment variable > server's external IP (clean environment)
+            # Get external IP for MQTT endpoint (devices need to connect from internet)
+            external_ip = self._get_external_ip()
+            mqtt_endpoint = f"{external_ip}:1883"
             if manifest_mqtt and isinstance(manifest_mqtt, dict):
                 # Use endpoint from manifest if provided
                 mqtt_endpoint = manifest_mqtt.get("endpoint", mqtt_endpoint)
