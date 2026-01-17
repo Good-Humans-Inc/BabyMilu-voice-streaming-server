@@ -182,4 +182,7 @@ uploadfile
 # Do not ignore env and json files inside manager-mobile
 !main/manager-mobile/**/env/
 !main/manager-mobile/**/.env*
-!main/manager-mobile/**/*.json
+!main/manager-mobile/**/*.jsonenv.yaml
+env.*.yaml
+
+_build_alarms/

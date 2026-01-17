@@ -36,3 +36,7 @@ psutil==7.0.0
 portalocker==3.2.0
 Jinja2==3.1.6
 vosk==0.3.45
+google-cloud-firestore==2.17.0
+elevenlabs==2.23.0
+paho-mqtt==2.1.0
+pytest==9.0.1

@@ -16,6 +16,23 @@ from core.providers.tools.device_mcp import (
 
 TAG = __name__
 
+async def _trigger_server_greeting(conn):
+    """Wait for all components initialization, then trigger server-initiated greeting"""
+    try:
+        # Wait for components_initialized event (with 60s timeout)
+        await asyncio.wait_for(conn.components_initialized.wait(), timeout=60.0)
+    except asyncio.TimeoutError:
+        conn.logger.bind(tag=TAG).warning("Components not initialized after 60s, cannot trigger greeting")
+        return
+    
+    # Check llm_finish_task to avoid overlapping conversations
+    if conn.llm_finish_task:
+        conn.logger.bind(tag=TAG).info("Triggering server-initiated greeting")
+        # Server-initiated greeting; not fresh user input
+        conn.executor.submit(conn.chat, "", 0, None, False)
+    else:
+        conn.logger.bind(tag=TAG).warning("Cannot trigger greeting: llm_finish_task is False")
+
 WAKEUP_CONFIG = {
     "refresh_time": 5,
     "words": ["你好", "你好啊", "嘿，你好", "嗨"],
@@ -30,6 +47,7 @@ _wakeup_response_lock = asyncio.Lock()
 
 async def handleHelloMessage(conn, msg_json):
     """处理hello消息"""
+    conn.logger.bind(tag=TAG).info(f"👋 Received hello message: {msg_json}")
     audio_params = msg_json.get("audio_params")
     if audio_params:
         format = audio_params.get("format")
@@ -38,7 +56,7 @@ async def handleHelloMessage(conn, msg_json):
         conn.welcome_msg["audio_params"] = audio_params
     features = msg_json.get("features")
     if features:
-        conn.logger.bind(tag=TAG).info(f"客户端特性: {features}")
+        conn.logger.bind(tag=TAG).info(f"客户端特性features: {features}")
         conn.features = features
         if features.get("mcp"):
             conn.logger.bind(tag=TAG).info("客户端支持MCP")
@@ -47,6 +65,12 @@ async def handleHelloMessage(conn, msg_json):
             asyncio.create_task(send_mcp_initialize_message(conn))
             # 发送mcp消息，获取tools列表
             asyncio.create_task(send_mcp_tools_list_request(conn))
+
+    if getattr(conn, "server_initiate_chat", False) and not getattr(
+        conn, "_server_greeting_scheduled", False
+    ):
+        conn._server_greeting_scheduled = True
+        asyncio.create_task(_trigger_server_greeting(conn))
 
     await conn.websocket.send(json.dumps(conn.welcome_msg))
 

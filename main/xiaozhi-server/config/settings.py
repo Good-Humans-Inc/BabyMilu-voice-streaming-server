@@ -31,3 +31,23 @@ def check_config_file():
             error_msg += "2、按教程配置好接口地址和密钥\n"
             raise ValueError(error_msg)
     config_file_valid = True
+
+
+def get_gcp_credentials_path() -> str:
+    """Return the path to GCP credentials if set via env/config.
+
+    Precedence:
+      1) GOOGLE_APPLICATION_CREDENTIALS env var
+      2) data/.gcp/sa.json (if present and mounted)
+    """
+    # 1) Environment variable (preferred)
+    path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if path and os.path.exists(path):
+        return path
+
+    # 2) Default convention under data folder (optional)
+    default_path = os.path.join(get_project_dir(), "data/.gcp/sa.json")
+    if os.path.exists(default_path):
+        return default_path
+
+    return ""

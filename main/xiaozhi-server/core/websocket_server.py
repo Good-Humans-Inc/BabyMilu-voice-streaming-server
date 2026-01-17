@@ -14,6 +14,10 @@ class WebSocketServer:
         self.config = config
         self.logger = setup_logging()
         self.config_lock = asyncio.Lock()
+        # Track active websocket per device to avoid overlaps and thrashing
+        self.active_ws_by_device = {}
+        self.ws_lock = asyncio.Lock()
+        self.last_disconnect_ms = {}
         modules = initialize_modules(
             self.logger,
             self.config,

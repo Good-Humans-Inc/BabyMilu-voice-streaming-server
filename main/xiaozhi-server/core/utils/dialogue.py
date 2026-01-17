@@ -73,9 +73,9 @@ class Dialogue:
         if system_message:
             # 基础系统提示
             enhanced_system_prompt = system_message.content
-            # 替换时间占位符
+            # 替换时间占位符, use AM/PM format
             enhanced_system_prompt = enhanced_system_prompt.replace(
-                "{{current_time}}", datetime.now().strftime("%H:%M")
+                "{{current_time}}", datetime.now().strftime("%I:%M %p").lstrip("0")
             )
 
             # 添加说话人个性化描述

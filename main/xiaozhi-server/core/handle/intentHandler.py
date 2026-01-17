@@ -99,7 +99,12 @@ async def process_intent_result(conn, intent_result, original_text):
                     conn.dialogue.put(Message(role="user", content=original_text))
                     
                     from core.utils.current_time import get_current_time_info
+                    from core.utils.firestore_client import get_timezone_for_device
 
+                    try:
+                        tz = get_timezone_for_device(conn.device_id) if getattr(conn, "device_id", None) else None
+                    except Exception:
+                        tz = None
                     current_time, today_date, today_weekday, lunar_date = get_current_time_info()
                     
                     # 构建带上下文的基础提示
