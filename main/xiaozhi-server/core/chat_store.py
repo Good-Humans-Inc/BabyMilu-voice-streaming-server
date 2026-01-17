@@ -1,9 +1,22 @@
+# core/connectionstore.py
+
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
+
 import os
 
-DB_PATH = "/srv/dev/data/conversations.db"
+DB_PATH = os.environ.get(
+    "CHAT_DB_PATH",
+    "/opt/xiaozhi-esp32-server/data/conversations.db"
+)
+
+
+print("DEBUG DB_PATH =", DB_PATH)
+print("DEBUG exists =", os.path.exists(DB_PATH))
+print("DEBUG dir writable =", os.access(os.path.dirname(DB_PATH), os.W_OK))
+
+
 
 @contextmanager
 def get_db():
@@ -14,13 +27,12 @@ def get_db():
     finally:
         conn.close()
 
-
 class ChatStore:
     def __init__(self, logger=None):
         self.logger = logger
         if self.logger:
             self.logger.info(
-                f"[ChatStore] DB_PATH={DB_PATH}, exists={os.path.exists(DB_PATH)}"
+                f"[ChatStore:init] DB_PATH={DB_PATH}, exists={os.path.exists(DB_PATH)}"
             )
 
     def get_or_create_user(self, user_id: str, name: str):
@@ -29,21 +41,31 @@ class ChatStore:
                 f"[ChatStore] get_or_create_user(user_id={user_id}, name={name})"
             )
         with get_db() as db:
-            db.execute("""
+            db.execute(
+                """
                 INSERT OR IGNORE INTO users (user_id, name)
                 VALUES (?, ?)
-            """, (user_id, name))
+                """,
+                (user_id, name),
+            )
 
-    def create_session(self, session_id, user_name, user_id=None):
+    def create_session(self, *, session_id, user_id, user_name):
         if self.logger:
             self.logger.info(
                 f"[ChatStore] create_session(session_id={session_id}, user_id={user_id}, user_name={user_name})"
             )
         with get_db() as db:
-            db.execute("""
+            cur = db.execute(
+                """
                 INSERT INTO sessions (session_id, user_name, user_id, start_time)
                 VALUES (?, ?, ?, ?)
-            """, (session_id, user_name, user_id, datetime.utcnow()))
+                """,
+                (session_id, user_name, user_id, datetime.utcnow()),
+            )
+            if self.logger:
+                self.logger.info(
+                    f"[ChatStore] create_session rowcount={cur.rowcount}"
+                )
 
     def insert_turn(self, session_id, turn_index, speaker, text):
         if self.logger:
@@ -51,16 +73,23 @@ class ChatStore:
                 f"[ChatStore] insert_turn(session_id={session_id}, turn_index={turn_index}, speaker={speaker}, text_len={len(text)})"
             )
         with get_db() as db:
-            db.execute("""
+            cur = db.execute(
+                """
                 INSERT INTO turns (session_id, turn_index, speaker, text, timestamp)
                 VALUES (?, ?, ?, ?, ?)
-            """, (
-                session_id,
-                turn_index,
-                speaker,
-                text,
-                datetime.utcnow()
-            ))
+                """,
+                (
+                    session_id,
+                    turn_index,
+                    speaker,
+                    text,
+                    datetime.utcnow(),
+                ),
+            )
+            if self.logger:
+                self.logger.info(
+                    f"[ChatStore] insert_turn rowcount={cur.rowcount}"
+                )
 
     def end_session(self, session_id):
         if self.logger:
@@ -68,8 +97,15 @@ class ChatStore:
                 f"[ChatStore] end_session(session_id={session_id})"
             )
         with get_db() as db:
-            db.execute("""
+            cur = db.execute(
+                """
                 UPDATE sessions
                 SET end_time = ?
                 WHERE session_id = ?
-            """, (datetime.utcnow(), session_id))
+                """,
+                (datetime.utcnow(), session_id),
+            )
+            if self.logger:
+                self.logger.info(
+                    f"[ChatStore] end_session rowcount={cur.rowcount}"
+                )
