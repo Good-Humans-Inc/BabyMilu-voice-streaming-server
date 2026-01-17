@@ -232,6 +232,11 @@ class ConnectionHandler:
         self.prompt_manager = PromptManager(config, self.logger)
         # 新建会话时，首轮下发mode instructions
         self._seed_instructions_once = False
+        # related to storing logs into database
+        self.chat_store = ChatStore()
+        self._session_created = False
+        self._session_closed = False
+        self.turn_index = 0
 
     # ------------------------------------------------------------------
     # Mode runtime accessors
@@ -321,13 +326,6 @@ class ConnectionHandler:
         if value is not None:
             self._followup_state.max = int(value)
 
-    # ------------------------------------------------------------------
-
-        # related to storing logs into database
-        self.chat_store = ChatStore()
-        self._session_created = False
-        self._session_closed = False
-        self.turn_index = 0
 
 
     async def handle_connection(self, ws):
@@ -585,6 +583,9 @@ class ConnectionHandler:
                     except Exception as e:
                         self.logger.bind(tag=TAG).error(f"保存记忆失败: {e}")
                     finally:
+                        if self._session_created and not self._session_closed:
+                            self.chat_store.end_session(self.session_id)
+                            self._session_closed = True
                         try:
                             loop.close()
                         except Exception:
