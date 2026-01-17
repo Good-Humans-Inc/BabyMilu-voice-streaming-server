@@ -47,28 +47,30 @@ def scan_due_alarms(request) -> Dict[str, Any]:
 
 
 def _wake_device(wake_request: tasks.WakeRequest) -> bool:
-    ws_url = _resolve_ws_url()
-    if not ws_url:
-        logger.bind(tag=TAG).warning("ALARM_WS_URL not configured; skipping wake")
-        return False
-    broker = _resolve_broker_url()
-    ok = publish_ws_start(broker, wake_request.target.device_id, ws_url)
-    if ok:
-        logger.bind(tag=TAG).info(
-            f"Published ws_start to {wake_request.target.device_id} "
-            f"for alarm {wake_request.alarm.alarm_id}"
+    endpoints = _resolve_alarm_endpoints()
+    fired = False
+    for endpoint in endpoints:
+        ok = publish_ws_start(
+            endpoint["mqtt"], 
+            wake_request.target.device_id, 
+            endpoint["ws"]
         )
-    else:
-        logger.bind(tag=TAG).warning(
-            f"Failed to publish ws_start to {wake_request.target.device_id}"
-        )
-    return bool(ok)
+        if ok:
+            fired = True
+            logger.bind(tag=TAG).info(
+                f"Published ws_start to {wake_request.target.device_id} "
+                f"(endpoint={endpoint['name']}) for alarm {wake_request.alarm.alarm_id}"
+            )
+        else:
+            logger.bind(tag=TAG).warning(
+                f"Failed to publish ws_start to {wake_request.target.device_id} "
+                f"(endpoint={endpoint['name']})"
+            )
+    return fired
 
 
-def _resolve_ws_url() -> str:
-    return os.environ.get("ALARM_WS_URL") or os.environ.get("DEFAULT_WS_URL", "")
-
-
-def _resolve_broker_url() -> str:
-    return os.environ.get("ALARM_MQTT_URL") or os.environ.get("MQTT_URL", "")
+def _resolve_alarm_endpoints() -> List[Dict[str, Any]]:
+    """Return configured websocket/mqtt endpoint pairs."""
+    raw = os.environ.get("ALARM_ENDPOINTS", "")
+    return json.loads(raw)
 
