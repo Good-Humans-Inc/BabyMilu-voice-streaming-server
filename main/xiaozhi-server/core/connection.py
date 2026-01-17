@@ -40,6 +40,8 @@ from config.manage_api_client import DeviceNotFoundException, DeviceBindExceptio
 from core.utils.prompt_manager import PromptManager
 from core.utils.voiceprint_provider import VoiceprintProvider
 from core.utils import textUtils
+from .chat_store import ChatStore
+
 
 TAG = __name__
 
@@ -160,6 +162,13 @@ class ConnectionHandler:
         # 初始化提示词管理器
         self.prompt_manager = PromptManager(config, self.logger)
 
+        # related to storing logs into database
+        self.chat_store = ChatStore()
+        self._session_created = False
+        self._session_closed = False
+        self.turn_index = 0
+
+
     async def handle_connection(self, ws):
         try:
             # 获取并验证headers
@@ -200,6 +209,27 @@ class ConnectionHandler:
             # 认证通过,继续处理
             self.websocket = ws
             self.device_id = self.headers.get("device-id", None)
+
+
+            # Insert a session into the db
+
+            # TEMP: placeholder user
+            user_id = "system_placeholder"
+            user_name = "miffy"
+
+            self.chat_store.get_or_create_user(
+                user_id=user_id,
+                name=user_name
+            )
+
+            self.chat_store.create_session(
+                session_id=self.session_id,
+                user_id=user_id,
+                user_name=user_name
+            )
+
+            self._session_created = True
+
 
             # 检查是否来自MQTT连接
             request_path = ws.request.path
@@ -273,6 +303,14 @@ class ConnectionHandler:
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"保存记忆失败: {e}")
         finally:
+
+            try:
+                if self._session_created and not self._session_closed:
+                    self.chat_store.end_session(self.session_id)
+                    self._session_closed = True
+            except Exception as e:
+                self.logger.bind(tag=TAG).error(f"结束会话失败: {e}")
+
             # 立即关闭连接，不等待记忆保存完成
             try:
                 await self.close(ws)
@@ -751,6 +789,18 @@ class ConnectionHandler:
         if depth == 0:
             self.sentence_id = str(uuid.uuid4().hex)
             self.dialogue.put(Message(role="user", content=query))
+
+            # ✅ DB: user turn
+            if self._session_created:
+                self.turn_index += 1
+                self.chat_store.insert_turn(
+                    session_id=self.session_id,
+                    turn_index=self.turn_index,
+                    speaker="user",
+                    text=query
+                )
+
+
             self.tts.tts_text_queue.put(
                 TTSMessageDTO(
                     sentence_id=self.sentence_id,
@@ -876,6 +926,17 @@ class ConnectionHandler:
                     text_buff = "".join(response_message)
                     self.tts_MessageText = text_buff
                     self.dialogue.put(Message(role="assistant", content=text_buff))
+
+                    # ✅ DB: assistant final response
+                    if self._session_created and text_buff.strip():
+                        self.turn_index += 1
+                        self.chat_store.insert_turn(
+                            session_id=self.session_id,
+                            turn_index=self.turn_index,
+                            speaker="assistant",
+                            text=text_buff
+                        )
+
                 response_message.clear()
                 self.logger.bind(tag=TAG).debug(
                     f"function_name={function_name}, function_id={function_id}, function_arguments={function_arguments}"
@@ -900,14 +961,23 @@ class ConnectionHandler:
             text_buff = "".join(response_message)
             self.tts_MessageText = text_buff
             self.dialogue.put(Message(role="assistant", content=text_buff))
-        if depth == 0:
-            self.tts.tts_text_queue.put(
-                TTSMessageDTO(
-                    sentence_id=self.sentence_id,
-                    sentence_type=SentenceType.LAST,
-                    content_type=ContentType.ACTION,
+            # ✅ DB: assistant final response (non-tool path)
+            if self._session_created and text_buff.strip():
+                self.turn_index += 1
+                self.chat_store.insert_turn(
+                    session_id=self.session_id,
+                    turn_index=self.turn_index,
+                    speaker="assistant",
+                    text=text_buff
                 )
-            )
+                if depth == 0:
+                    self.tts.tts_text_queue.put(
+                        TTSMessageDTO(
+                            sentence_id=self.sentence_id,
+                            sentence_type=SentenceType.LAST,
+                            content_type=ContentType.ACTION,
+                        )
+                    )
         self.llm_finish_task = True
         # 使用lambda延迟计算，只有在DEBUG级别时才执行get_llm_dialogue()
         self.logger.bind(tag=TAG).debug(
