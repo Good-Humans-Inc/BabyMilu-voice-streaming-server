@@ -7,12 +7,6 @@ DB_PATH = "/srv/dev/data/conversations.db"
 
 @contextmanager
 def get_db():
-    def __init__(self, logger=None):
-        self.logger = logger
-        if self.logger:
-            self.logger.info(
-                f"[ChatStore] DB_PATH={DB_PATH}, exists={os.path.exists(DB_PATH)}"
-            )
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     try:
         yield conn
@@ -22,6 +16,12 @@ def get_db():
 
 
 class ChatStore:
+    def __init__(self, logger=None):
+        self.logger = logger
+        if self.logger:
+            self.logger.info(
+                f"[ChatStore] DB_PATH={DB_PATH}, exists={os.path.exists(DB_PATH)}"
+            )
 
     def get_or_create_user(self, user_id: str, name: str):
         if self.logger:
