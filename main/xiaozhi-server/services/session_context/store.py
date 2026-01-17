@@ -79,8 +79,16 @@ class SessionContextStore:
         device_id: str,
         now: Optional[datetime] = None,
         delete_if_expired: bool = True,
+        timeout: float = 3.0,
         ) -> Optional[models.ModeSession]:
-        doc = self._collection().document(device_id).get()
+        try:
+            doc = self._collection().document(device_id).get(timeout=timeout)
+        except Exception as e:
+            logger.bind(tag=TAG).warning(
+                f"Failed to get session from Firestore for {device_id}: {e}"
+            )
+            return None
+        
         if not doc.exists:
             return None
         data = doc.to_dict() or {}
