@@ -27,7 +27,8 @@ class SessionContextStore:
         if self._firestore_client is None:
             creds_path = get_gcp_credentials_path()
             if creds_path:
-                os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", creds_path)
+                # Explicitly set the env var to ensure it's used
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
             self._firestore_client = firestore.Client()
         return self._firestore_client
 
