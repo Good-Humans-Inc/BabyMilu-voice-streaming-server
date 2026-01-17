@@ -1,11 +1,18 @@
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
+import os
 
 DB_PATH = "/srv/dev/data/conversations.db"
 
 @contextmanager
 def get_db():
+    def __init__(self, logger=None):
+        self.logger = logger
+        if self.logger:
+            self.logger.info(
+                f"[ChatStore] DB_PATH={DB_PATH}, exists={os.path.exists(DB_PATH)}"
+            )
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     try:
         yield conn
@@ -17,6 +24,10 @@ def get_db():
 class ChatStore:
 
     def get_or_create_user(self, user_id: str, name: str):
+        if self.logger:
+            self.logger.info(
+                f"[ChatStore] get_or_create_user(user_id={user_id}, name={name})"
+            )
         with get_db() as db:
             db.execute("""
                 INSERT OR IGNORE INTO users (user_id, name)
@@ -24,6 +35,10 @@ class ChatStore:
             """, (user_id, name))
 
     def create_session(self, session_id, user_name, user_id=None):
+        if self.logger:
+            self.logger.info(
+                f"[ChatStore] create_session(session_id={session_id}, user_id={user_id}, user_name={user_name})"
+            )
         with get_db() as db:
             db.execute("""
                 INSERT INTO sessions (session_id, user_name, user_id, start_time)
@@ -31,6 +46,10 @@ class ChatStore:
             """, (session_id, user_name, user_id, datetime.utcnow()))
 
     def insert_turn(self, session_id, turn_index, speaker, text):
+        if self.logger:
+            self.logger.info(
+                f"[ChatStore] insert_turn(session_id={session_id}, turn_index={turn_index}, speaker={speaker}, text_len={len(text)})"
+            )
         with get_db() as db:
             db.execute("""
                 INSERT INTO turns (session_id, turn_index, speaker, text, timestamp)
@@ -44,6 +63,10 @@ class ChatStore:
             ))
 
     def end_session(self, session_id):
+        if self.logger:
+            self.logger.info(
+                f"[ChatStore] end_session(session_id={session_id})"
+            )
         with get_db() as db:
             db.execute("""
                 UPDATE sessions
