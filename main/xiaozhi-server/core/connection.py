@@ -506,15 +506,6 @@ class ConnectionHandler:
             # 初始化会话绑定（mode-scoped 或 device-scoped）
             self._initialize_conversation_binding()
 
-            # Initialize ASR in main thread before submitting to thread pool
-            # This ensures stdout/stderr capture works correctly for sherpa-onnx initialization
-            if self.asr is None:
-                try:
-                    self.asr = self._initialize_asr()
-                    self.logger.bind(tag=TAG).info("ASR initialized in main thread (before thread pool)")
-                except Exception as e:
-                    self.logger.bind(tag=TAG).error(f"ASR initialization in main thread failed: {e}")
-
             # 异步初始化本地组件
             self.executor.submit(self._initialize_components)
 
@@ -702,10 +693,7 @@ class ConnectionHandler:
 
             if self.vad is None:
                 self.vad = self._vad
-            # ASR should already be initialized in main thread before this thread pool execution
-            # Only initialize if it wasn't initialized yet (fallback)
             if self.asr is None:
-                self.logger.bind(tag=TAG).warning("ASR was not initialized in main thread, initializing in thread pool (stdout capture may not work)")
                 self.asr = self._initialize_asr()
 
             self._initialize_voiceprint()
