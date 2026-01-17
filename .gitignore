@@ -186,3 +186,6 @@ uploadfile
 env.*.yaml
 
 _build_alarms/
+
+mosquitto/
+data/

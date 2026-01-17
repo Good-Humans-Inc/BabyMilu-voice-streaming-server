@@ -36,8 +36,8 @@ case "$ENV" in
 esac
 
 # Ensure we are in the right directory
-if [ ! -f "config.yaml" ]; then
-    echo "❌ Error: config.yaml not found. Please run this script from main/xiaozhi-server/"
+if [ ! -d "services/alarms" ]; then
+    echo "❌ Error: services/alarms not found. Please run this script from main/xiaozhi-server/"
     exit 1
 fi
 
@@ -55,30 +55,13 @@ rm -rf "$BUILD_DIR"
 mkdir "$BUILD_DIR"
 
 # 2. Copy dependency files
-echo "📋 Copying configuration and requirements..."
+echo "📋 Copying requirements..."
 cp services/alarms/requirements.txt "$BUILD_DIR/requirements.txt"
-cp config.yaml "$BUILD_DIR/"
 
 # 3. Copy source modules
 echo "📦 Copying source modules..."
-# Copy config directory
-cp -r config "$BUILD_DIR/"
-
-# Copy services directory
 cp -r services "$BUILD_DIR/"
-
-# Copy core directory
-echo "📦 Copying core (excluding heavy submodules)..."
-mkdir -p "$BUILD_DIR/core"
-
-if command -v rsync >/dev/null 2>&1; then
-    rsync -av --exclude='providers/' --exclude='models/' core/ "$BUILD_DIR/core/" > /dev/null
-else
-    # Fallback if rsync is missing
-    cp -r core "$BUILD_DIR/"
-    rm -rf "$BUILD_DIR/core/providers"
-    rm -rf "$BUILD_DIR/core/models"
-fi
+rm -rf "$BUILD_DIR/services/*/tests"
 
 # 4. Copy the function code to main.py
 echo "📄 Setting up entry point..."

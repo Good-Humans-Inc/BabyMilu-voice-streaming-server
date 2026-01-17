@@ -6,21 +6,25 @@ from typing import Any, Dict, List, Optional
 from google.cloud import firestore
 from google.cloud.firestore_v1 import FieldFilter
 
-from config.settings import get_gcp_credentials_path
 from services.logging import setup_logging
-from core.utils.mac import normalize_mac
 from services.alarms import models
 
 TAG = __name__
 logger = setup_logging()
 
 
-def _build_client() -> firestore.Client:
-    creds_path = get_gcp_credentials_path()
-    if creds_path:
-        import os
+def _normalize_mac(mac: str) -> str:
+    """Normalize MAC address to lowercase with colons."""
+    if not mac:
+        return ""
+    mac = mac.replace("-", ":").replace(".", ":").lower()
+    parts = mac.split(":")
+    if len(parts) == 6:
+        return ":".join(p.zfill(2) for p in parts)
+    return mac.lower()
 
-        os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", creds_path)
+
+def _build_client() -> firestore.Client:
     return firestore.Client()
 
 
@@ -178,7 +182,7 @@ def _format_datetime(value: datetime) -> str:
 def _normalize_device_id(value) -> str:
     if not isinstance(value, str):
         raise ValueError("Alarm target deviceId must be a string")
-    return normalize_mac(value)
+    return _normalize_mac(value)
 
 
 def mark_alarm_processed(
