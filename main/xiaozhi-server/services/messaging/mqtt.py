@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Optional, Tuple
 import time
+from typing import Optional, Tuple
 
 from paho.mqtt import client as mqtt_client
-from core.utils.mac import normalize_mac
 
 # Try to import logger, but make it optional for backward compatibility
 try:
@@ -23,6 +22,16 @@ def _log(level: str, message: str, *args, **kwargs):
     else:
         # Fallback to print if logger not available
         print(f"[{level.upper()}] {message}")
+
+
+def _normalize_mac(mac: str) -> str:
+    """Normalize a MAC address to colon-separated lowercase format."""
+    if not isinstance(mac, str):
+        return mac
+    compact = mac.strip().lower().replace("-", "").replace(":", "")
+    if not compact:
+        return compact
+    return ":".join(compact[i : i + 2] for i in range(0, len(compact), 2))
 
 
 def publish_ws_start(
@@ -45,7 +54,7 @@ def publish_ws_start(
         True if publish succeeded, False otherwise
     """
     host, port = _parse_broker(broker_url)
-    normalized_mac = normalize_mac(device_mac or "")
+    normalized_mac = _normalize_mac(device_mac or "")
     topic = f"xiaozhi/{normalized_mac}/down"
     payload = {
         "type": "ws_start",
@@ -132,7 +141,7 @@ def publish_auto_update(
         True if publish succeeded, False otherwise
     """
     host, port = _parse_broker(broker_url)
-    normalized_mac = normalize_mac(device_mac or "")
+    normalized_mac = _normalize_mac(device_mac or "")
     topic = f"xiaozhi/{normalized_mac}/down"
     payload = {
         "type": "auto_update",
