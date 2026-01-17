@@ -1,0 +1,5 @@
+google-cloud-firestore==2.14.0
+paho-mqtt==1.6.1
+loguru==0.7.3
+functions-framework==3.5.0
+

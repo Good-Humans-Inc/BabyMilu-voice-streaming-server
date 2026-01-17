@@ -56,7 +56,7 @@ mkdir "$BUILD_DIR"
 
 # 2. Copy dependency files
 echo "📋 Copying configuration and requirements..."
-cp requirements.txt "$BUILD_DIR/"
+cp services/alarms/requirements.txt "$BUILD_DIR/requirements.txt"
 cp config.yaml "$BUILD_DIR/"
 
 # 3. Copy source modules
