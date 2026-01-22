@@ -373,6 +373,12 @@ class ConnectionHandler:
             # Normalize device-id to lower-case so it matches sessionContexts doc IDs
             raw_device_id = self.headers.get("device-id")
             self.device_id = raw_device_id.lower() if isinstance(raw_device_id, str) else raw_device_id
+
+            if not self.device_id:
+                print("no device_id")
+            else:
+                print(self.device_id)
+
             self.logger.bind(tag=TAG).info(f"device_id: {self.device_id}")
 
             # Hydrate any scheduled mode session (e.g. alarm)
@@ -384,6 +390,8 @@ class ConnectionHandler:
             # TEMP: placeholder user
             user_id = "system_placeholder"
             user_name = "miffy"
+
+            print("test user miffy created! ")
 
             self.chat_store.get_or_create_user(
                 user_id=user_id,
