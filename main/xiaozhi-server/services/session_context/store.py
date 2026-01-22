@@ -27,7 +27,8 @@ class SessionContextStore:
         if self._firestore_client is None:
             creds_path = get_gcp_credentials_path()
             if creds_path:
-                os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", creds_path)
+                # Explicitly set the env var to ensure it's used
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
             self._firestore_client = firestore.Client()
         return self._firestore_client
 
@@ -78,8 +79,16 @@ class SessionContextStore:
         device_id: str,
         now: Optional[datetime] = None,
         delete_if_expired: bool = True,
+        timeout: float = 3.0,
         ) -> Optional[models.ModeSession]:
-        doc = self._collection().document(device_id).get()
+        try:
+            doc = self._collection().document(device_id).get(timeout=timeout)
+        except Exception as e:
+            logger.bind(tag=TAG).warning(
+                f"Failed to get session from Firestore for {device_id}: {e}"
+            )
+            return None
+        
         if not doc.exists:
             return None
         data = doc.to_dict() or {}
