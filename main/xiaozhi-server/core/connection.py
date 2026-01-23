@@ -388,7 +388,12 @@ class ConnectionHandler:
             # 初始化活动时间戳
             self.last_activity_time = time.time() * 1000
 
-            # 从云端获取角色配置（voice, bio 等），并应用到本次会话
+            # ---- SAFE DEFAULTS ----
+            user_id = f"device:{self.device_id}"
+            user_name = "Unknown User"
+            new_prompt = self.config.get("prompt", "")
+
+
             try:
                 char_id = None
                 if self.device_id:
@@ -397,23 +402,18 @@ class ConnectionHandler:
                         fallback_id = get_most_recent_character_via_user_for_device(self.device_id)
                         if fallback_id:
                             self.logger.bind(tag=TAG, device_id=self.device_id).warning(
-                                f"activeCharacterId missing; falling back to most recent user character: {fallback_id}"
+                                f"activeCharacterId missing; falling back to {fallback_id}"
                             )
                             char_id = fallback_id
+
                 if char_id:
                     self.logger.info(f"char_id={char_id!r}")
                     char_doc = get_character_profile(char_id)
-                    self.logger.info(f"char_doc_keys={list((char_doc or {}).keys())}")
                     fields = extract_character_profile_fields(char_doc or {})
-                    self.logger.info(
-                        f"resolved voice={fields.get('voice')}, bio_present={bool(fields.get('bio'))}"
-                    )
 
-                    # 优先保留客户端传入的 voice-id；否则使用云端的
                     if not self.voice_id and fields.get("voice"):
                         self.voice_id = str(fields.get("voice"))
 
-                    # 组装角色提示并更新系统提示词
                     profile_parts = []
                     for label, key in (
                         ("Your Name", "name"),
@@ -425,89 +425,58 @@ class ConnectionHandler:
                         val = fields.get(key)
                         if val:
                             profile_parts.append(f"{label}: {val}")
-                    profile_line = "\n- ".join(profile_parts)
-                    bio_text = fields.get("bio")
 
-                    new_prompt = self.config.get("prompt", "")
-                    if profile_line:
-                        new_prompt = new_prompt + f"\n# About you:\n{profile_line}"
-                    if bio_text:
-                        new_prompt = new_prompt + f"\nUser's description of you: {bio_text}"
+                    if profile_parts:
+                        new_prompt += "\n# About you:\n" + "\n- ".join(profile_parts)
 
-                    # Append user profile from Firestore users/{ownerPhone}
-                    owner_phone = get_owner_phone_for_device(self.device_id)
-                    if owner_phone:
-                        user_id = owner_phone
-                        user_doc = get_user_profile_by_phone(owner_phone)
-                        user_fields = extract_user_profile_fields(user_doc or {})
-                        user_name = user_fields.get("name") or owner_phone
-                        user_parts = []
-                        for label, key in (
-                            ("User's name", "name"),
-                            ("User's Birthday", "birthday"),
-                            ("User's Pronouns", "pronouns"),
-                        ):
-                            val = user_fields.get(key)
-                            if val:
-                                user_parts.append(f"{label}: {val}")
-                        if user_parts:
-                            user_profile = "\n- ".join(user_parts)
-                            new_prompt = new_prompt + f"\nUser profile:\n {user_profile}"
-                    else:
-                        user_id = f"device:{self.device_id}"
-                        user_name = "Unknown User"
+                    if fields.get("bio"):
+                        new_prompt += f"\nUser's description of you: {fields['bio']}"
 
-                    # handle data storage
-                if not getattr(self, "_session_created", False):
-                    self.user_id = user_id
-                    self.user_name = user_name
-                    self.chat_store.get_or_create_user(
-                        user_id=self.user_id,
-                        name=self.user_name
-                    )
-
-                    self.chat_store.create_session(
-                        session_id=self.session_id,
-                        user_id=self.user_id,
-                        user_name=self.user_name
-                    )
-
-                    self._session_created = True
-
-                    # handle updating the prompt 
-
-                    if new_prompt != self.config.get("prompt", ""):
-                        self.config["prompt"] = new_prompt
-                        self.change_system_prompt(new_prompt)
-                        self.logger.bind(tag=TAG).info(
-                            f"Applied character profile from Firestore, prompt={self.config.get('prompt')}"
-                        )
                 else:
-                    self.logger.bind(tag=TAG, device_id=self.device_id).error(
-                        "🚨 MISSING activeCharacterId for device; using defaults 🚨"
+                    self.logger.bind(tag=TAG, device_id=self.device_id).warning(
+                        "MISSING activeCharacterId; using defaults"
                     )
-                    if not self.voice_id:
-                        default_voice = (
-                            self.config.get("TTS", {})
-                            .get("CustomTTS", {})
-                            .get("default_voice_id")
-                            or self.config.get("TTS", {})
-                            .get("CustomTTS", {})
-                            .get("voice_id")
-                        )
-                        if default_voice:
-                            self.logger.bind(tag=TAG).warning(
-                                "No character voice_id; using default voice from config"
-                            )
-                            self.voice_id = str(default_voice)
-                        else:
-                            self.logger.bind(tag=TAG).error(
-                                "No character voice_id and no default voice configured"
-                            )
+
+                owner_phone = get_owner_phone_for_device(self.device_id)
+                if owner_phone:
+                    user_id = owner_phone
+                    user_doc = get_user_profile_by_phone(owner_phone)
+                    user_fields = extract_user_profile_fields(user_doc or {})
+                    user_name = user_fields.get("name") or owner_phone
+
             except Exception as e:
                 self.logger.bind(tag=TAG).warning(
                     f"Failed to fetch/apply character profile: {e}"
                 )
+
+            # ---- SESSION CREATION (UNCONDITIONAL) ----
+            if not getattr(self, "_session_created", False):
+                self.user_id = user_id
+                self.user_name = user_name
+
+                self.chat_store.get_or_create_user(
+                    user_id=self.user_id,
+                    name=self.user_name
+                )
+
+                self.chat_store.create_session(
+                    session_id=self.session_id,
+                    user_id=self.user_id,
+                    user_name=self.user_name
+                )
+
+                self._session_created = True
+                self.logger.bind(tag=TAG).info(
+                    f"✅ Session created: {self.session_id} user={self.user_id}"
+                )
+
+            # ---- PROMPT UPDATE (SAFE) ----
+            if new_prompt != self.config.get("prompt", ""):
+                self.config["prompt"] = new_prompt
+                self.change_system_prompt(new_prompt)
+
+
+
 
             # 启动超时检查任务
             self.timeout_task = asyncio.create_task(self._check_timeout())
