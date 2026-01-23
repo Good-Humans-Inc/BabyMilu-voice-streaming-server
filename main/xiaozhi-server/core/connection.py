@@ -458,21 +458,21 @@ class ConnectionHandler:
                         user_name = "Unknown User"
 
                     # handle data storage
-                    if not getattr(self, "_session_created", False):
-                        self.user_id = user_id
-                        self.user_name = user_name
-                        self.chat_store.get_or_create_user(
-                            user_id=self.user_id,
-                            name=self.user_name
-                        )
+                if not getattr(self, "_session_created", False):
+                    self.user_id = user_id
+                    self.user_name = user_name
+                    self.chat_store.get_or_create_user(
+                        user_id=self.user_id,
+                        name=self.user_name
+                    )
 
-                        self.chat_store.create_session(
-                            session_id=self.session_id,
-                            user_id=self.user_id,
-                            user_name=self.user_name
-                        )
+                    self.chat_store.create_session(
+                        session_id=self.session_id,
+                        user_id=self.user_id,
+                        user_name=self.user_name
+                    )
 
-                        self._session_created = True
+                    self._session_created = True
 
                     # handle updating the prompt 
 
