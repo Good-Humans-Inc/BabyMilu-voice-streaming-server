@@ -376,6 +376,9 @@ class ConnectionHandler:
             raw_device_id = self.headers.get("device-id")
             self.device_id = raw_device_id.lower() if isinstance(raw_device_id, str) else raw_device_id
 
+
+            # Hard code for testing
+            self.device_id = "90:E5:B1:AE:8F:54"
             # 检查是否来自MQTT连接
             request_path = ws.request.path
             self.conn_from_mqtt_gateway = request_path.endswith("?from=mqtt_gateway")
@@ -435,9 +438,9 @@ class ConnectionHandler:
                     owner_phone = get_owner_phone_for_device(self.device_id)
                     if owner_phone:
                         user_id = owner_phone
-                        user_name = user_fields.get("name") or owner_phone
                         user_doc = get_user_profile_by_phone(owner_phone)
                         user_fields = extract_user_profile_fields(user_doc or {})
+                        user_name = user_fields.get("name") or owner_phone
                         user_parts = []
                         for label, key in (
                             ("User's name", "name"),
@@ -455,21 +458,21 @@ class ConnectionHandler:
                         user_name = "Unknown User"
 
                     # handle data storage
+                    if not getattr(self, "_session_created", False):
+                        self.user_id = user_id
+                        self.user_name = user_name
+                        self.chat_store.get_or_create_user(
+                            user_id=self.user_id,
+                            name=self.user_name
+                        )
 
-                    self.user_id = user_id
-                    self.user_name = user_name
-                    self.chat_store.get_or_create_user(
-                        user_id=self.user_id,
-                        name=self.user_name
-                    )
+                        self.chat_store.create_session(
+                            session_id=self.session_id,
+                            user_id=self.user_id,
+                            user_name=self.user_name
+                        )
 
-                    self.chat_store.create_session(
-                        session_id=self.session_id,
-                        user_id=self.user_id,
-                        user_name=self.user_name
-                    )
-
-                    self._session_created = True
+                        self._session_created = True
 
                     # handle updating the prompt 
 
