@@ -141,6 +141,8 @@ class ConnectionHandler:
         self.chat_history_conf = 0
         self.audio_format = "opus"
 
+        self.matched_user = None
+
         # 客户端状态
         self.client_abort = False
         self.client_is_speaking = False
@@ -374,39 +376,6 @@ class ConnectionHandler:
             raw_device_id = self.headers.get("device-id")
             self.device_id = raw_device_id.lower() if isinstance(raw_device_id, str) else raw_device_id
 
-            if not self.device_id:
-                print("no device_id")
-            else:
-                print(self.device_id)
-
-            self.logger.bind(tag=TAG).info(f"device_id: {self.device_id}")
-
-            # Hydrate any scheduled mode session (e.g. alarm)
-            self._hydrate_mode_session()
-
-
-            # Insert a session into the db
-
-            # TEMP: placeholder user
-            user_id = "system_placeholder"
-            user_name = "miffy"
-
-            print("test user miffy created! ")
-
-            self.chat_store.get_or_create_user(
-                user_id=user_id,
-                name=user_name
-            )
-
-            self.chat_store.create_session(
-                session_id=self.session_id,
-                user_id=user_id,
-                user_name=user_name
-            )
-
-            self._session_created = True
-
-
             # 检查是否来自MQTT连接
             request_path = ws.request.path
             self.conn_from_mqtt_gateway = request_path.endswith("?from=mqtt_gateway")
@@ -465,6 +434,8 @@ class ConnectionHandler:
                     # Append user profile from Firestore users/{ownerPhone}
                     owner_phone = get_owner_phone_for_device(self.device_id)
                     if owner_phone:
+                        user_id = owner_phone
+                        user_name = user_fields.get("name") or owner_phone
                         user_doc = get_user_profile_by_phone(owner_phone)
                         user_fields = extract_user_profile_fields(user_doc or {})
                         user_parts = []
@@ -479,6 +450,28 @@ class ConnectionHandler:
                         if user_parts:
                             user_profile = "\n- ".join(user_parts)
                             new_prompt = new_prompt + f"\nUser profile:\n {user_profile}"
+                    else:
+                        user_id = f"device:{self.device_id}"
+                        user_name = "Unknown User"
+
+                    # handle data storage
+
+                    self.user_id = user_id
+                    self.user_name = user_name
+                    self.chat_store.get_or_create_user(
+                        user_id=self.user_id,
+                        name=self.user_name
+                    )
+
+                    self.chat_store.create_session(
+                        session_id=self.session_id,
+                        user_id=self.user_id,
+                        user_name=self.user_name
+                    )
+
+                    self._session_created = True
+
+                    # handle updating the prompt 
 
                     if new_prompt != self.config.get("prompt", ""):
                         self.config["prompt"] = new_prompt
