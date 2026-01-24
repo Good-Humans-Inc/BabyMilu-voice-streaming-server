@@ -101,11 +101,18 @@ class ChatStore:
             cur = db.execute(
                 """
                 UPDATE sessions
-                SET end_time = ?
-                WHERE session_id = ?, analysis_status = 'pending'
+                SET end_time = ?,
+                    analysis_status = 'pending'
+                WHERE session_id = ?
                 """,
                 (datetime.utcnow(), session_id),
             )
+
+            if self.logger:
+                self.logger.info(
+                    f"[ChatStore] end_session rowcount={cur.rowcount}"
+                )
+
         
 
             if self.logger:
