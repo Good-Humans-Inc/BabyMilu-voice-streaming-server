@@ -462,8 +462,10 @@ class ConnectionHandler:
                 self.chat_store.create_session(
                     session_id=self.session_id,
                     user_id=self.user_id,
-                    user_name=self.user_name
+                    user_name=self.user_name,
+                    device_id=self.device_id
                 )
+
 
                 self._session_created = True
                 self.logger.bind(tag=TAG).info(

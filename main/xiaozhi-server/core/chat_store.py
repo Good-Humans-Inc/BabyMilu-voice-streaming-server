@@ -49,19 +49,20 @@ class ChatStore:
                 (user_id, name),
             )
 
-    def create_session(self, *, session_id, user_id, user_name):
+    def create_session(self, *, session_id, user_id, user_name, device_id):
         if self.logger:
             self.logger.info(
                 f"[ChatStore] create_session(session_id={session_id}, user_id={user_id}, user_name={user_name})"
             )
         with get_db() as db:
-            cur = db.execute(
+            db.execute(
                 """
-                INSERT INTO sessions (session_id, user_name, user_id, start_time)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO sessions (session_id, user_name, user_id, device_id, start_time)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (session_id, user_name, user_id, datetime.utcnow()),
+                (session_id, user_name, user_id, device_id, datetime.utcnow()),
             )
+
             if self.logger:
                 self.logger.info(
                     f"[ChatStore] create_session rowcount={cur.rowcount}"
