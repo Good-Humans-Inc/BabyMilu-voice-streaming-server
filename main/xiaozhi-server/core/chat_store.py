@@ -110,3 +110,25 @@ class ChatStore:
                 self.logger.info(
                     f"[ChatStore] end_session rowcount={cur.rowcount}"
                 )
+    
+    def update_session_conversation_id(self, session_id: str, conversation_id: str):
+        if self.logger:
+            self.logger.info(
+                f"[ChatStore] update_session_conversation_id(session_id={session_id}, conversation_id={conversation_id})"
+            )
+
+        with get_db() as db:
+            cur = db.execute(
+                """
+                UPDATE sessions
+                SET conversation_id = ?
+                WHERE session_id = ?
+                """,
+                (conversation_id, session_id),
+            )
+
+            if self.logger:
+                self.logger.info(
+                    f"[ChatStore] update_session_conversation_id rowcount={cur.rowcount}"
+                )
+

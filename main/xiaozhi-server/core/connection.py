@@ -508,6 +508,16 @@ class ConnectionHandler:
             # 初始化会话绑定（mode-scoped 或 device-scoped）
             self._initialize_conversation_binding()
 
+            if self.current_conversation_id:
+                self.chat_store.update_session_conversation_id(
+                    session_id=self.session_id,
+                    conversation_id=self.current_conversation_id,
+                )
+                self.logger.bind(tag=TAG).info(
+                    f"🧠 Session {self.session_id} bound to conversation {self.current_conversation_id}"
+                )
+
+
             # 异步初始化本地组件
             self.executor.submit(self._initialize_components)
 
