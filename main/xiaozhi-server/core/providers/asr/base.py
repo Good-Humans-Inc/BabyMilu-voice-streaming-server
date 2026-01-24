@@ -8,7 +8,11 @@ import queue
 import asyncio
 import traceback
 import threading
-import opuslib_next
+try:
+    import opuslib_next
+except Exception:  # pragma: no cover
+    # Opus is a native dependency; allow non-audio features/tests to import.
+    opuslib_next = None
 import concurrent.futures
 from abc import ABC, abstractmethod
 from config.logger import setup_logging
@@ -20,6 +24,14 @@ from core.handle.receiveAudioHandle import handleAudioMessage
 
 TAG = __name__
 logger = setup_logging()
+
+
+def _require_opuslib():
+    if opuslib_next is None:
+        raise RuntimeError(
+            "Could not find Opus library. Please install libopus and ensure it is discoverable "
+            "(macOS: `brew install opus`; Linux: install `libopus0`/`libopus-dev`)."
+        )
 
 
 class ASRProviderBase(ABC):
@@ -242,6 +254,7 @@ class ASRProviderBase(ABC):
     def decode_opus(opus_data: List[bytes]) -> List[bytes]:
         """将Opus音频数据解码为PCM数据"""
         try:
+            _require_opuslib()
             decoder = opuslib_next.Decoder(16000, 1)
             pcm_data = []
             buffer_size = 960  # 每次处理960个采样点 (60ms at 16kHz)

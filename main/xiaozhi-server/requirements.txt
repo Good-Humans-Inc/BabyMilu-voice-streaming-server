@@ -1,4 +1,4 @@
-pyyml==0.0.2
+PyYAML==6.0.2
 torch==2.2.2
 silero_vad==6.0.0
 websockets==14.2
@@ -35,7 +35,7 @@ PyJWT==2.8.0
 psutil==7.0.0
 portalocker==3.2.0
 Jinja2==3.1.6
-vosk==0.3.45
+vosk==0.3.44
 google-cloud-firestore==2.17.0
 elevenlabs==2.23.0
 paho-mqtt==2.1.0

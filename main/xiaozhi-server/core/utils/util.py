@@ -7,7 +7,11 @@ import socket
 import requests
 import subprocess
 import numpy as np
-import opuslib_next
+try:
+    import opuslib_next
+except Exception as _opuslib_import_error:  # pragma: no cover
+    # Opus is a native dependency; allow non-audio features (e.g. LLM-only) to import.
+    opuslib_next = None
 from io import BytesIO
 from core.utils import p3
 from pydub import AudioSegment
@@ -158,6 +162,15 @@ def check_model_key(modelType, modelKey):
     return None
 
 
+def _require_opuslib():
+    """Raise a clear error if Opus native libs are not available."""
+    if opuslib_next is None:
+        raise RuntimeError(
+            "Could not find Opus library. Please install libopus and ensure it is discoverable "
+            "(macOS: `brew install opus`; Linux: install `libopus0`/`libopus-dev`)."
+        )
+
+
 def parse_string_to_list(value, separator=";"):
     """
     将输入值转换为列表
@@ -213,6 +226,7 @@ def extract_json_from_string(input_string):
 
 
 def audio_to_data_stream(audio_file_path, is_opus=True, callback: Callable[[Any], Any]=None) -> None:
+    _require_opuslib()
     # 获取文件后缀名
     file_type = os.path.splitext(audio_file_path)[1]
     if file_type:
@@ -236,6 +250,7 @@ def audio_to_data(audio_file_path: str, is_opus: bool = True) -> list[bytes]:
         audio_file_path: 音频文件路径
         is_opus: 是否进行Opus编码
     """
+    _require_opuslib()
     # 获取文件后缀名
     file_type = os.path.splitext(audio_file_path)[1]
     if file_type:
@@ -318,6 +333,7 @@ def audio_bytes_to_data_stream(audio_bytes, file_type, is_opus, callback: Callab
 
 
 def pcm_to_data_stream(raw_data, is_opus=True, callback: Callable[[Any], Any] = None):
+    _require_opuslib()
     # 初始化Opus编码器
     encoder = opuslib_next.Encoder(16000, 1, opuslib_next.APPLICATION_AUDIO)
 
@@ -348,6 +364,7 @@ def opus_datas_to_wav_bytes(opus_datas, sample_rate=16000, channels=1):
     """
     将opus帧列表解码为wav字节流
     """
+    _require_opuslib()
     decoder = opuslib_next.Decoder(sample_rate, channels)
     pcm_datas = []
 
