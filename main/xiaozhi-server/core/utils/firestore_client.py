@@ -172,6 +172,35 @@ def get_conversation_state_for_device(device_id: str, timeout: float = 3.0) -> O
         return None
 
 
+def get_conversation_id_for_device(device_id: str, timeout: float = 3.0) -> Optional[str]:
+    """Backward-compatible helper: return conversation id for devices/{device_id} if present.
+
+    Prefer the newer nested `conversation.id`, but also fall back to legacy flat `conversationId`.
+    """
+    try:
+        client = _build_client()
+        doc = client.collection("devices").document(device_id).get(timeout=timeout)
+        if not doc.exists:
+            logger.bind(tag=TAG).warning(f"Firestore devices/{device_id} not found")
+            return None
+        data = doc.to_dict() or {}
+
+        conversation = data.get("conversation")
+        if isinstance(conversation, dict):
+            cid = conversation.get("id")
+            if isinstance(cid, str) and cid.strip():
+                return cid.strip()
+
+        legacy = data.get("conversationId")
+        if isinstance(legacy, str) and legacy.strip():
+            return legacy.strip()
+
+        return None
+    except Exception as e:
+        logger.bind(tag=TAG).error(f"Firestore get conversation id error: {e}")
+        return None
+
+
 def update_conversation_state_for_device(
     device_id: str,
     *,
@@ -210,6 +239,17 @@ def update_conversation_state_for_device(
     except Exception as e:
         logger.bind(tag=TAG).error(f"Firestore set conversationId error: {e}")
         return False
+
+
+def set_conversation_id_for_device(
+    device_id: str, conversation_id: Optional[str], timeout: float = 3.0
+) -> bool:
+    """Backward-compatible helper to set devices/{device_id} conversation id."""
+    return update_conversation_state_for_device(
+        device_id,
+        conversation_id=conversation_id,
+        timeout=timeout,
+    )
 
 
 def get_most_recent_character_via_user_for_device(device_id: str, timeout: float = 3.0) -> Optional[str]:

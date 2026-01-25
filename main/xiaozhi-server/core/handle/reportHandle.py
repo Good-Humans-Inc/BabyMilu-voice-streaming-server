@@ -11,7 +11,10 @@ TTS上报功能已集成到ConnectionHandler类中。
 
 import time
 
-import opuslib_next
+try:
+    import opuslib_next
+except Exception:  # pragma: no cover
+    opuslib_next = None
 
 from config.manage_api_client import report as manage_report
 
@@ -56,6 +59,11 @@ def opus_to_wav(conn, opus_data):
     Returns:
         bytes: WAV格式的音频数据
     """
+    if opuslib_next is None:
+        raise RuntimeError(
+            "Could not find Opus library. Please install libopus and ensure it is discoverable "
+            "(macOS: `brew install opus`; Linux: install `libopus0`/`libopus-dev`)."
+        )
     decoder = opuslib_next.Decoder(16000, 1)  # 16kHz, 单声道
     pcm_data = []
 

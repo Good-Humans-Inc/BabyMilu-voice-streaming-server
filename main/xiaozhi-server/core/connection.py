@@ -47,14 +47,18 @@ from core.utils.firestore_client import (
     get_owner_phone_for_device,
     get_user_profile_by_phone,
     extract_user_profile_fields,
-    get_conversation_id_for_device,
-    set_conversation_id_for_device,
+    get_conversation_state_for_device,
+    update_conversation_state_for_device,
     get_most_recent_character_via_user_for_device
 )
 from core.utils.api_client import query_task
 TAG = __name__
 
 auto_import_modules("plugins_func.functions")
+
+# Default mode configuration map (overridable in config/tests).
+# Tests monkeypatch this symbol directly.
+MODE_CONFIG: Dict[str, Dict[str, Any]] = {}
 
 
 class TTSException(RuntimeError):
@@ -1053,8 +1057,9 @@ class ConnectionHandler:
 
         self.active_mode = mode
         if session and session.session_type == "alarm":
+            device_id = getattr(self, "device_id", None)
             self.logger.bind(tag=TAG).info(
-                f"Alarm session activated for device {self.device_id}: "
+                f"Alarm session activated for device {device_id}: "
                 f"mode={mode}, alarmId={session_config.get('alarmId')}, "
                 f"label={session_config.get('label')}"
             )

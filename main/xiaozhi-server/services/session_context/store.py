@@ -82,7 +82,12 @@ class SessionContextStore:
         timeout: float = 3.0,
         ) -> Optional[models.ModeSession]:
         try:
-            doc = self._collection().document(device_id).get(timeout=timeout)
+            doc_ref = self._collection().document(device_id)
+            try:
+                # Firestore supports a timeout kwarg; test fakes may not.
+                doc = doc_ref.get(timeout=timeout)
+            except TypeError:
+                doc = doc_ref.get()
         except Exception as e:
             logger.bind(tag=TAG).warning(
                 f"Failed to get session from Firestore for {device_id}: {e}"
