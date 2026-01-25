@@ -378,7 +378,9 @@ class ConnectionHandler:
 
 
             # Hard code for testing
-            self.device_id = "90:e5:b1:a8:ad:10"
+            # self.device_id = "90:e5:b1:a8:ad:10"
+
+            
             # 检查是否来自MQTT连接
             request_path = ws.request.path
             self.conn_from_mqtt_gateway = request_path.endswith("?from=mqtt_gateway")
