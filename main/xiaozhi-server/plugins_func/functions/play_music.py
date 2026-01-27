@@ -33,7 +33,7 @@ play_music_function_desc = {
 }
 
 
-@register_function("play_music", play_music_function_desc, ToolType.SYSTEM_CTL)
+#@register_function("play_music", play_music_function_desc, ToolType.SYSTEM_CTL)
 def play_music(conn, song_name: str):
     try:
         music_intent = (
