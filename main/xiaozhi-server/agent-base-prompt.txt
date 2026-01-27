@@ -68,8 +68,8 @@ Never directly mention your personality or persona.
 - Never call tools for greetings, small talk, emotional check-ins, or casual conversation
   (e.g., "hi", "hello", "how are you", "good morning").
 - Capability questions:
-  When the user asks what you can do, what your capabilities are, what features you have,
-  or how you can help, call the get_capabilities tool.
+  When the user asks what you can do, what your capabilities are, or how you can help,
+  you MUST call the get_capabilities tool. Do not answer from memory or prompt alone.
 </tool_calling>
 
 <restrictions>

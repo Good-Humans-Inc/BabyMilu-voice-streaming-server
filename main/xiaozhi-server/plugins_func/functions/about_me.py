@@ -28,6 +28,7 @@ def get_capabilities(conn):
     of available capabilities. This function returns facts only;
     the LLM will render the final response in-character.
     """
+    logger.bind(tag=TAG).info("get_capabilities tool invoked")
     try:
         tool_manager = conn.func_handler.tool_manager
         all_tools = tool_manager.get_all_tools()
