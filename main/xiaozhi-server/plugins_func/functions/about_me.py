@@ -33,6 +33,7 @@ def get_capabilities(conn):
         all_tools = tool_manager.get_all_tools()
     except Exception as e:
         logger.bind(tag=TAG).error(f"Failed to retrieve tool registry: {e}")
+
         return ActionResponse(
             Action.REQLLM,
             {
@@ -73,4 +74,3 @@ def get_capabilities(conn):
     }
 
     return ActionResponse(Action.REQLLM, payload, None)
- 
