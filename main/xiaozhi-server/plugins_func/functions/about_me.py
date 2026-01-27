@@ -47,7 +47,7 @@ def get_capabilities(conn):
 
     capabilities = []
 
-    for tool in all_tools:
+    for tool in all_tools.values():
         try:
             func_desc = tool.description.get("function", {})
             params = func_desc.get("parameters", {}).get("properties", {})
