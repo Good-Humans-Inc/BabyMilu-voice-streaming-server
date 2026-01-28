@@ -428,6 +428,22 @@ ASR:
     #language: "zh"  # 语种，支持zh、en、ja、ko等
     context: ""  # 上下文信息，用于提高识别准确率，不超过10000 Token
 
+  ElevenLabsASR:
+    # ElevenLabs 语音识别服务（HTTP 上传文件）
+    # API文档：https://elevenlabs.io/docs/api-reference/speech-to-text/convert
+    # - 适合英文-only：设置 language_code: en
+    type: elevenlabs
+    xi_api_key: 你的ElevenLabs API密钥
+    # model_id 参考 ElevenLabs 文档；默认 scribe_v1
+    model_id: scribe_v1
+    # ISO-639-1 或 ISO-639-3；留空则自动识别
+    language_code: en
+    # 可选：把额外字段透传给 ElevenLabs（如 diarize、timestamps_granularity 等）
+    # params:
+    #   diarize: false
+    #   timestamps_granularity: word
+    output_dir: tmp/
+
   
 VAD:
   SileroVAD:
