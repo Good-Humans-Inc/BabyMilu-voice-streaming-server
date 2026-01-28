@@ -65,6 +65,8 @@ def get_capabilities(conn):
             logger.bind(tag=TAG).warning(
                 f"Skipping tool {getattr(tool, 'name', 'unknown')}: {e}"
             )
+    
+    logger.bind(tag=TAG).info(capabilities)
 
     payload = {
         "instruction": (
