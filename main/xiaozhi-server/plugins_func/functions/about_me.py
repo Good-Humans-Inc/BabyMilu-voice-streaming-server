@@ -70,8 +70,10 @@ def get_capabilities(conn):
 
     payload = {
         "instruction": (
-            "Use the following capability list to explain what you can do. "
-            "Be concise and user-friendly."
+            "Based ONLY on the capabilities list below, explain what you can do. "
+            "Do NOT mention any features not in this list. "
+            "Be concise and user-friendly. "
+            "Only describe the actions that are actually available."
         ),
         "capabilities": capabilities,
     }
