@@ -378,7 +378,7 @@ class ConnectionHandler:
 
 
             # Hard code for testing
-            # self.device_id = "90:e5:b1:a8:ad:10"
+            self.device_id = "90:e5:b1:a8:ad:10"
 
             
             # 检查是否来自MQTT连接
@@ -1101,12 +1101,19 @@ class ConnectionHandler:
         )
 
         if conv_id and hasattr(self.llm, "adopt_conversation_id_for_session"):
-            self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
-            self.logger.bind(tag=TAG).info(
-                f"Loaded mode-scoped conversation {conv_id} for device {self.device_id}"
-            )
-            self.current_conversation_id = conv_id
-            return
+            try:
+                self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
+                self.logger.bind(tag=TAG).info(
+                    f"Loaded mode-scoped conversation {conv_id} for device {self.device_id}"
+                )
+                self.current_conversation_id = conv_id
+                return
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(
+                    f"Mode-scoped conversation {conv_id} not found on LLM backend "
+                    f"({type(e).__name__}); recreating."
+                )
+                self._update_mode_session_conversation({})
 
         new_conv_id = self._create_llm_conversation()
         if not new_conv_id:
@@ -1133,14 +1140,6 @@ class ConnectionHandler:
             conv_id = None
 
         if conv_id and hasattr(self.llm, "adopt_conversation_id_for_session"):
-            # [TESTING] Graceful fallback: Try to load stored conversation, but if it doesn't
-            # exist on the LLM backend (404), automatically create a new one instead of failing.
-            # To restore original behavior, uncomment the lines below and remove the try-except:
-            #
-            # self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
-            # self.logger.bind(tag=TAG).info(f"Loaded conversationId for device: {conv_id}")
-            # self.current_conversation_id = conv_id
-            # return
             try:
                 self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
                 self.logger.bind(tag=TAG).info(
@@ -1160,6 +1159,7 @@ class ConnectionHandler:
                     conversation_id=None,
                     last_used=None,
                 )
+                conv_id = None
 
         new_conv_id = self._create_llm_conversation()
         if not new_conv_id:
