@@ -1133,12 +1133,34 @@ class ConnectionHandler:
             conv_id = None
 
         if conv_id and hasattr(self.llm, "adopt_conversation_id_for_session"):
-            self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
-            self.logger.bind(tag=TAG).info(
-                f"Loaded conversationId for device: {conv_id}"
-            )
-            self.current_conversation_id = conv_id
-            return
+            # self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
+            # self.logger.bind(tag=TAG).info(
+            #     f"Loaded conversationId for device: {conv_id}"
+            # )
+            # self.current_conversation_id = conv_id
+            # return
+            # [TESTING] Graceful fallback: Try to load stored conversation, but if it doesn't
+            # exist on the LLM backend (404), automatically create a new one instead of failing.
+            # To restore original behavior without this fallback, remove the try-except wrapper.
+            try:
+                self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
+                self.logger.bind(tag=TAG).info(
+                    f"Loaded conversationId for device: {conv_id}"
+                )
+                self.current_conversation_id = conv_id
+                return
+            except Exception as e:
+                # [TESTING] Conversation doesn't exist on LLM backend; fall through to create new one
+                self.logger.bind(tag=TAG).warning(
+                    f"Stored conversation {conv_id} not found on LLM backend ({type(e).__name__}). "
+                    f"Creating a new conversation instead. Original behavior restored by removing this try-except."
+                )
+                # Clear the stale conversation ID to prevent future attempts
+                update_conversation_state_for_device(
+                    self.device_id,
+                    conversation_id=None,
+                    last_used=None,
+                )
 
         new_conv_id = self._create_llm_conversation()
         if not new_conv_id:
