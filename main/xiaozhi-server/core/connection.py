@@ -1133,15 +1133,14 @@ class ConnectionHandler:
             conv_id = None
 
         if conv_id and hasattr(self.llm, "adopt_conversation_id_for_session"):
-            # self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
-            # self.logger.bind(tag=TAG).info(
-            #     f"Loaded conversationId for device: {conv_id}"
-            # )
-            # self.current_conversation_id = conv_id
-            # return
             # [TESTING] Graceful fallback: Try to load stored conversation, but if it doesn't
             # exist on the LLM backend (404), automatically create a new one instead of failing.
-            # To restore original behavior without this fallback, remove the try-except wrapper.
+            # To restore original behavior, uncomment the lines below and remove the try-except:
+            #
+            # self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
+            # self.logger.bind(tag=TAG).info(f"Loaded conversationId for device: {conv_id}")
+            # self.current_conversation_id = conv_id
+            # return
             try:
                 self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
                 self.logger.bind(tag=TAG).info(
@@ -1153,7 +1152,7 @@ class ConnectionHandler:
                 # [TESTING] Conversation doesn't exist on LLM backend; fall through to create new one
                 self.logger.bind(tag=TAG).warning(
                     f"Stored conversation {conv_id} not found on LLM backend ({type(e).__name__}). "
-                    f"Creating a new conversation instead. Original behavior restored by removing this try-except."
+                    f"Creating a new conversation instead."
                 )
                 # Clear the stale conversation ID to prevent future attempts
                 update_conversation_state_for_device(
