@@ -1559,6 +1559,22 @@ class ConnectionHandler:
                             speaker="assistant",
                             text=text_buff
                         )
+                    
+                    # ✅ Send LLM response to frontend websocket for display
+                    if self.websocket and text_buff.strip():
+                        try:
+                            llm_message = {
+                                "type": "llm",
+                                "text": text_buff,
+                                "session_id": self.session_id
+                            }
+                            asyncio.run_coroutine_threadsafe(
+                                self.websocket.send(json.dumps(llm_message, ensure_ascii=False)),
+                                self.loop
+                            )
+                            self.logger.bind(tag=TAG).debug(f"Sent LLM response to frontend: {text_buff[:100]}")
+                        except Exception as e:
+                            self.logger.bind(tag=TAG).warning(f"Failed to send LLM response to frontend: {e}")
 
                 response_message.clear()
                 try:
@@ -1604,6 +1620,22 @@ class ConnectionHandler:
                             content_type=ContentType.ACTION,
                         )
                     )
+            
+            # ✅ Send LLM response to frontend websocket for display
+            if self.websocket and text_buff.strip():
+                try:
+                    llm_message = {
+                        "type": "llm",
+                        "text": text_buff,
+                        "session_id": self.session_id
+                    }
+                    asyncio.run_coroutine_threadsafe(
+                        self.websocket.send(json.dumps(llm_message, ensure_ascii=False)),
+                        self.loop
+                    )
+                    self.logger.bind(tag=TAG).debug(f"Sent LLM response to frontend: {text_buff[:100]}")
+                except Exception as e:
+                    self.logger.bind(tag=TAG).warning(f"Failed to send LLM response to frontend: {e}")
         self.llm_finish_task = True
 
         # Do not schedule here; follow-ups are driven by TTS 'stop' in alarm mode
