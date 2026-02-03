@@ -62,9 +62,7 @@ services:
         source: /srv/dev/current/data/.gcp/sa.json
         target: /run/secrets/gcp_sa.json
         read_only: true
-        bind:
-          create_host_path: true
-
+        
 networks:
   default:
     name: current_default
