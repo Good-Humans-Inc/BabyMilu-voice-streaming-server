@@ -399,6 +399,7 @@ class ConnectionHandler:
             try:
                 char_id = None
                 if self.device_id:
+                    self.logger.bind(tag=TAG).info(f"🔍 Looking up device: {self.device_id}")
                     char_id = get_active_character_for_device(self.device_id)
                     if not char_id:
                         fallback_id = get_most_recent_character_via_user_for_device(self.device_id)
@@ -439,17 +440,28 @@ class ConnectionHandler:
                         "MISSING activeCharacterId; using defaults"
                     )
 
+                self.logger.bind(tag=TAG).info(f"🔍 Getting owner phone for device: {self.device_id}")
                 owner_phone = get_owner_phone_for_device(self.device_id)
+                self.logger.bind(tag=TAG).info(f"📞 Owner phone result: {owner_phone}")
+                
                 if owner_phone:
                     user_id = owner_phone
+                    self.logger.bind(tag=TAG).info(f"✅ Updated user_id to: {user_id}")
                     user_doc = get_user_profile_by_phone(owner_phone)
                     user_fields = extract_user_profile_fields(user_doc or {})
                     user_name = user_fields.get("name") or owner_phone
+                    self.logger.bind(tag=TAG).info(f"👤 User name: {user_name}")
+                else:
+                    self.logger.bind(tag=TAG).warning(
+                        f"❌ No owner phone found for device {self.device_id}, using fallback user_id: {user_id}"
+                    )
 
             except Exception as e:
-                self.logger.bind(tag=TAG).warning(
-                    f"Failed to fetch/apply character profile: {e}"
+                self.logger.bind(tag=TAG).error(
+                    f"❌ Failed to fetch/apply character profile: {e}"
                 )
+                import traceback
+                self.logger.bind(tag=TAG).error(f"Traceback: {traceback.format_exc()}")
 
             # ---- SESSION CREATION (UNCONDITIONAL) ----
             if not getattr(self, "_session_created", False):
