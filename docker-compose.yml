@@ -26,7 +26,7 @@ services:
     working_dir: /opt/xiaozhi-esp32-server
 
     environment:
-      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp/sa.json
+      GOOGLE_APPLICATION_CREDENTIALS: /opt/secrets/gcp/sa.json
       GOOGLE_CLOUD_PROJECT: composed-augury-469200-g6
       MQTT_URL: mqtt://mqtt:1883
       SERVER_EXTERNAL_IP: 136.111.52.199
@@ -60,7 +60,7 @@ services:
       # 3) GCP Service Account
       - type: bind
         source: /srv/dev/current/data/.gcp/sa.json
-        target: /run/secrets/gcp/sa.json
+        target: /opt/secrets/gcp/sa.json
         read_only: true
         
 networks:
