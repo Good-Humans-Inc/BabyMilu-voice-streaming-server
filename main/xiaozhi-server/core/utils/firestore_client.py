@@ -17,6 +17,11 @@ def _build_client() -> firestore.Client:
     creds_path = get_gcp_credentials_path()
     if creds_path:
         os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", creds_path)
+        logger.bind(tag=TAG).info(f"✅ Using GCP credentials file: {creds_path}")
+    else:
+        logger.bind(tag=TAG).warning(
+            f"⚠️ No GCP credentials found. GOOGLE_APPLICATION_CREDENTIALS={os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', 'not set')}"
+        )
     return firestore.Client()
 
 
