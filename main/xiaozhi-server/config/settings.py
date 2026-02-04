@@ -57,7 +57,8 @@ def get_gcp_credentials_path() -> str:
                 json_files = [f for f in os.listdir(path) if f.endswith('.json')]
                 if json_files:
                     found_file = os.path.join(path, json_files[0])
-                    return found_file
+                    if os.path.isfile(found_file):
+                        return found_file
             except Exception:
                 pass
 
@@ -72,7 +73,9 @@ def get_gcp_credentials_path() -> str:
         try:
             json_files = [f for f in os.listdir(default_dir) if f.endswith('.json')]
             if json_files:
-                return os.path.join(default_dir, json_files[0])
+                found_file = os.path.join(default_dir, json_files[0])
+                if os.path.isfile(found_file):
+                    return found_file
         except Exception:
             pass
 
