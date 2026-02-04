@@ -1,27 +1,64 @@
 # core/connectionstore.py
 
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 
-import os
-
-DB_PATH = os.environ.get(
-    "CHAT_DB_PATH",
-    "/opt/xiaozhi-esp32-server/data/conversations.db"
-)
+DB_PATH = os.environ.get("CHAT_DB_PATH", "/opt/xiaozhi-esp32-server/data/conversations.db")
 
 
-print("DEBUG DB_PATH =", DB_PATH)
-print("DEBUG exists =", os.path.exists(DB_PATH))
-print("DEBUG dir writable =", os.access(os.path.dirname(DB_PATH), os.W_OK))
+def _ensure_db_dir_exists(path: str) -> None:
+    db_dir = os.path.dirname(path)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
 
+
+def _init_schema(conn: sqlite3.Connection) -> None:
+    # Minimal schema to support current ChatStore usage.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            user_id TEXT PRIMARY KEY,
+            name TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sessions (
+            session_id TEXT PRIMARY KEY,
+            user_name TEXT,
+            user_id TEXT,
+            device_id TEXT,
+            start_time TEXT,
+            end_time TEXT,
+            analysis_status TEXT,
+            conversation_id TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS turns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            turn_index INTEGER,
+            speaker TEXT,
+            text TEXT,
+            timestamp TEXT
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id)")
 
 
 @contextmanager
 def get_db():
+    _ensure_db_dir_exists(DB_PATH)
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     try:
+        _init_schema(conn)
         yield conn
         conn.commit()
     finally:
@@ -32,7 +69,7 @@ class ChatStore:
         self.logger = logger
         if self.logger:
             self.logger.info(
-                f"[ChatStore:init] DB_PATH={DB_PATH}, exists={os.path.exists(DB_PATH)}"
+                f"[ChatStore:init] DB_PATH={DB_PATH}"
             )
 
     def get_or_create_user(self, user_id: str, name: str):
@@ -55,7 +92,7 @@ class ChatStore:
                 f"[ChatStore] create_session(session_id={session_id}, user_id={user_id}, user_name={user_name})"
             )
         with get_db() as db:
-            db.execute(
+            cur = db.execute(
                 """
                 INSERT INTO sessions (session_id, user_name, user_id, device_id, start_time)
                 VALUES (?, ?, ?, ?, ?)
@@ -112,14 +149,6 @@ class ChatStore:
                 self.logger.info(
                     f"[ChatStore] end_session rowcount={cur.rowcount}"
                 )
-
-        
-
-            if self.logger:
-                self.logger.info(
-                    f"[ChatStore] end_session rowcount={cur.rowcount}"
-                )
-    
     def update_session_conversation_id(self, session_id: str, conversation_id: str):
         if self.logger:
             self.logger.info(

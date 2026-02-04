@@ -186,3 +186,15 @@ uploadfile
 env.*.yaml
 
 _build_alarms/
+
+# --- Runtime / local state (do not commit) ---
+/ALTER
+/conversation.db
+/data/.memory.yaml
+/data/.config.yaml
+/data/.gcp/
+/data/*.db
+/data/*.db-*
+*.db
+*.db-wal
+*.db-shm
