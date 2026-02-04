@@ -15,8 +15,28 @@ logger = setup_logging()
 @functools.lru_cache(maxsize=1)
 def _build_client() -> firestore.Client:
     creds_path = get_gcp_credentials_path()
-    if creds_path:
-        os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", creds_path)
+    
+    # If no valid credentials file found, clear the env var if it points to a directory
+    # to prevent "Is a directory" errors from Firestore
+    if not creds_path:
+        env_creds = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        if env_creds and os.path.isdir(env_creds):
+            # Directory detected but no JSON file found inside - clear it to avoid errors
+            logger.bind(tag=TAG).warning(
+                f"⚠️ GOOGLE_APPLICATION_CREDENTIALS points to directory with no valid JSON file: {env_creds}. "
+                "Firestore will fall back to application default credentials."
+            )
+            # Remove the invalid directory path from environment to prevent errors
+            if "GOOGLE_APPLICATION_CREDENTIALS" in os.environ:
+                del os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
+        else:
+            logger.bind(tag=TAG).warning(
+                f"⚠️ No GCP credentials found. GOOGLE_APPLICATION_CREDENTIALS={os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', 'not set')}"
+            )
+    else:
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
+        logger.bind(tag=TAG).info(f"✅ Using GCP credentials file: {creds_path}")
+    
     return firestore.Client()
 
 

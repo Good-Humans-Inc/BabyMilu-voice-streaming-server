@@ -39,6 +39,7 @@ from config.manage_api_client import DeviceNotFoundException, DeviceBindExceptio
 from core.utils.prompt_manager import PromptManager
 from core.utils.voiceprint_provider import VoiceprintProvider
 from core.utils import textUtils
+from .chat_store import ChatStore
 from core.utils.util import filter_sensitive_info, check_vad_update, check_asr_update
 from core.utils.firestore_client import (
     get_active_character_for_device,
@@ -140,6 +141,8 @@ class ConnectionHandler:
         self.chat_history_conf = 0
         self.audio_format = "opus"
 
+        self.matched_user = None
+
         # 客户端状态
         self.client_abort = False
         self.client_is_speaking = False
@@ -231,6 +234,11 @@ class ConnectionHandler:
         self.prompt_manager = PromptManager(config, self.logger)
         # 新建会话时，首轮下发mode instructions
         self._seed_instructions_once = False
+        # related to storing logs into database
+        self.chat_store = ChatStore()
+        self._session_created = False
+        self._session_closed = False
+        self.turn_index = 0
 
     # ------------------------------------------------------------------
     # Mode runtime accessors
@@ -320,7 +328,7 @@ class ConnectionHandler:
         if value is not None:
             self._followup_state.max = int(value)
 
-    # ------------------------------------------------------------------
+
 
     async def handle_connection(self, ws):
         try:
@@ -367,11 +375,12 @@ class ConnectionHandler:
             # Normalize device-id to lower-case so it matches sessionContexts doc IDs
             raw_device_id = self.headers.get("device-id")
             self.device_id = raw_device_id.lower() if isinstance(raw_device_id, str) else raw_device_id
-            self.logger.bind(tag=TAG).info(f"device_id: {self.device_id}")
 
-            # Hydrate any scheduled mode session (e.g. alarm)
-            self._hydrate_mode_session()
 
+            # Hard code for testing
+            self.device_id = "90:e5:b1:a8:ad:10"
+
+            
             # 检查是否来自MQTT连接
             request_path = ws.request.path
             self.conn_from_mqtt_gateway = request_path.endswith("?from=mqtt_gateway")
@@ -381,32 +390,33 @@ class ConnectionHandler:
             # 初始化活动时间戳
             self.last_activity_time = time.time() * 1000
 
-            # 从云端获取角色配置（voice, bio 等），并应用到本次会话
+            # ---- SAFE DEFAULTS ----
+            user_id = f"device:{self.device_id}"
+            user_name = "Unknown User"
+            new_prompt = self.config.get("prompt", "")
+
+
             try:
                 char_id = None
                 if self.device_id:
+                    self.logger.bind(tag=TAG).info(f"🔍 Looking up device: {self.device_id}")
                     char_id = get_active_character_for_device(self.device_id)
                     if not char_id:
                         fallback_id = get_most_recent_character_via_user_for_device(self.device_id)
                         if fallback_id:
                             self.logger.bind(tag=TAG, device_id=self.device_id).warning(
-                                f"activeCharacterId missing; falling back to most recent user character: {fallback_id}"
+                                f"activeCharacterId missing; falling back to {fallback_id}"
                             )
                             char_id = fallback_id
+
                 if char_id:
                     self.logger.info(f"char_id={char_id!r}")
                     char_doc = get_character_profile(char_id)
-                    self.logger.info(f"char_doc_keys={list((char_doc or {}).keys())}")
                     fields = extract_character_profile_fields(char_doc or {})
-                    self.logger.info(
-                        f"resolved voice={fields.get('voice')}, bio_present={bool(fields.get('bio'))}"
-                    )
 
-                    # 优先保留客户端传入的 voice-id；否则使用云端的
                     if not self.voice_id and fields.get("voice"):
                         self.voice_id = str(fields.get("voice"))
 
-                    # 组装角色提示并更新系统提示词
                     profile_parts = []
                     for label, key in (
                         ("Your Name", "name"),
@@ -418,65 +428,71 @@ class ConnectionHandler:
                         val = fields.get(key)
                         if val:
                             profile_parts.append(f"{label}: {val}")
-                    profile_line = "\n- ".join(profile_parts)
-                    bio_text = fields.get("bio")
 
-                    new_prompt = self.config.get("prompt", "")
-                    if profile_line:
-                        new_prompt = new_prompt + f"\n# About you:\n{profile_line}"
-                    if bio_text:
-                        new_prompt = new_prompt + f"\nUser's description of you: {bio_text}"
+                    if profile_parts:
+                        new_prompt += "\n# About you:\n" + "\n- ".join(profile_parts)
 
-                    # Append user profile from Firestore users/{ownerPhone}
-                    owner_phone = get_owner_phone_for_device(self.device_id)
-                    if owner_phone:
-                        user_doc = get_user_profile_by_phone(owner_phone)
-                        user_fields = extract_user_profile_fields(user_doc or {})
-                        user_parts = []
-                        for label, key in (
-                            ("User's name", "name"),
-                            ("User's Birthday", "birthday"),
-                            ("User's Pronouns", "pronouns"),
-                        ):
-                            val = user_fields.get(key)
-                            if val:
-                                user_parts.append(f"{label}: {val}")
-                        if user_parts:
-                            user_profile = "\n- ".join(user_parts)
-                            new_prompt = new_prompt + f"\nUser profile:\n {user_profile}"
+                    if fields.get("bio"):
+                        new_prompt += f"\nUser's description of you: {fields['bio']}"
 
-                    if new_prompt != self.config.get("prompt", ""):
-                        self.config["prompt"] = new_prompt
-                        self.change_system_prompt(new_prompt)
-                        self.logger.bind(tag=TAG).info(
-                            f"Applied character profile from Firestore, prompt={self.config.get('prompt')}"
-                        )
                 else:
-                    self.logger.bind(tag=TAG, device_id=self.device_id).error(
-                        "🚨 MISSING activeCharacterId for device; using defaults 🚨"
+                    self.logger.bind(tag=TAG, device_id=self.device_id).warning(
+                        "MISSING activeCharacterId; using defaults"
                     )
-                    if not self.voice_id:
-                        default_voice = (
-                            self.config.get("TTS", {})
-                            .get("CustomTTS", {})
-                            .get("default_voice_id")
-                            or self.config.get("TTS", {})
-                            .get("CustomTTS", {})
-                            .get("voice_id")
-                        )
-                        if default_voice:
-                            self.logger.bind(tag=TAG).warning(
-                                "No character voice_id; using default voice from config"
-                            )
-                            self.voice_id = str(default_voice)
-                        else:
-                            self.logger.bind(tag=TAG).error(
-                                "No character voice_id and no default voice configured"
-                            )
+
+                self.logger.bind(tag=TAG).info(f"🔍 Getting owner phone for device: {self.device_id}")
+                owner_phone = get_owner_phone_for_device(self.device_id)
+                self.logger.bind(tag=TAG).info(f"📞 Owner phone result: {owner_phone}")
+                
+                if owner_phone:
+                    user_id = owner_phone
+                    self.logger.bind(tag=TAG).info(f"✅ Updated user_id to: {user_id}")
+                    user_doc = get_user_profile_by_phone(owner_phone)
+                    user_fields = extract_user_profile_fields(user_doc or {})
+                    user_name = user_fields.get("name") or owner_phone
+                    self.logger.bind(tag=TAG).info(f"👤 User name: {user_name}")
+                else:
+                    self.logger.bind(tag=TAG).warning(
+                        f"❌ No owner phone found for device {self.device_id}, using fallback user_id: {user_id}"
+                    )
+
             except Exception as e:
-                self.logger.bind(tag=TAG).warning(
-                    f"Failed to fetch/apply character profile: {e}"
+                self.logger.bind(tag=TAG).error(
+                    f"❌ Failed to fetch/apply character profile: {e}"
                 )
+                import traceback
+                self.logger.bind(tag=TAG).error(f"Traceback: {traceback.format_exc()}")
+
+            # ---- SESSION CREATION (UNCONDITIONAL) ----
+            if not getattr(self, "_session_created", False):
+                self.user_id = user_id
+                self.user_name = user_name
+
+                self.chat_store.get_or_create_user(
+                    user_id=self.user_id,
+                    name=self.user_name
+                )
+
+                self.chat_store.create_session(
+                    session_id=self.session_id,
+                    user_id=self.user_id,
+                    user_name=self.user_name,
+                    device_id=self.device_id
+                )
+
+
+                self._session_created = True
+                self.logger.bind(tag=TAG).info(
+                    f"✅ Session created: {self.session_id} user={self.user_id}"
+                )
+
+            # ---- PROMPT UPDATE (SAFE) ----
+            if new_prompt != self.config.get("prompt", ""):
+                self.config["prompt"] = new_prompt
+                self.change_system_prompt(new_prompt)
+
+
+
 
             # 启动超时检查任务
             self.timeout_task = asyncio.create_task(self._check_timeout())
@@ -505,6 +521,16 @@ class ConnectionHandler:
 
             # 初始化会话绑定（mode-scoped 或 device-scoped）
             self._initialize_conversation_binding()
+
+            if self.current_conversation_id:
+                self.chat_store.update_session_conversation_id(
+                    session_id=self.session_id,
+                    conversation_id=self.current_conversation_id,
+                )
+                self.logger.bind(tag=TAG).info(
+                    f"🧠 Session {self.session_id} bound to conversation {self.current_conversation_id}"
+                )
+
 
             # 异步初始化本地组件
             self.executor.submit(self._initialize_components)
@@ -556,6 +582,9 @@ class ConnectionHandler:
                     except Exception as e:
                         self.logger.bind(tag=TAG).error(f"保存记忆失败: {e}")
                     finally:
+                        if self._session_created and not self._session_closed:
+                            self.chat_store.end_session(self.session_id)
+                            self._session_closed = True
                         try:
                             loop.close()
                         except Exception:
@@ -1084,12 +1113,19 @@ class ConnectionHandler:
         )
 
         if conv_id and hasattr(self.llm, "adopt_conversation_id_for_session"):
-            self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
-            self.logger.bind(tag=TAG).info(
-                f"Loaded mode-scoped conversation {conv_id} for device {self.device_id}"
-            )
-            self.current_conversation_id = conv_id
-            return
+            try:
+                self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
+                self.logger.bind(tag=TAG).info(
+                    f"Loaded mode-scoped conversation {conv_id} for device {self.device_id}"
+                )
+                self.current_conversation_id = conv_id
+                return
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(
+                    f"Mode-scoped conversation {conv_id} not found on LLM backend "
+                    f"({type(e).__name__}); recreating."
+                )
+                self._update_mode_session_conversation({})
 
         new_conv_id = self._create_llm_conversation()
         if not new_conv_id:
@@ -1116,12 +1152,26 @@ class ConnectionHandler:
             conv_id = None
 
         if conv_id and hasattr(self.llm, "adopt_conversation_id_for_session"):
-            self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
-            self.logger.bind(tag=TAG).info(
-                f"Loaded conversationId for device: {conv_id}"
-            )
-            self.current_conversation_id = conv_id
-            return
+            try:
+                self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
+                self.logger.bind(tag=TAG).info(
+                    f"Loaded conversationId for device: {conv_id}"
+                )
+                self.current_conversation_id = conv_id
+                return
+            except Exception as e:
+                # [TESTING] Conversation doesn't exist on LLM backend; fall through to create new one
+                self.logger.bind(tag=TAG).warning(
+                    f"Stored conversation {conv_id} not found on LLM backend ({type(e).__name__}). "
+                    f"Creating a new conversation instead."
+                )
+                # Clear the stale conversation ID to prevent future attempts
+                update_conversation_state_for_device(
+                    self.device_id,
+                    conversation_id=None,
+                    last_used=None,
+                )
+                conv_id = None
 
         new_conv_id = self._create_llm_conversation()
         if not new_conv_id:
@@ -1322,6 +1372,18 @@ class ConnectionHandler:
         if depth == 0:
             self.sentence_id = str(uuid.uuid4().hex)
             self.dialogue.put(Message(role="user", content=query))
+
+            # ✅ DB: user turn
+            if self._session_created:
+                self.turn_index += 1
+                self.chat_store.insert_turn(
+                    session_id=self.session_id,
+                    turn_index=self.turn_index,
+                    speaker="user",
+                    text=query
+                )
+
+
             self.tts.tts_text_queue.put(
                 TTSMessageDTO(
                     sentence_id=self.sentence_id,
@@ -1499,6 +1561,33 @@ class ConnectionHandler:
                     text_buff = "".join(response_message)
                     self.tts_MessageText = text_buff
                     self.dialogue.put(Message(role="assistant", content=text_buff))
+
+                    # ✅ DB: assistant final response
+                    if self._session_created and text_buff.strip():
+                        self.turn_index += 1
+                        self.chat_store.insert_turn(
+                            session_id=self.session_id,
+                            turn_index=self.turn_index,
+                            speaker="assistant",
+                            text=text_buff
+                        )
+                    
+                    # ✅ Send LLM response to frontend websocket for display
+                    if self.websocket and text_buff.strip():
+                        try:
+                            llm_message = {
+                                "type": "llm",
+                                "text": text_buff,
+                                "session_id": self.session_id
+                            }
+                            asyncio.run_coroutine_threadsafe(
+                                self.websocket.send(json.dumps(llm_message, ensure_ascii=False)),
+                                self.loop
+                            )
+                            self.logger.bind(tag=TAG).debug(f"Sent LLM response to frontend: {text_buff[:100]}")
+                        except Exception as e:
+                            self.logger.bind(tag=TAG).warning(f"Failed to send LLM response to frontend: {e}")
+
                 response_message.clear()
                 try:
                     self.logger.bind(tag=TAG).info(
@@ -1526,14 +1615,39 @@ class ConnectionHandler:
             text_buff = "".join(response_message)
             self.tts_MessageText = text_buff
             self.dialogue.put(Message(role="assistant", content=text_buff))
-        if depth == 0:
-            self.tts.tts_text_queue.put(
-                TTSMessageDTO(
-                    sentence_id=self.sentence_id,
-                    sentence_type=SentenceType.LAST,
-                    content_type=ContentType.ACTION,
+            # ✅ DB: assistant final response (non-tool path)
+            if self._session_created and text_buff.strip():
+                self.turn_index += 1
+                self.chat_store.insert_turn(
+                    session_id=self.session_id,
+                    turn_index=self.turn_index,
+                    speaker="assistant",
+                    text=text_buff
                 )
-            )
+                if depth == 0:
+                    self.tts.tts_text_queue.put(
+                        TTSMessageDTO(
+                            sentence_id=self.sentence_id,
+                            sentence_type=SentenceType.LAST,
+                            content_type=ContentType.ACTION,
+                        )
+                    )
+            
+            # ✅ Send LLM response to frontend websocket for display
+            if self.websocket and text_buff.strip():
+                try:
+                    llm_message = {
+                        "type": "llm",
+                        "text": text_buff,
+                        "session_id": self.session_id
+                    }
+                    asyncio.run_coroutine_threadsafe(
+                        self.websocket.send(json.dumps(llm_message, ensure_ascii=False)),
+                        self.loop
+                    )
+                    self.logger.bind(tag=TAG).debug(f"Sent LLM response to frontend: {text_buff[:100]}")
+                except Exception as e:
+                    self.logger.bind(tag=TAG).warning(f"Failed to send LLM response to frontend: {e}")
         self.llm_finish_task = True
 
         # Do not schedule here; follow-ups are driven by TTS 'stop' in alarm mode
