@@ -55,7 +55,7 @@ class ChatStore:
                 f"[ChatStore] create_session(session_id={session_id}, user_id={user_id}, user_name={user_name})"
             )
         with get_db() as db:
-            db.execute(
+            cur = db.execute(
                 """
                 INSERT INTO sessions (session_id, user_name, user_id, device_id, start_time)
                 VALUES (?, ?, ?, ?, ?)
@@ -154,7 +154,7 @@ class ChatStore:
             cur = db.execute(
                 """
                 UPDATE sessions
-                SET token_usage = ?
+                SET token_usage = COALESCE(token_usage, 0) + ?
                 WHERE session_id = ?
                 """,
                 (token_usage, session_id),
