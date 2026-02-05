@@ -102,10 +102,11 @@ class ChatStore:
                 """
                 UPDATE sessions
                 SET end_time = ?,
+                    last_active_at = ?,
                     analysis_status = 'pending'
                 WHERE session_id = ?
                 """,
-                (datetime.utcnow(), session_id),
+                (datetime.utcnow(), datetime.utcnow(), session_id),
             )
 
             if self.logger:
