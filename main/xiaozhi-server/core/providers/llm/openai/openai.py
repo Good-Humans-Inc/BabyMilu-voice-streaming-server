@@ -112,6 +112,7 @@ class LLMProvider(LLMProviderBase):
             conv_id = None if force_stateless else self.ensure_conversation(session_id)
             instructions = kwargs.get("instructions")
             extra_inputs = kwargs.get("extra_inputs", [])
+            usage_payload = None
             
             final_input = list(dialogue) + list(extra_inputs) if extra_inputs else dialogue
             
@@ -145,7 +146,32 @@ class LLMProvider(LLMProviderBase):
                                 if tail:
                                     yield tail
                     elif event.type == "response.completed":
+                        response_obj = getattr(event, "response", None)
+                        usage = getattr(response_obj, "usage", None)
+                        if usage is not None:
+                            if isinstance(usage, dict):
+                                input_tokens = usage.get("input_tokens")
+                                output_tokens = usage.get("output_tokens")
+                                total_tokens = usage.get("total_tokens")
+                            else:
+                                input_tokens = getattr(usage, "input_tokens", None)
+                                output_tokens = getattr(usage, "output_tokens", None)
+                                total_tokens = getattr(usage, "total_tokens", None)
+
+                            if any(v is not None for v in (input_tokens, output_tokens, total_tokens)):
+                                usage_payload = {
+                                    "input_tokens": input_tokens,
+                                    "output_tokens": output_tokens,
+                                    "total_tokens": total_tokens,
+                                }
+                                logger.bind(tag=TAG).info(
+                                    "Token usage (OpenAILLM): "
+                                    f"input={input_tokens}, output={output_tokens}, total={total_tokens}"
+                                )
                         break
+
+                if usage_payload:
+                    yield {"__usage__": usage_payload}
 
         except Exception as e:
             logger.bind(tag=TAG).error(f"Error in response generation: {e}")
@@ -181,6 +207,7 @@ class LLMProvider(LLMProviderBase):
             
             final_input = list(dialogue) + list(extra_inputs) if extra_inputs else dialogue
             
+            usage_payload = None
             with self.client.responses.stream(
                 model=self.model_name,
                 input=final_input,
@@ -246,6 +273,28 @@ class LLMProvider(LLMProviderBase):
                         pass
                     
                     elif event_type == "response.completed":
+                        response_obj = getattr(event, "response", None)
+                        usage = getattr(response_obj, "usage", None)
+                        if usage is not None:
+                            if isinstance(usage, dict):
+                                input_tokens = usage.get("input_tokens")
+                                output_tokens = usage.get("output_tokens")
+                                total_tokens = usage.get("total_tokens")
+                            else:
+                                input_tokens = getattr(usage, "input_tokens", None)
+                                output_tokens = getattr(usage, "output_tokens", None)
+                                total_tokens = getattr(usage, "total_tokens", None)
+
+                            if any(v is not None for v in (input_tokens, output_tokens, total_tokens)):
+                                usage_payload = {
+                                    "input_tokens": input_tokens,
+                                    "output_tokens": output_tokens,
+                                    "total_tokens": total_tokens,
+                                }
+                                logger.bind(tag=TAG).info(
+                                    "Token usage (OpenAILLM): "
+                                    f"input={input_tokens}, output={output_tokens}, total={total_tokens}"
+                                )
                         break
 
                 # Emit consolidated function call if we collected one
@@ -268,6 +317,9 @@ class LLMProvider(LLMProviderBase):
                             logger.bind(tag=TAG).warning(
                                 f"Invalid JSON in function arguments: {args[:100]}"
                             )
+
+                if usage_payload:
+                    yield {"__usage__": usage_payload}, None
 
         except Exception as e:
             logger.bind(tag=TAG).error(f"Error in function call streaming: {e}")

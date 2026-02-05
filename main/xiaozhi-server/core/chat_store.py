@@ -142,3 +142,26 @@ class ChatStore:
                     f"[ChatStore] update_session_conversation_id rowcount={cur.rowcount}"
                 )
 
+    def update_token_usage(self, session_id: str, token_usage: int):
+        if token_usage is None:
+            return
+        if self.logger:
+            self.logger.info(
+                f"[ChatStore] update_token_usage(session_id={session_id}, token_usage={token_usage})"
+            )
+
+        with get_db() as db:
+            cur = db.execute(
+                """
+                UPDATE sessions
+                SET token_usage = ?
+                WHERE session_id = ?
+                """,
+                (token_usage, session_id),
+            )
+
+            if self.logger:
+                self.logger.info(
+                    f"[ChatStore] update_token_usage rowcount={cur.rowcount}"
+                )
+

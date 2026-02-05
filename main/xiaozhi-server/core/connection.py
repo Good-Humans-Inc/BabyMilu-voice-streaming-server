@@ -1464,6 +1464,33 @@ class ConnectionHandler:
         self.client_abort = False
         emotion_flag = True
 
+        def record_token_usage(usage: Dict[str, Any]):
+            if not usage:
+                return
+            input_tokens = usage.get("input_tokens")
+            output_tokens = usage.get("output_tokens")
+            total_tokens = usage.get("total_tokens")
+
+            try:
+                input_val = int(input_tokens) if input_tokens is not None else None
+            except (ValueError, TypeError):
+                input_val = None
+            try:
+                output_val = int(output_tokens) if output_tokens is not None else None
+            except (ValueError, TypeError):
+                output_val = None
+
+            if total_tokens is None and (input_val is not None or output_val is not None):
+                total_tokens = (input_val or 0) + (output_val or 0)
+
+            self.logger.bind(tag=TAG).info(
+                "Token usage (OpenAILLM): "
+                f"input={input_val}, output={output_val}, total={total_tokens}"
+            )
+
+            if total_tokens is not None:
+                self.chat_store.update_token_usage(self.session_id, int(total_tokens))
+
         for response in llm_responses:
             if self.client_abort:
                 self.logger.bind(tag=TAG).info(
@@ -1472,6 +1499,9 @@ class ConnectionHandler:
                 break
             if self.intent_type == "function_call" and functions is not None:
                 content, tools_call = response
+                if isinstance(content, dict) and "__usage__" in content:
+                    record_token_usage(content.get("__usage__"))
+                    continue
                 if tools_call is not None and len(tools_call) > 0:
                     try:
                         arg_sample = ""
@@ -1512,6 +1542,9 @@ class ConnectionHandler:
                         function_arguments += tools_call[0].function.arguments
             else:
                 content = response
+                if isinstance(content, dict) and "__usage__" in content:
+                    record_token_usage(content.get("__usage__"))
+                    continue
 
             if emotion_flag and content is not None and content.strip():
                 asyncio.run_coroutine_threadsafe(
