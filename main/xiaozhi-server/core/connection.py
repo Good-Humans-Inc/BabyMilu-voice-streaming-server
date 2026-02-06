@@ -50,13 +50,12 @@ from core.utils.firestore_client import (
     extract_user_profile_fields,
     get_conversation_state_for_device,
     update_conversation_state_for_device,
-    get_most_recent_character_via_user_for_device,
+    get_most_recent_character_via_user_for_device
 )
-
 from services.session_context import store as session_context_store
 from services.alarms.config import MODE_CONFIG
 
-
+from core.utils.api_client import query_task, get_assigned_tasks_for_user, process_user_action
 TAG = __name__
 
 auto_import_modules("plugins_func.functions")
@@ -117,6 +116,7 @@ class ConnectionHandler:
         _asr,
         _llm,
         _memory,
+        _task,
         _intent,
         server=None,
     ):
@@ -175,6 +175,7 @@ class ConnectionHandler:
         self._vad = _vad
         self.llm = _llm
         self.memory = _memory
+        self.task = _task
         self.intent = _intent
 
         # 声纹识别
@@ -386,15 +387,15 @@ class ConnectionHandler:
 
             # 初始化活动时间戳
             self.last_activity_time = time.time() * 1000
-
             # ---- SAFE DEFAULTS ----
             user_id = f"device:{self.device_id}"
             user_name = "Unknown User"
             new_prompt = self.config.get("prompt", "")
 
-
+            # 从云端获取角色配置（voice, bio 等），并应用到本次会话
             try:
                 char_id = None
+                fields = {}
                 if self.device_id:
                     self.logger.bind(tag=TAG).info(f"🔍 Looking up device: {self.device_id}")
                     char_id = get_active_character_for_device(self.device_id)
@@ -431,7 +432,6 @@ class ConnectionHandler:
 
                     if fields.get("bio"):
                         new_prompt += f"\nUser's description of you: {fields['bio']}"
-
                 else:
                     self.logger.bind(tag=TAG, device_id=self.device_id).warning(
                         "MISSING activeCharacterId; using defaults"
@@ -448,6 +448,36 @@ class ConnectionHandler:
                     user_fields = extract_user_profile_fields(user_doc or {})
                     user_name = user_fields.get("name") or owner_phone
                     self.logger.bind(tag=TAG).info(f"👤 User name: {user_name}")
+
+                    # Append user profile to prompt
+                    user_parts = []
+                    for label, key in (
+                        ("User's name", "name"),
+                        ("User's Birthday", "birthday"),
+                        ("User's Pronouns", "pronouns"),
+                    ):
+                        val = user_fields.get(key)
+                        if val:
+                            user_parts.append(f"{label}: {val}")
+                    if user_parts:
+                        new_prompt += "\nUser profile:\n" + "\n- ".join(user_parts)
+
+                    # 使用未完成任务的记忆
+                    try:
+                        task_str = query_task(
+                            owner_phone,
+                            fields.get("name") if isinstance(fields, dict) else None,
+                            user_fields.get("name") if isinstance(user_fields, dict) else None,
+                        )
+                        if task_str:
+                            display_name = user_fields.get("name") or "User"
+                            new_prompt += (
+                                f"\n{display_name} might be trying to accomplish these tasks:\n {task_str}"
+                            )
+                    except Exception as task_err:
+                        self.logger.bind(tag=TAG).warning(
+                            f"Failed to query tasks for prompt injection: {task_err}"
+                        )
                 else:
                     self.logger.bind(tag=TAG).warning(
                         f"❌ No owner phone found for device {self.device_id}, using fallback user_id: {user_id}"
@@ -559,9 +589,464 @@ class ConnectionHandler:
                         f"强制关闭连接时出错: {close_error}"
                     )
 
+    def get_current_conversation(self):
+        """
+        获取当前websocket连接中的对话历史
+        
+        Returns:
+            list: 对话历史列表，包含所有消息
+                 返回格式: [{"role": "user/assistant/system", "content": "..."}, ...]
+            None: 如果对话为空或出错
+        """
+        try:
+            if self.dialogue:
+                # 获取完整的对话历史
+                conversation = self.dialogue.get_llm_dialogue()
+                self.logger.bind(tag=TAG).debug(
+                    f"获取当前对话历史，共 {len(conversation)} 条消息"
+                )
+                return conversation
+            else:
+                self.logger.bind(tag=TAG).warning("对话对象不存在")
+                return None
+        except Exception as e:
+            self.logger.bind(tag=TAG).error(f"获取对话历史失败: {e}")
+            return None
+    
+    def generate_ai_conversation_summary(self):
+        """
+        使用LLM生成对话内容的AI摘要
+        
+        Returns:
+            str: AI生成的对话摘要文本，如果失败则返回None
+        """
+        try:
+            if not self.llm:
+                self.logger.bind(tag=TAG).warning("LLM未初始化，无法生成AI摘要")
+                return None
+            
+            conversation = self.get_current_conversation()
+            if not conversation or len(conversation) == 0:
+                self.logger.bind(tag=TAG).debug("对话为空，跳过AI摘要生成")
+                return None
+            
+            # 过滤掉system消息，只保留用户和助手的对话
+            filtered_conv = [msg for msg in conversation if msg.get("role") in ["user", "assistant"]]
+            
+            if len(filtered_conv) == 0:
+                self.logger.bind(tag=TAG).debug("没有用户对话内容，跳过AI摘要生成")
+                return None
+            
+            # 构建对话历史文本
+            conv_text = ""
+            for msg in filtered_conv:
+                role = "User" if msg.get("role") == "user" else "Assistant"
+                content = msg.get("content", "")
+                conv_text += f"{role}: {content}\n"
+            
+            # 构建摘要请求
+            summary_prompt = [
+                {
+                    "role": "user",
+                    "content": f"Please provide a concise summary of the following conversation, focusing on key information and themes. Keep the summary under 100 words.\n\nConversation:\n{conv_text}\n\nProvide summary:"
+                }
+            ]
+            
+            # 调用LLM生成摘要
+            summary_parts = []
+            llm_responses = self.llm.response(
+                f"{self.session_id}_summary",
+                summary_prompt,
+                stateless=True  # 使用无状态模式，不保存这次摘要对话
+            )
+            
+            for response in llm_responses:
+                if response:
+                    summary_parts.append(response)
+            
+            summary = "".join(summary_parts).strip()
+            
+            if summary:
+                self.logger.bind(tag=TAG).info(f"AI对话摘要生成成功: {summary[:50]}...")
+                return summary
+            else:
+                self.logger.bind(tag=TAG).warning("AI摘要生成为空")
+                return None
+                
+        except Exception as e:
+            self.logger.bind(tag=TAG).error(f"生成AI对话摘要失败: {e}")
+            return None
+    
+    def check_conversation_against_tasks(self, user_id: str):
+        """
+        检查当前对话内容是否匹配用户的已分配任务
+        
+        Args:
+            user_id: 用户ID，用于获取分配的任务列表
+            
+        Returns:
+            list: 匹配的任务列表，每个任务包含任务信息和匹配原因
+                 格式: [{"task_id": "...", "task_title": "...", "match_reason": "..."}, ...]
+        """
+        try:
+            if not self.llm:
+                self.logger.bind(tag=TAG).warning("LLM未初始化，无法检查任务匹配")
+                return []
+            
+            # 获取用户分配的任务
+            tasks = get_assigned_tasks_for_user(user_id)
+            if not tasks or len(tasks) == 0:
+                self.logger.bind(tag=TAG).debug(f"用户 {user_id} 没有分配的任务")
+                return []
+            
+            # 获取当前对话
+            conversation = self.get_current_conversation()
+            if not conversation or len(conversation) == 0:
+                self.logger.bind(tag=TAG).debug("对话为空，跳过任务匹配")
+                return []
+            
+            # 过滤对话，只保留用户和助手的消息
+            filtered_conv = [msg for msg in conversation if msg.get("role") in ["user", "assistant"]]
+            if len(filtered_conv) == 0:
+                self.logger.bind(tag=TAG).debug("没有用户对话内容，跳过任务匹配")
+                return []
+            
+            # 构建对话历史文本
+            conv_text = ""
+            for msg in filtered_conv:
+                role = "User" if msg.get("role") == "user" else "Assistant"
+                content = msg.get("content", "")
+                conv_text += f"{role}: {content}\n"
+            
+            # 构建任务列表文本
+            tasks_text = ""
+            for idx, task in enumerate(tasks, 1):
+                task_id = task.get("id", "unknown")
+                task_title = task.get("title", "No title")
+                action_config = task.get("actionConfig", {})
+                action = action_config.get("action", "N/A")
+                tasks_text += f"{idx}. ID: {task_id}\n   Title: {task_title}\n   Action: {action}\n\n"
+            
+            # 构建LLM提示词
+            matching_prompt = [
+                {
+                    "role": "user",
+                    "content": f"""Analyze the following conversation and determine if the content is related to any of the user's assigned tasks.
+
+Conversation:
+{conv_text}
+
+User's assigned tasks:
+{tasks_text}
+
+Carefully analyze the conversation content to determine if any of the above tasks were discussed, mentioned, or completed.
+If there are matching tasks, return a JSON array with the following format:
+[
+  {{"task_id": "task ID", "task_action": "action from actionConfig", "match_reason": "brief explanation of why the conversation relates to this task"}}
+]
+
+If no tasks match, return an empty array: []
+
+Return ONLY the JSON array, no other explanation."""
+                }
+            ]
+            
+            # 调用LLM进行任务匹配
+            response_parts = []
+            llm_responses = self.llm.response(
+                f"{self.session_id}_task_match",
+                matching_prompt,
+                stateless=True
+            )
+            
+            for response in llm_responses:
+                if response:
+                    response_parts.append(response)
+            
+            response_text = "".join(response_parts).strip()
+            
+            # 解析JSON响应
+            import json
+            try:
+                # 尝试提取JSON数组
+                if "[" in response_text and "]" in response_text:
+                    start_idx = response_text.find("[")
+                    end_idx = response_text.rfind("]") + 1
+                    json_str = response_text[start_idx:end_idx]
+                    matched_tasks = json.loads(json_str)
+                    
+                    if matched_tasks and len(matched_tasks) > 0:
+                        self.logger.bind(tag=TAG).info(
+                            f"Detected {len(matched_tasks)} matching tasks: {[t.get('task_action') for t in matched_tasks]}"
+                        )
+                        return matched_tasks
+                    else:
+                        self.logger.bind(tag=TAG).debug("No tasks matched in the conversation")
+                        return []
+                else:
+                    self.logger.bind(tag=TAG).debug("LLM响应中未找到JSON格式")
+                    # TODO try again
+                    return []
+            except json.JSONDecodeError as e:
+                self.logger.bind(tag=TAG).warning(f"解析任务匹配JSON失败: {e}, 响应内容: {response_text[:200]}")
+                return []
+                
+        except Exception as e:
+            self.logger.bind(tag=TAG).error(f"检查对话任务匹配失败: {e}")
+            return []
+
+    def get_current_conversation(self):
+        """
+        获取当前websocket连接中的对话历史
+        
+        Returns:
+            list: 对话历史列表，包含所有消息
+                 返回格式: [{"role": "user/assistant/system", "content": "..."}, ...]
+            None: 如果对话为空或出错
+        """
+        try:
+            if self.dialogue:
+                # 获取完整的对话历史
+                conversation = self.dialogue.get_llm_dialogue()
+                self.logger.bind(tag=TAG).debug(
+                    f"获取当前对话历史，共 {len(conversation)} 条消息"
+                )
+                return conversation
+            else:
+                self.logger.bind(tag=TAG).warning("对话对象不存在")
+                return None
+        except Exception as e:
+            self.logger.bind(tag=TAG).error(f"获取对话历史失败: {e}")
+            return None
+    
+    def generate_ai_conversation_summary(self):
+        """
+        使用LLM生成对话内容的AI摘要
+        
+        Returns:
+            str: AI生成的对话摘要文本，如果失败则返回None
+        """
+        try:
+            if not self.llm:
+                self.logger.bind(tag=TAG).warning("LLM未初始化，无法生成AI摘要")
+                return None
+            
+            conversation = self.get_current_conversation()
+            if not conversation or len(conversation) == 0:
+                self.logger.bind(tag=TAG).debug("对话为空，跳过AI摘要生成")
+                return None
+            
+            # 过滤掉system消息，只保留用户和助手的对话
+            filtered_conv = [msg for msg in conversation if msg.get("role") in ["user", "assistant"]]
+            
+            if len(filtered_conv) == 0:
+                self.logger.bind(tag=TAG).debug("没有用户对话内容，跳过AI摘要生成")
+                return None
+            
+            # 构建对话历史文本
+            conv_text = ""
+            for msg in filtered_conv:
+                role = "User" if msg.get("role") == "user" else "Assistant"
+                content = msg.get("content", "")
+                conv_text += f"{role}: {content}\n"
+            
+            # 构建摘要请求
+            summary_prompt = [
+                {
+                    "role": "user",
+                    "content": f"Please provide a concise summary of the following conversation, focusing on key information and themes. Keep the summary under 100 words.\n\nConversation:\n{conv_text}\n\nProvide summary:"
+                }
+            ]
+            
+            # 调用LLM生成摘要
+            summary_parts = []
+            llm_responses = self.llm.response(
+                f"{self.session_id}_summary",
+                summary_prompt,
+                stateless=True  # 使用无状态模式，不保存这次摘要对话
+            )
+            
+            for response in llm_responses:
+                if response:
+                    summary_parts.append(response)
+            
+            summary = "".join(summary_parts).strip()
+            
+            if summary:
+                self.logger.bind(tag=TAG).info(f"AI对话摘要生成成功: {summary[:50]}...")
+                return summary
+            else:
+                self.logger.bind(tag=TAG).warning("AI摘要生成为空")
+                return None
+                
+        except Exception as e:
+            self.logger.bind(tag=TAG).error(f"生成AI对话摘要失败: {e}")
+            return None
+    
+    def check_conversation_against_tasks(self, user_id: str):
+        """
+        检查当前对话内容是否匹配用户的已分配任务
+        
+        Args:
+            user_id: 用户ID，用于获取分配的任务列表
+            
+        Returns:
+            list: 匹配的任务列表，每个任务包含任务信息和匹配原因
+                 格式: [{"task_id": "...", "task_title": "...", "match_reason": "..."}, ...]
+        """
+        try:
+            if not self.llm:
+                self.logger.bind(tag=TAG).warning("LLM未初始化，无法检查任务匹配")
+                return []
+            
+            # 获取用户分配的任务
+            tasks = get_assigned_tasks_for_user(user_id)
+            if not tasks or len(tasks) == 0:
+                self.logger.bind(tag=TAG).debug(f"用户 {user_id} 没有分配的任务")
+                return []
+            
+            # 获取当前对话
+            conversation = self.get_current_conversation()
+            if not conversation or len(conversation) == 0:
+                self.logger.bind(tag=TAG).debug("对话为空，跳过任务匹配")
+                return []
+            
+            # 过滤对话，只保留用户和助手的消息
+            filtered_conv = [msg for msg in conversation if msg.get("role") in ["user", "assistant"]]
+            if len(filtered_conv) == 0:
+                self.logger.bind(tag=TAG).debug("没有用户对话内容，跳过任务匹配")
+                return []
+            
+            # 构建对话历史文本
+            conv_text = ""
+            for msg in filtered_conv:
+                role = "User" if msg.get("role") == "user" else "Assistant"
+                content = msg.get("content", "")
+                conv_text += f"{role}: {content}\n"
+            
+            # 构建任务列表文本
+            tasks_text = ""
+            for idx, task in enumerate(tasks, 1):
+                task_id = task.get("id", "unknown")
+                task_title = task.get("title", "No title")
+                action_config = task.get("actionConfig", {})
+                action = action_config.get("action", "N/A")
+                tasks_text += f"{idx}. ID: {task_id}\n   Title: {task_title}\n   Action: {action}\n\n"
+            
+            # 构建LLM提示词
+            matching_prompt = [
+                {
+                    "role": "user",
+                    "content": f"""Analyze the following conversation and determine if the content is related to any of the user's assigned tasks.
+
+Conversation:
+{conv_text}
+
+User's assigned tasks:
+{tasks_text}
+
+Carefully analyze the conversation content to determine if any of the above tasks were discussed, mentioned, or completed.
+If there are matching tasks, return a JSON array with the following format:
+[
+  {{"task_id": "task ID", "task_action": "action from actionConfig", "match_reason": "brief explanation of why the conversation relates to this task"}}
+]
+
+If no tasks match, return an empty array: []
+
+Return ONLY the JSON array, no other explanation."""
+                }
+            ]
+            
+            # 调用LLM进行任务匹配
+            response_parts = []
+            llm_responses = self.llm.response(
+                f"{self.session_id}_task_match",
+                matching_prompt,
+                stateless=True
+            )
+            
+            for response in llm_responses:
+                if response:
+                    response_parts.append(response)
+            
+            response_text = "".join(response_parts).strip()
+            
+            # 解析JSON响应
+            import json
+            try:
+                # 尝试提取JSON数组
+                if "[" in response_text and "]" in response_text:
+                    start_idx = response_text.find("[")
+                    end_idx = response_text.rfind("]") + 1
+                    json_str = response_text[start_idx:end_idx]
+                    matched_tasks = json.loads(json_str)
+                    
+                    if matched_tasks and len(matched_tasks) > 0:
+                        self.logger.bind(tag=TAG).info(
+                            f"Detected {len(matched_tasks)} matching tasks: {[t.get('task_action') for t in matched_tasks]}"
+                        )
+                        return matched_tasks
+                    else:
+                        self.logger.bind(tag=TAG).debug("No tasks matched in the conversation")
+                        return []
+                else:
+                    self.logger.bind(tag=TAG).debug("LLM响应中未找到JSON格式")
+                    # TODO try again
+                    return []
+            except json.JSONDecodeError as e:
+                self.logger.bind(tag=TAG).warning(f"解析任务匹配JSON失败: {e}, 响应内容: {response_text[:200]}")
+                return []
+                
+        except Exception as e:
+            self.logger.bind(tag=TAG).error(f"检查对话任务匹配失败: {e}")
+            return []
+
     async def _save_and_close(self, ws):
         """保存记忆并关闭连接"""
         try:
+            # 获取并记录对话摘要（包含AI生成的摘要和任务匹配）
+            if self.dialogue:
+                # 使用线程池异步完成task
+                def complete_task_task():
+                    try:
+                        conversation = self.dialogue.get_llm_dialogue()
+                        if conversation:
+                            user_msgs = sum(1 for msg in conversation if msg.get("role") == "user")
+                            assistant_msgs = sum(1 for msg in conversation if msg.get("role") == "assistant")
+                            
+                            # 生成AI摘要
+                            ai_summary = self.generate_ai_conversation_summary()
+                            
+                            # 检查任务匹配
+                            matched_tasks = []
+                            try:
+                                # 获取用户ID (使用owner_phone作为user_id)
+                                if self.device_id:
+                                    owner_phone = get_owner_phone_for_device(self.device_id)
+                                    if owner_phone:
+                                        matched_tasks = self.check_conversation_against_tasks(owner_phone)
+                                        process_user_action(owner_phone, matched_tasks)
+                            except Exception as task_err:
+                                self.logger.bind(tag=TAG).warning(f"检查任务匹配失败: {task_err}")
+                            
+                            # 记录对话信息
+                            log_msg = (
+                                f"会话结束 - Session: {self.session_id}, Device: {self.device_id}, "
+                                f"总消息: {len(conversation)}, 用户: {user_msgs}, 助手: {assistant_msgs}"
+                            )
+                            
+                            if ai_summary:
+                                log_msg += f"\nAI摘要: {ai_summary}"
+                            
+                            if matched_tasks and len(matched_tasks) > 0:
+                                log_msg += f"\nMatched tasks ({len(matched_tasks)}):"
+                                for task in matched_tasks:
+                                    log_msg += f"\n  - Action: {task.get('task_action')} (ID: {task.get('task_id')}): {task.get('match_reason')}"
+                            
+                            self.logger.bind(tag=TAG).info(log_msg)
+                    except Exception as e:
+                        self.logger.bind(tag=TAG).warning(f"获取对话摘要失败: {e}")
+                threading.Thread(target=complete_task_task, daemon=True).start()
             try:
                 self._persist_conversation_state_before_close()
             except Exception as conv_err:
@@ -570,6 +1055,7 @@ class ConnectionHandler:
                 )
             if self.memory:
                 def save_memory_task():
+                    loop = None
                     try:
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
@@ -579,15 +1065,20 @@ class ConnectionHandler:
                     except Exception as e:
                         self.logger.bind(tag=TAG).error(f"保存记忆失败: {e}")
                     finally:
-                        if self._session_created and not self._session_closed:
-                            self.chat_store.end_session(self.session_id)
-                            self._session_closed = True
                         try:
-                            loop.close()
+                            if loop:
+                                loop.close()
                         except Exception:
                             pass
 
                 threading.Thread(target=save_memory_task, daemon=True).start()
+
+            # Ensure session is ended even if memory saving is disabled or fails
+            if getattr(self, "_session_created", False) and not getattr(self, "_session_closed", False):
+                try:
+                    self.chat_store.end_session(self.session_id)
+                finally:
+                    self._session_closed = True
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"保存记忆失败: {e}")
         finally:
@@ -831,7 +1322,13 @@ class ConnectionHandler:
             self.logger.bind(tag=TAG).error(f"获取差异化配置失败: {e}")
             private_config = {}
 
-        init_llm = init_tts = init_memory = init_intent = False
+        init_llm, init_tts, init_memory, init_intent, init_task = (
+            False,
+            False,
+            False,
+            False,
+            False,
+        )
         init_vad = check_vad_update(self.common_config, private_config)
         init_asr = check_asr_update(self.common_config, private_config)
 
@@ -859,8 +1356,15 @@ class ConnectionHandler:
         if private_config.get("Memory") is not None:
             init_memory = True
             self.config["Memory"] = private_config["Memory"]
-            self.config["selected_module"]["Memory"] = private_config["selected_module"]["Memory"]
-
+            self.config["selected_module"]["Memory"] = private_config[
+                "selected_module"
+            ]["Memory"]
+        if private_config.get("Task", None) is not None:
+            init_task = True
+            self.config["Task"] = private_config["Task"]
+            self.config["selected_module"]["Task"] = private_config["selected_module"][
+                "Task"
+            ]
         if private_config.get("Intent") is not None:
             init_intent = True
             self.config["Intent"] = private_config["Intent"]
@@ -898,6 +1402,7 @@ class ConnectionHandler:
                 init_tts,
                 init_memory,
                 init_intent,
+                init_task,
             )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"初始化组件失败: {e}")
@@ -925,7 +1430,12 @@ class ConnectionHandler:
             summary_memory=self.config.get("summaryMemory", None),
             save_to_file=not self.read_config_from_api,
         )
-
+        """初始化任务模块"""
+        self.task.init_task(
+            role_id=self.device_id,
+            llm=self.llm,
+        )
+        # 获取记忆总结配置
         memory_config = self.config["Memory"]
         memory_type = memory_config[self.config["selected_module"]["Memory"]]["type"]
 
@@ -946,8 +1456,12 @@ class ConnectionHandler:
                 self.logger.bind(tag=TAG).info(
                     f"为记忆总结创建了专用LLM: {memory_llm_name}, 类型: {memory_llm_type}"
                 )
+                # 设置任务模块的LLM
+                self.task.set_llm(memory_llm)
                 self.memory.set_llm(memory_llm)
             else:
+                # 否则使用主LLM
+                self.task.set_llm(self.llm)
                 self.memory.set_llm(self.llm)
                 self.logger.bind(tag=TAG).info("使用主LLM作为意图识别模型")
 

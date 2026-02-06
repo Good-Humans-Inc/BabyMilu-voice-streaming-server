@@ -271,3 +271,20 @@ class LLMProvider(LLMProviderBase):
 
         except Exception as e:
             logger.bind(tag=TAG).error(f"Error in function call streaming: {e}")
+            yield f"【OpenAI服务响应异常: {e}】", None
+
+    def response_with_structured_output(self, dialogue, structured_output, **kwargs):
+        try:
+            completion = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=dialogue,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                response_format=structured_output
+            )
+            
+            response_text = completion.choices[0].message.content
+            return response_text
+        except Exception as e:
+            logger.bind(tag=TAG).error(f"Error in structured output streaming: {e}")
+            return f"【OpenAI服务响应异常: {e}】"
