@@ -49,15 +49,12 @@ from core.utils.firestore_client import (
     extract_user_profile_fields,
     get_conversation_state_for_device,
     update_conversation_state_for_device,
-    get_most_recent_character_via_user_for_device,
-    get_assigned_tasks_for_user,
-    process_user_action,
+    get_most_recent_character_via_user_for_device
 )
-
 from services.session_context import store as session_context_store
 from services.alarms.config import MODE_CONFIG
 
-from core.utils.api_client import query_task
+from core.utils.api_client import query_task, get_assigned_tasks_for_user, process_user_action
 TAG = __name__
 
 auto_import_modules("plugins_func.functions")
@@ -1007,48 +1004,6 @@ Return ONLY the JSON array, no other explanation."""
                 self.logger.bind(tag=TAG).warning(
                     f"Failed to persist conversation metadata: {conv_err}"
                 )
-            if self.memory:
-                def save_memory_task():
-                    try:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        owner_phone = get_owner_phone_for_device(self.device_id)
-                        
-                        # Build list of coroutines to run
-                        coroutines = [self.memory.save_memory(self.dialogue.dialogue)]
-                        char_id = None
-                        if self.device_id:
-                            char_id = get_active_character_for_device(self.device_id)
-                            if not char_id:
-                                fallback_id = get_most_recent_character_via_user_for_device(self.device_id)
-                                if fallback_id:
-                                    self.logger.bind(tag=TAG, device_id=self.device_id).warning(
-                                        f"activeCharacterId missing; falling back to most recent user character: {fallback_id}"
-                                    )
-                                    char_id = fallback_id
-                        if char_id:
-                            self.logger.info(f"char_id={char_id!r}")
-                            char_doc = get_character_profile(char_id)
-                            self.logger.info(f"char_doc_keys={list((char_doc or {}).keys())}")
-                            fields = extract_character_profile_fields(char_doc or {})
-                            character_name = fields.get("name")
-                        # Only add task detection if task provider has the method
-                        if self.task and hasattr(self.task, 'detect_task'):
-                            coroutines.append(
-                                self.task.detect_task(self.dialogue.dialogue, user_id=owner_phone)
-                            )
-                        
-                        # Run all coroutines concurrently
-                        loop.run_until_complete(asyncio.gather(*coroutines))
-                    except Exception as e:
-                        self.logger.bind(tag=TAG).error(f"保存记忆失败: {e}")
-                    finally:
-                        try:
-                            loop.close()
-                        except Exception:
-                            pass
-
-                threading.Thread(target=save_memory_task, daemon=True).start()
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"保存记忆失败: {e}")
         finally:
