@@ -39,8 +39,16 @@
   \        \"Links\": [\"cooking\"],\n        \"RetentionDays\": 30\n      },\n  \
   \    {\n        \"Event\": \"User inquires about well-being\",\n        \"Timestamp\"\
   : \"2026-02-03T13:15:36\",\n        \"EmotionScore\": 0.7,\n        \"Links\": [],\n\
-  \        \"RetentionDays\": 30\n      }\n    ]\n  },\n  \"RelationshipNetwork\"\
+  \        \"RetentionDays\": 30\n      },\n      {\n        \"Event\": \"User is\
+  \ experiencing a challenging time with French homework\",\n        \"Timestamp\"\
+  : \"2026-02-05T11:40:42\",\n        \"EmotionScore\": 0.6,\n        \"Links\": [\"\
+  work\", \"school\"],\n        \"RetentionDays\": 30\n      },\n      {\n       \
+  \ \"Event\": \"User is feeling sleepy but has a lot of work\",\n        \"Timestamp\"\
+  : \"2026-02-05T11:40:42\",\n        \"EmotionScore\": 0.7,\n        \"Links\": [\"\
+  work\"],\n        \"RetentionDays\": 30\n      }\n    ]\n  },\n  \"RelationshipNetwork\"\
   : {\n    \"FrequentTopics\": {\n      \"Cooking\": 3,\n      \"Well-being\": 1,\n\
-  \      \"Conversation\": 1\n    },\n    \"HiddenConnections\": []\n  },\n  \"PendingResponses\"\
-  : {\n    \"UrgentTasks\": [],\n    \"PotentialCare\": []\n  },\n  \"HighlightQuotes\"\
-  : []\n}\n"
+  \      \"Conversation\": 1,\n      \"Homework\": 1,\n      \"Work-life balance\"\
+  : 1\n    },\n    \"HiddenConnections\": []\n  },\n  \"PendingResponses\": {\n  \
+  \  \"UrgentTasks\": [],\n    \"PotentialCare\": [\"Offer support for homework and\
+  \ work-life balance\"]\n  },\n  \"HighlightQuotes\": [\n    \"love u <3\",\n   \
+  \ \"ty you r so nice \U0001F979\"\n  ]\n}\n"
