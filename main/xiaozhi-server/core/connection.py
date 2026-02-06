@@ -50,15 +50,12 @@ from core.utils.firestore_client import (
     extract_user_profile_fields,
     get_conversation_state_for_device,
     update_conversation_state_for_device,
-    get_most_recent_character_via_user_for_device,
-    get_assigned_tasks_for_user,
-    process_user_action,
+    get_most_recent_character_via_user_for_device
 )
-
 from services.session_context import store as session_context_store
 from services.alarms.config import MODE_CONFIG
 
-from core.utils.api_client import query_task
+from core.utils.api_client import query_task, get_assigned_tasks_for_user, process_user_action
 TAG = __name__
 
 auto_import_modules("plugins_func.functions")
