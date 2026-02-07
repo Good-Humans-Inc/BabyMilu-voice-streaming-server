@@ -57,6 +57,7 @@ class PromptManager:
         self.logger = logger or setup_logging()
         self.base_prompt_template = None
         self.last_update_time = 0
+        self._enhanced_prompt_ttl_seconds = 12 * 60 * 60
 
         # 导入全局缓存管理器
         from core.utils.cache.manager import cache_manager, CacheType
@@ -94,6 +95,16 @@ class PromptManager:
                 self.logger.bind(tag=TAG).warning("未找到agent-base-prompt.txt文件")
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"加载提示词模板失败: {e}")
+
+    def _get_enhanced_prompt_cache_key(self, device_id: str) -> str:
+        return f"enhanced_prompt:{device_id}"
+
+    def _get_cached_enhanced_prompt(self, device_id: str) -> str:
+        if not device_id:
+            return ""
+        cache_key = self._get_enhanced_prompt_cache_key(device_id)
+        cached_prompt = self.cache_manager.get(self.CacheType.DEVICE_PROMPT, cache_key)
+        return cached_prompt or ""
 
     def get_quick_prompt(self, user_prompt: str, device_id: str = None) -> str:
         """快速获取系统提示词（使用用户配置）"""
@@ -318,9 +329,16 @@ class PromptManager:
     def update_context_info(self, conn, client_ip: str):
         """同步更新上下文信息"""
         try:
+            device_id = getattr(conn, "device_id", None)
+            cached_enhanced = self._get_cached_enhanced_prompt(device_id)
+            if cached_enhanced:
+                self.logger.bind(tag=TAG).info(
+                    f"Enhanced prompt cache hit for device {device_id}, "
+                    "skipping context update (firestore/weather)"
+                )
+                return
             print(f"[WeatherDebug] update_context_info: start device_id={getattr(conn, 'device_id', None)!r}, client_ip={client_ip!r}")
             # 优先使用用户档案中的城市；否则使用IP定位
-            device_id = getattr(conn, "device_id", None)
             local_address = self._resolve_preferred_location(device_id, client_ip)
             # 将决策后的地址写入缓存（以 client_ip 为键，便于后续读取）
             if client_ip and local_address:
@@ -342,6 +360,14 @@ class PromptManager:
             return user_prompt
 
         try:
+            cached_enhanced = self._get_cached_enhanced_prompt(device_id)
+            if cached_enhanced:
+                self.logger.bind(tag=TAG).info(
+                    f"Enhanced prompt cache hit for device {device_id}, "
+                    "skipping enhanced prompt render"
+                )
+                return cached_enhanced
+
             # 获取最新的时间信息（不缓存）
             tz = get_timezone_for_device(device_id) if device_id else None
             current_time, today_date, today_weekday = self._get_current_time_info(tz or None)
@@ -394,9 +420,12 @@ class PromptManager:
             print(f"[WeatherDebug] build_enhanced_prompt: template has local={contains_local}, weather={contains_weather}")
             print(f"[WeatherDebug] build_enhanced_prompt: values -> local_address={local_address!r}, weather_info={weather_info!r}")
             print(f"[WeatherDebug] build_enhanced_prompt: enhanced prompt length={len(enhanced_prompt)}")
-            device_cache_key = f"device_prompt:{device_id}"
+            device_cache_key = self._get_enhanced_prompt_cache_key(device_id)
             self.cache_manager.set(
-                self.CacheType.DEVICE_PROMPT, device_cache_key, enhanced_prompt
+                self.CacheType.DEVICE_PROMPT,
+                device_cache_key,
+                enhanced_prompt,
+                ttl=self._enhanced_prompt_ttl_seconds,
             )
             self.logger.bind(tag=TAG).info(
                 f"构建增强提示词成功，长度: {len(enhanced_prompt)}"
