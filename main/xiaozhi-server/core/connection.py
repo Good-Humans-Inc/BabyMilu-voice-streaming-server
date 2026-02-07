@@ -438,34 +438,34 @@ class ConnectionHandler:
                         "MISSING activeCharacterId; using defaults"
                     )
 
-                    self.logger.bind(tag=TAG).info(f"🔍 Getting owner phone for device: {self.device_id}")
-                    owner_phone = get_owner_phone_for_device(self.device_id)
-                    self.logger.bind(tag=TAG).info(f"📞 Owner phone result: {owner_phone}")
+                self.logger.bind(tag=TAG).info(f"🔍 Getting owner phone for device: {self.device_id}")
+                owner_phone = get_owner_phone_for_device(self.device_id)
+                self.logger.bind(tag=TAG).info(f"📞 Owner phone result: {owner_phone}")
                 
-                    if owner_phone:
-                        user_id = owner_phone
-                        self.logger.bind(tag=TAG).info(f"✅ Updated user_id to: {user_id}")
-                        user_doc = get_user_profile_by_phone(owner_phone)
-                        user_fields = extract_user_profile_fields(user_doc or {})
-                        user_name = user_fields.get("name") or owner_phone
-                        self.logger.bind(tag=TAG).info(f"👤 User name: {user_name}")
-                        user_parts = []
-                        for label, key in (
-                            ("User's name", "name"),
-                            ("User's Birthday", "birthday"),
-                            ("User's Pronouns", "pronouns"),
-                        ):
-                            val = user_fields.get(key)
-                            if val:
-                                user_parts.append(f"{label}: {val}")
-                        if user_parts:
-                            user_profile = "\n- ".join(user_parts)
-                            new_prompt = new_prompt + f"\nUser profile:\n {user_profile}"
-                        # 使用未完成任务的记忆
-                        task_str = query_task(owner_phone, fields.get("name"), user_fields.get("name"))
-                        
-                        if task_str:
-                            new_prompt = new_prompt + f"\n{user_fields.get('name')} might be trying to accomplish these tasks:\n {task_str}"
+                if owner_phone:
+                    user_id = owner_phone
+                    self.logger.bind(tag=TAG).info(f"✅ Updated user_id to: {user_id}")
+                    user_doc = get_user_profile_by_phone(owner_phone)
+                    user_fields = extract_user_profile_fields(user_doc or {})
+                    user_name = user_fields.get("name") or owner_phone
+                    self.logger.bind(tag=TAG).info(f"👤 User name: {user_name}")
+                    user_parts = []
+                    for label, key in (
+                        ("User's name", "name"),
+                        ("User's Birthday", "birthday"),
+                        ("User's Pronouns", "pronouns"),
+                    ):
+                        val = user_fields.get(key)
+                        if val:
+                            user_parts.append(f"{label}: {val}")
+                    if user_parts:
+                        user_profile = "\n- ".join(user_parts)
+                        new_prompt = new_prompt + f"\nUser profile:\n {user_profile}"
+                    # 使用未完成任务的记忆
+                    task_str = query_task(owner_phone, fields.get("name"), user_fields.get("name"))
+                    
+                    if task_str:
+                        new_prompt = new_prompt + f"\n{user_fields.get('name')} is trying to accomplish these tasks:\n {task_str}"
                 else:
                     self.logger.bind(tag=TAG).warning(
                         f"❌ No owner phone found for device {self.device_id}, using fallback user_id: {user_id}"
