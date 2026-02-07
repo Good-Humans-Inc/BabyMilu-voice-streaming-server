@@ -486,7 +486,7 @@ class ConnectionHandler:
             # ---- PROMPT UPDATE (SAFE) ----
             if new_prompt != self.config.get("prompt", ""):
                 self.config["prompt"] = new_prompt
-                self.change_system_prompt(new_prompt)
+                self.change_system_prompt(new_prompt, prompt_label="base")
 
 
 
@@ -505,13 +505,13 @@ class ConnectionHandler:
                 base_prompt = self.config.get("prompt")
                 if base_prompt is not None:
                     quick = self.prompt_manager.get_quick_prompt(base_prompt)
-                    self.change_system_prompt(quick)
+                    self.change_system_prompt(quick, prompt_label="quick")
                     self.prompt_manager.update_context_info(self, self.client_ip)
                     enhanced = self.prompt_manager.build_enhanced_prompt(
                         self.config["prompt"], self.device_id, self.client_ip
                     )
                     if enhanced:
-                        self.change_system_prompt(enhanced)
+                        self.change_system_prompt(enhanced, prompt_label="enhanced")
                         self.logger.bind(tag=TAG).info("同步构建增强系统提示词完成")
             except Exception as e:
                 self.logger.bind(tag=TAG).warning(f"同步构建系统提示词失败: {e}")
@@ -712,9 +712,9 @@ class ConnectionHandler:
             if self.config.get("prompt") is not None:
                 user_prompt = self.config["prompt"]
                 prompt = self.prompt_manager.get_quick_prompt(user_prompt)
-                self.change_system_prompt(prompt)
+                self.change_system_prompt(prompt, prompt_label="quick_init")
                 self.logger.bind(tag=TAG).info(
-                    f"快速初始化组件: prompt成功: {prompt}..."
+                    "快速初始化组件: prompt渲染完成"
                 )
 
             if self.vad is None:
@@ -754,10 +754,8 @@ class ConnectionHandler:
             self.config["prompt"], self.device_id, self.client_ip
         )
         if enhanced_prompt:
-            self.change_system_prompt(enhanced_prompt)
-            self.logger.bind(tag=TAG).info(
-                f"系统提示词已增强更新: {enhanced_prompt}"
-            )
+            self.change_system_prompt(enhanced_prompt, prompt_label="enhanced_refresh")
+            self.logger.bind(tag=TAG).info("系统提示词已增强更新")
 
     def _init_report_threads(self):
         if not self.read_config_from_api or self.need_bind:
@@ -992,12 +990,11 @@ class ConnectionHandler:
                 self.func_handler._initialize(), self.loop
             )
 
-    def change_system_prompt(self, prompt):
+    def change_system_prompt(self, prompt, prompt_label: Optional[str] = None):
         self.prompt = prompt
         self.dialogue.update_system_message(self.prompt)
-        self.logger.bind(tag=TAG).info(
-            f"Ran change_system_prompt (new prompt length {len(prompt)}） with prompt:\n\n{prompt}\n"
-        )
+        label = prompt_label or "system"
+        self.logger.bind(tag=TAG).info(f"{label} prompt rendered")
 
     # ------------------------------------------------------------------
     # Mode session + conversation/sessionContext integration
