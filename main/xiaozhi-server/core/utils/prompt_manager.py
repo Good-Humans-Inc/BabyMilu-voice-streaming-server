@@ -106,6 +106,9 @@ class PromptManager:
         cached_prompt = self.cache_manager.get(self.CacheType.DEVICE_PROMPT, cache_key)
         return cached_prompt or ""
 
+    def get_cached_enhanced_prompt(self, device_id: str) -> str:
+        return self._get_cached_enhanced_prompt(device_id)
+
     def get_quick_prompt(self, user_prompt: str, device_id: str = None) -> str:
         """快速获取系统提示词（使用用户配置）"""
         device_cache_key = f"device_prompt:{device_id}"
