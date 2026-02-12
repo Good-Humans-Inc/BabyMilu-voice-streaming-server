@@ -10,7 +10,7 @@ def _load_emoji_mapping():
     """
     path = os.path.join(os.path.dirname(__file__), "..", "..", "emoji_mapping_raw.txt")
     m = {}
-    emoji_re = re.compile(r"[\U0001F300-\U0001F9FF\U00002600-\U000027BF]+")
+    emoji_re = re.compile(r"[\U0001F300-\U0001F9FF\U00002600-\U000027BF]")  # single chars
     try:
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
