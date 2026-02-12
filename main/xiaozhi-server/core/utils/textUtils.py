@@ -104,8 +104,9 @@ async def get_emotion(conn, text, send_default=False):
     if llm_emoji is None and not send_default:
         return False
     try:
+        raw_preview = (text[:200] + "…") if len(text) > 200 else text
         conn.logger.bind(tag=TAG).info(
-            f"Emoji mapped: llm={llm_emoji!r} -> emotion={emotion} text={canonical_emoji!r}"
+            f"Emoji mapped: llm={llm_emoji!r} -> emotion={emotion} text={canonical_emoji!r} | llm_raw={raw_preview!r}"
         )
         await conn.websocket.send(
             json.dumps(
