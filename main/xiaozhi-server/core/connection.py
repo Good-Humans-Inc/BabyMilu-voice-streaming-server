@@ -1535,9 +1535,7 @@ Return ONLY the JSON array, no other explanation."""
     def change_system_prompt(self, prompt):
         self.prompt = prompt
         self.dialogue.update_system_message(self.prompt)
-        self.logger.bind(tag=TAG).info(
-            f"Ran change_system_prompt (new prompt length {len(prompt)}） with prompt:\n\n{prompt}\n"
-        )
+        self.logger.bind(tag=TAG).info(f"Ran change_system_prompt (length {len(prompt)})")
 
     # ------------------------------------------------------------------
     # Mode session + conversation/sessionContext integration
