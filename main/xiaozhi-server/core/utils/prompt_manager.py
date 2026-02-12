@@ -24,29 +24,7 @@ WEEKDAY_MAP = {
     "Sunday": "Sunday",
 }
 
-EMOJI_List = [
-    "😶",
-    "🙂",
-    "😆",
-    "😂",
-    "😔",
-    "😠",
-    "😭",
-    "😍",
-    "😳",
-    "😲",
-    "😱",
-    "🤔",
-    "😉",
-    "😎",
-    "😌",
-    "🤤",
-    "😘",
-    "😏",
-    "😴",
-    "😜",
-    "🙄",
-]
+EMOJI_List = "🥺 🥰 😍 😘 😳 🙁 😄 😁 😴 😪 🤩 😭 😡 😤 😠"
 
 
 class PromptManager:
@@ -366,7 +344,7 @@ class PromptManager:
             # 替换模板变量
             template = Template(self.base_prompt_template)
             # 读取用户名称用于 {{user}}
-            user_name = ""
+            user_name = "user"
             try:
                 if device_id:
                     owner_phone = get_owner_phone_for_device(device_id)
@@ -374,9 +352,9 @@ class PromptManager:
                         user_doc = get_user_profile_by_phone(owner_phone)
                         if user_doc:
                             user_fields = extract_user_profile_fields(user_doc)
-                            user_name = user_fields.get("name") or ""
+                            user_name = user_fields.get("name") or "user"
             except Exception:
-                user_name = ""
+                user_name = "user"
             enhanced_prompt = template.render(
                 base_prompt=user_prompt,
                 current_time=current_time,
