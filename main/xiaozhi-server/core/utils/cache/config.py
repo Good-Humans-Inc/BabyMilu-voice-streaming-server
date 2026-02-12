@@ -17,7 +17,6 @@ class CacheType(Enum):
     INTENT = "intent"
     IP_INFO = "ip_info"
     CONFIG = "config"
-    DEVICE_PROMPT = "device_prompt"
     VOICEPRINT_HEALTH = "voiceprint_health"  # 声纹识别健康检查
 
 
@@ -51,9 +50,6 @@ class CacheConfig:
             ),
             CacheType.CONFIG: cls(
                 strategy=CacheStrategy.FIXED_SIZE, ttl=None, max_size=20  # 手动失效
-            ),
-            CacheType.DEVICE_PROMPT: cls(
-                strategy=CacheStrategy.TTL, ttl=None, max_size=1000  # 手动失效
             ),
             CacheType.VOICEPRINT_HEALTH: cls(
                 strategy=CacheStrategy.TTL, ttl=600, max_size=100  # 10分钟过期

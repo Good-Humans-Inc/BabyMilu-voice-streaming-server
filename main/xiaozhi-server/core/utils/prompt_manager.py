@@ -75,24 +75,6 @@ class PromptManager:
 
     def get_quick_prompt(self, user_prompt: str, device_id: str = None) -> str:
         """快速获取系统提示词（使用用户配置）"""
-        device_cache_key = f"device_prompt:{device_id}"
-        cached_device_prompt = self.cache_manager.get(
-            self.CacheType.DEVICE_PROMPT, device_cache_key
-        )
-        if cached_device_prompt is not None:
-            self.logger.bind(tag=TAG).debug(f"使用设备 {device_id} 的缓存提示词")
-            return cached_device_prompt
-        else:
-            self.logger.bind(tag=TAG).debug(
-                f"设备 {device_id} 无缓存提示词，使用传入的提示词"
-            )
-
-        # 使用传入的提示词并缓存（如果有设备ID）
-        if device_id:
-            device_cache_key = f"device_prompt:{device_id}"
-            self.cache_manager.set(self.CacheType.CONFIG, device_cache_key, user_prompt)
-            self.logger.bind(tag=TAG).debug(f"设备 {device_id} 的提示词已缓存")
-
         self.logger.bind(tag=TAG).debug("使用快速提示词")
         return user_prompt
 
@@ -372,10 +354,6 @@ class PromptManager:
             print(f"[WeatherDebug] build_enhanced_prompt: template has local={contains_local}, weather={contains_weather}")
             print(f"[WeatherDebug] build_enhanced_prompt: values -> local_address={local_address!r}, weather_info={weather_info!r}")
             print(f"[WeatherDebug] build_enhanced_prompt: enhanced prompt length={len(enhanced_prompt)}")
-            device_cache_key = f"device_prompt:{device_id}"
-            self.cache_manager.set(
-                self.CacheType.DEVICE_PROMPT, device_cache_key, enhanced_prompt
-            )
             self.logger.bind(tag=TAG).debug("构建增强提示词成功")
             return enhanced_prompt
 
