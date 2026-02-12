@@ -1,6 +1,7 @@
 """服务端插件工具执行器"""
 
 from typing import Dict, Any
+from config.logger import setup_logging
 from ..base import ToolType, ToolDefinition, ToolExecutor
 from plugins_func.register import all_function_registry, Action, ActionResponse
 
@@ -11,6 +12,7 @@ class ServerPluginExecutor(ToolExecutor):
     def __init__(self, conn):
         self.conn = conn
         self.config = conn.config
+        self.logger = setup_logging()
 
     async def execute(
         self, conn, tool_name: str, arguments: Dict[str, Any]
