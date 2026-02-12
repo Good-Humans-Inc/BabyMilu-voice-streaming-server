@@ -1,29 +1,44 @@
 import json
+import os
+import re
 
 TAG = __name__
-EMOJI_MAP = {
-    "😂": "laughing",
-    "😭": "crying",
-    "😠": "angry",
-    "😔": "sad",
-    "😍": "loving",
-    "😲": "surprised",
-    "😱": "shocked",
-    "🤔": "thinking",
-    "😌": "relaxed",
-    "😴": "sleepy",
-    "😜": "silly",
-    "🙄": "confused",
-    "😶": "neutral",
-    "🙂": "happy",
-    "😆": "laughing",
-    "😳": "embarrassed",
-    "😉": "winking",
-    "😎": "cool",
-    "🤤": "delicious",
-    "😘": "kissy",
-    "😏": "confident",
-}
+
+def _load_emoji_mapping():
+    """Load emoji -> (emotion, canonical_emoji) from emoji_mapping_raw.txt"""
+    path = os.path.join(os.path.dirname(__file__), "..", "..", "emoji_mapping_raw.txt")
+    m = {}
+    emoji_re = re.compile(r"[\U0001F300-\U0001F9FF\U00002600-\U000027BF]+")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read().replace("\\\n", " ")
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or "=" not in line:
+                continue
+            label, _, rest = line.partition("=")
+            label = label.strip()
+            emojis = emoji_re.findall(rest)
+            if not emojis:
+                continue
+            canonical = emojis[0]
+            for e in emojis:
+                if e not in m:
+                    m[e] = (label, canonical)
+    except Exception:
+        pass
+    return m if m else {  # fallback
+        "😒": ("smirk", "😒"), "🙂": ("smirk", "😒"),
+    }
+
+EMOJI_MAP = _load_emoji_mapping()
+
+
+def get_emoji_list_for_prompt():
+    """All emojis from right side of emoji_mapping_raw.txt (LLM allowed set). Maps to 9 target emotions."""
+    return " ".join(EMOJI_MAP.keys())
+
+
 EMOJI_RANGES = [
     (0x1F600, 0x1F64F),
     (0x1F300, 0x1F5FF),
@@ -78,20 +93,24 @@ def is_punctuation_or_emoji(char):
 
 
 async def get_emotion(conn, text):
-    """获取文本内的情绪消息"""
-    emoji = "🙂"
-    emotion = "happy"
+    """获取文本内的情绪消息。LLM emoji -> 映射到 emoji_mapping_raw.txt 的 emotion 词和 canonical emoji。"""
+    emotion = "smirk"
+    canonical_emoji = "😒"
+    llm_emoji = None
     for char in text:
         if char in EMOJI_MAP:
-            emoji = char
-            emotion = EMOJI_MAP[char]
+            llm_emoji = char
+            emotion, canonical_emoji = EMOJI_MAP[char]
             break
     try:
+        conn.logger.bind(tag=TAG).info(
+            f"Emoji mapped: llm={llm_emoji!r} -> emotion={emotion} text={canonical_emoji!r}"
+        )
         await conn.websocket.send(
             json.dumps(
                 {
                     "type": "llm",
-                    "text": emoji,
+                    "text": canonical_emoji,
                     "emotion": emotion,
                     "session_id": conn.session_id,
                 }
