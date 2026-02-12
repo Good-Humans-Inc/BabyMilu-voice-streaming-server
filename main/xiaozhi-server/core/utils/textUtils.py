@@ -92,8 +92,8 @@ def is_punctuation_or_emoji(char):
     return is_emoji(char)
 
 
-async def get_emotion(conn, text):
-    """获取文本内的情绪消息。LLM emoji -> 映射到 emoji_mapping_raw.txt 的 emotion 词和 canonical emoji。"""
+async def get_emotion(conn, text, send_default=False):
+    """获取文本内的情绪消息。LLM emoji -> 映射到 emoji_mapping_raw.txt。若未找到且 send_default，则发送默认。返回 True 若已发送。"""
     emotion = "smirk"
     canonical_emoji = "😒"
     llm_emoji = None
@@ -102,6 +102,8 @@ async def get_emotion(conn, text):
             llm_emoji = char
             emotion, canonical_emoji = EMOJI_MAP[char]
             break
+    if llm_emoji is None and not send_default:
+        return False
     try:
         conn.logger.bind(tag=TAG).info(
             f"Emoji mapped: llm={llm_emoji!r} -> emotion={emotion} text={canonical_emoji!r}"
@@ -116,9 +118,10 @@ async def get_emotion(conn, text):
                 }
             )
         )
+        return True
     except Exception as e:
         conn.logger.bind(tag=TAG).warning(f"发送情绪表情失败，错误:{e}")
-    return
+        return False
 
 
 def is_emoji(char):

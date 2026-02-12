@@ -2044,16 +2044,18 @@ Return ONLY the JSON array, no other explanation."""
             else:
                 content = response
 
-            if emotion_flag and content is not None and content.strip():
-                asyncio.run_coroutine_threadsafe(
-                    textUtils.get_emotion(self, content),
-                    self.loop,
-                )
-                emotion_flag = False
-
             if content is not None and len(content) > 0:
                 if not tool_call_flag:
                     response_message.append(content)
+                    accumulated = "".join(response_message)
+                    if emotion_flag and accumulated and any(
+                        c in textUtils.EMOJI_MAP for c in accumulated
+                    ):
+                        asyncio.run_coroutine_threadsafe(
+                            textUtils.get_emotion(self, accumulated),
+                            self.loop,
+                        )
+                        emotion_flag = False
                     self.tts.tts_text_queue.put(
                         TTSMessageDTO(
                             sentence_id=self.sentence_id,
@@ -2144,6 +2146,11 @@ Return ONLY the JSON array, no other explanation."""
 
         if len(response_message) > 0:
             text_buff = "".join(response_message)
+            if emotion_flag and text_buff.strip():
+                asyncio.run_coroutine_threadsafe(
+                    textUtils.get_emotion(self, text_buff, send_default=True),
+                    self.loop,
+                )
             self.tts_MessageText = text_buff
             self.dialogue.put(Message(role="assistant", content=text_buff))
             # ✅ DB: assistant final response (non-tool path)
