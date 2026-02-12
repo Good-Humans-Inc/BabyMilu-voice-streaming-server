@@ -5,31 +5,30 @@ import re
 TAG = __name__
 
 def _load_emoji_mapping():
-    """Load emoji -> (emotion, canonical_emoji) from emoji_mapping_raw.txt"""
+    """Load emoji -> (emotion, canonical_emoji) from emoji_mapping_raw.txt
+    Format: emotion = emoji1emoji2emoji3 (no spaces or special chars needed)
+    """
     path = os.path.join(os.path.dirname(__file__), "..", "..", "emoji_mapping_raw.txt")
     m = {}
     emoji_re = re.compile(r"[\U0001F300-\U0001F9FF\U00002600-\U000027BF]+")
     try:
         with open(path, "r", encoding="utf-8") as f:
-            content = f.read().replace("\\\n", " ")
-        for line in content.splitlines():
-            line = line.strip()
-            if not line or "=" not in line:
-                continue
-            label, _, rest = line.partition("=")
-            label = label.strip()
-            emojis = emoji_re.findall(rest)
-            if not emojis:
-                continue
-            canonical = emojis[0]
-            for e in emojis:
-                if e not in m:
-                    m[e] = (label, canonical)
+            for line in f:
+                line = line.strip()
+                if not line or "=" not in line:
+                    continue
+                label, _, rest = line.partition("=")
+                label = label.strip()
+                emojis = emoji_re.findall(rest.strip())
+                if not emojis:
+                    continue
+                canonical = emojis[0]
+                for e in emojis:
+                    if e not in m:
+                        m[e] = (label, canonical)
     except Exception:
         pass
-    return m if m else {  # fallback
-        "😒": ("smirk", "😒"), "🙂": ("smirk", "😒"),
-    }
+    return m if m else {"😒": ("smirk", "😒"), "🙂": ("smirk", "😒")}
 
 EMOJI_MAP = _load_emoji_mapping()
 
