@@ -1227,9 +1227,7 @@ Return ONLY the JSON array, no other explanation."""
                 user_prompt = self.config["prompt"]
                 prompt = self.prompt_manager.get_quick_prompt(user_prompt)
                 self.change_system_prompt(prompt)
-                self.logger.bind(tag=TAG).info(
-                    f"快速初始化组件: prompt成功: {prompt}..."
-                )
+                self.logger.bind(tag=TAG).info("快速初始化组件: prompt成功")
 
             if self.vad is None:
                 self.vad = self._vad
@@ -1269,9 +1267,7 @@ Return ONLY the JSON array, no other explanation."""
         )
         if enhanced_prompt:
             self.change_system_prompt(enhanced_prompt)
-            self.logger.bind(tag=TAG).info(
-                f"系统提示词已增强更新: {enhanced_prompt}"
-            )
+            self.logger.bind(tag=TAG).info("系统提示词已增强更新")
 
     def _init_report_threads(self):
         if not self.read_config_from_api or self.need_bind:
