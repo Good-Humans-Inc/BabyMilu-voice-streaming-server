@@ -1454,10 +1454,11 @@ Return ONLY the JSON array, no other explanation."""
             save_to_file=not self.read_config_from_api,
         )
         """初始化任务模块"""
-        self.task.init_task(
-            role_id=self.device_id,
-            llm=self.llm,
-        )
+        if self.task is not None:
+            self.task.init_task(
+                role_id=self.device_id,
+                llm=self.llm,
+            )
         # 获取记忆总结配置
         memory_config = self.config["Memory"]
         memory_type = memory_config[self.config["selected_module"]["Memory"]]["type"]
@@ -1480,11 +1481,13 @@ Return ONLY the JSON array, no other explanation."""
                     f"为记忆总结创建了专用LLM: {memory_llm_name}, 类型: {memory_llm_type}"
                 )
                 # 设置任务模块的LLM
-                self.task.set_llm(memory_llm)
+                if self.task is not None:
+                    self.task.set_llm(memory_llm)
                 self.memory.set_llm(memory_llm)
             else:
                 # 否则使用主LLM
-                self.task.set_llm(self.llm)
+                if self.task is not None:
+                    self.task.set_llm(self.llm)
                 self.memory.set_llm(self.llm)
                 self.logger.bind(tag=TAG).info("使用主LLM作为意图识别模型")
 
