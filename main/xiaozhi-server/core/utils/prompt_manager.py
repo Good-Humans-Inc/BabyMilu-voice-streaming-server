@@ -4,7 +4,6 @@
 """
 
 import os
-import requests
 import json
 import cnlunar
 from typing import Dict, Any
@@ -162,116 +161,21 @@ class PromptManager:
         print(f"[WeatherDebug] _resolve_preferred_location: fallback IP city={fallback!r}")
         return fallback
 
-    def _get_weather_info_openweather(self, location_str: str) -> str:
-        """
-        使用 OpenWeather API 获取天气信息。
-        - location_str 期望格式：'City, ST'（美国州代码）
-        - 先用 Direct Geocoding 拿到 lat/lon，再查询当前天气
-        - 输出英文精简描述
-        """
+    def _get_weather_info(self, location: str, client_ip: str = None) -> str:
+        """获取天气信息，使用 get_weather 的 Open-Meteo 逻辑和缓存"""
         try:
-            print(f"[WeatherDebug] _get_weather_info_openweather: input location_str={location_str!r}")
-            if not location_str or "," not in location_str:
-                print(f"[WeatherDebug] _get_weather_info_openweather: invalid location_str")
-                return "Weather unavailable"
-            parts = [p.strip() for p in location_str.split(",", 1)]
-            if len(parts) != 2 or not parts[0] or not parts[1]:
-                print(f"[WeatherDebug] _get_weather_info_openweather: parse parts failed -> {parts}")
-                return "Weather unavailable"
-            city_name, state_code = parts[0], parts[1]
-            print(f"[WeatherDebug] _get_weather_info_openweather: parsed city={city_name!r}, state={state_code!r}")
+            from plugins_func.functions.get_weather import get_weather_report_for_location
 
-            # API Key 优先从环境变量读取，其次从配置读取
-            api_key = (
-                os.environ.get("OPENWEATHER_API_KEY")
-                or (self.config.get("openweather", {}) or {}).get("api_key")
+            return get_weather_report_for_location(
+                location=location,
+                config=self.config,
+                cache_manager=self.cache_manager,
+                client_ip=client_ip,
+                lang="en_US",
             )
-            if not api_key:
-                print(f"[WeatherDebug] _get_weather_info_openweather: no API key found in env or config")
-                return "Weather unavailable"
-            else:
-                print(f"[WeatherDebug] _get_weather_info_openweather: API key present (not printing)")
-
-            # 1) Direct Geocoding
-            geo_url = "http://api.openweathermap.org/geo/1.0/direct"
-            geo_params = {
-                "q": f"{city_name},{state_code},US",
-                "limit": 1,
-                "appid": api_key,
-            }
-            print(f"[WeatherDebug] _get_weather_info_openweather: geocode GET {geo_url} params={ {'q': geo_params.get('q'), 'limit': geo_params.get('limit')} }")
-            geo_resp = requests.get(geo_url, params=geo_params, timeout=5)
-            print(f"[WeatherDebug] _get_weather_info_openweather: geocode status={geo_resp.status_code}")
-            if geo_resp.status_code != 200:
-                return "Weather unavailable"
-            geo_data = geo_resp.json() or []
-            print(f"[WeatherDebug] _get_weather_info_openweather: geocode data length={len(geo_data) if isinstance(geo_data, list) else 'N/A'}")
-            if not isinstance(geo_data, list) or len(geo_data) == 0:
-                return "Weather unavailable"
-            lat = geo_data[0].get("lat")
-            lon = geo_data[0].get("lon")
-            resolved_city = geo_data[0].get("name") or city_name
-            print(f"[WeatherDebug] _get_weather_info_openweather: geocode resolved lat={lat}, lon={lon}, city={resolved_city!r}")
-            if lat is None or lon is None:
-                return "Weather unavailable"
-
-            # 2) Current weather
-            weather_url = "https://api.openweathermap.org/data/2.5/weather"
-            weather_params = {
-                "lat": lat,
-                "lon": lon,
-                "appid": api_key,
-                # 美国地区使用华氏度
-                "units": "imperial",
-            }
-            print(f"[WeatherDebug] _get_weather_info_openweather: weather GET {weather_url} params={ {'lat': lat, 'lon': lon, 'units': 'imperial'} }")
-            w_resp = requests.get(weather_url, params=weather_params, timeout=5)
-            print(f"[WeatherDebug] _get_weather_info_openweather: weather status={w_resp.status_code}")
-            if w_resp.status_code != 200:
-                return "Weather unavailable"
-            w = w_resp.json() or {}
-            weather_list = w.get("weather") or []
-            description = (
-                (weather_list[0] or {}).get("description", "").capitalize()
-                if weather_list
-                else ""
-            )
-            main = w.get("main") or {}
-            temp = main.get("temp")
-            feels = main.get("feels_like")
-            print(f"[WeatherDebug] _get_weather_info_openweather: parsed description={description!r}, temp={temp}, feels_like={feels}")
-            temp_str = f"{round(temp)} Fahrenheit" if isinstance(temp, (int, float)) else ""
-            feels_str = (
-                f"{round(feels)} Fahrenheit" if isinstance(feels, (int, float)) else ""
-            )
-
-            # 组装简洁描述
-            pieces = []
-            if description:
-                pieces.append(description)
-            if temp_str:
-                pieces.append(f"{temp_str}")
-            if feels_str:
-                pieces.append(f"feels {feels_str}")
-            summary = ", ".join(pieces) if pieces else "Weather unavailable"
-
-            # 例如："San Francisco: Clear sky, 62°F, feels 60°F"
-            print(f"[WeatherDebug] _get_weather_info_openweather: summary={summary!r} -> {resolved_city!r}")
-            return f"{resolved_city}: {summary}"
-        except Exception as e:
-            self.logger.bind(tag=TAG).error(f"Failed to fetch weather via OpenWeather: {e}")
-            return "Weather unavailable"
-
-    def _get_weather_info(self, location: str) -> str:
-        """获取天气信息"""
-        try:
-            print(f"[WeatherDebug] _get_weather_info: fetch fresh for location={location!r} (no cache)")
-            # 始终新鲜获取（不使用缓存）
-            return self._get_weather_info_openweather(location)
-
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"Failed to get weather info: {e}")
-            return "Failed to retrieve weather information"
+            return "Weather unavailable"
 
     def update_context_info(self, conn, client_ip: str):
         """同步更新上下文信息"""
@@ -284,8 +188,8 @@ class PromptManager:
             if client_ip and local_address:
                 self.cache_manager.set(self.CacheType.LOCATION, client_ip, local_address)
                 print(f"[WeatherDebug] update_context_info: set LOCATION cache[{client_ip!r}]={local_address!r}")
-            # 获取天气信息（使用全局缓存）
-            self._get_weather_info(local_address)
+            # 获取天气信息（使用 get_weather 的 Open-Meteo 逻辑和缓存）
+            self._get_weather_info(local_address, client_ip)
             print(f"[WeatherDebug] update_context_info: done with local_address={local_address!r}")
             self.logger.bind(tag=TAG).info(f"上下文信息更新完成")
 
@@ -313,8 +217,8 @@ class PromptManager:
             print(f"[WeatherDebug] build_enhanced_prompt: preferred_location={preferred_location!r}")
             if preferred_location:
                 local_address = preferred_location
-                # 始终新鲜获取天气（不使用缓存）
-                weather_info = self._get_weather_info(local_address) or ""
+                # 使用 get_weather 的 Open-Meteo 逻辑和缓存
+                weather_info = self._get_weather_info(local_address, client_ip) or ""
                 print(f"[WeatherDebug] build_enhanced_prompt: weather fetched fresh -> {weather_info!r}")
                 # 将选择的地址也写入 LOCATION 缓存，便于其他模块读取
                 if client_ip:

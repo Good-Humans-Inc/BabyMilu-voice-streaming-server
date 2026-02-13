@@ -130,6 +130,70 @@ def fetch_weather_forecast(latitude, longitude, timezone="auto", forecast_days=7
         return None
 
 
+def get_weather_report_for_location(
+    location: str,
+    config: dict,
+    cache_manager,
+    client_ip: str = None,
+    lang: str = "en_US",
+) -> str:
+    """
+    Get weather report string for a location. Uses Open-Meteo (same as get_weather tool).
+    Used by prompt_manager for {{weather_info}} and shares cache with get_weather.
+    """
+    from core.utils.cache.manager import CacheType
+
+    plugins_cfg = config.get("plugins", {}) or {}
+    get_weather_cfg = plugins_cfg.get("get_weather", {}) or {}
+    default_location = get_weather_cfg.get("default_location", "San Francisco")
+
+    # Resolve location: user-provided -> LOCATION cache -> default
+    if not location and client_ip:
+        resolved = cache_manager.get(CacheType.LOCATION, client_ip)
+        if resolved:
+            location = resolved
+    if not location:
+        location = default_location
+
+    weather_cache_key = f"full_weather_{location}_{lang}"
+    cached = cache_manager.get(CacheType.WEATHER, weather_cache_key)
+    if cached:
+        return cached
+
+    city_info = fetch_city_info(location)
+    if not city_info:
+        return "Weather unavailable"
+
+    weather_data = fetch_weather_forecast(
+        city_info["latitude"],
+        city_info["longitude"],
+        city_info.get("timezone", "auto"),
+        forecast_days=7,
+    )
+    if not weather_data:
+        return "Weather unavailable"
+
+    parsed_info = parse_weather_info(weather_data, city_info)
+    city_name = parsed_info["city_name"]
+    if city_info.get("admin1"):
+        city_name += f", {city_info['admin1']}"
+    if city_info.get("country"):
+        city_name += f", {city_info['country']}"
+
+    weather_report = f"Location queried: {city_name}\n\n"
+    weather_report += f"Current weather: {parsed_info['current_weather']}\n"
+    weather_report += f"Current temperature: {parsed_info['current_temp']}°C\n"
+    weather_report += f"Humidity: {parsed_info['current_humidity']}%\n"
+    weather_report += f"Wind speed: {parsed_info['current_wind']} km/h\n"
+    weather_report += "\n7-day forecast:\n"
+    for date, weather, high, low in parsed_info["temps_list"]:
+        weather_report += f"{date}: {weather}, temperature {low}°C~{high}°C\n"
+    weather_report += "\n(If you need specific weather for a particular day, please tell me the date)"
+
+    cache_manager.set(CacheType.WEATHER, weather_cache_key, weather_report)
+    return weather_report
+
+
 def parse_weather_info(weather_data, city_info):
     """
     Parse Open-Meteo weather data into a structured format.
@@ -181,73 +245,17 @@ def parse_weather_info(weather_data, city_info):
 
 @register_function("get_weather", GET_WEATHER_FUNCTION_DESC, ToolType.SYSTEM_CTL)
 def get_weather(conn, location: str = None, lang: str = "en_US"):
-    from core.utils.cache.manager import cache_manager, CacheType
+    from core.utils.cache.manager import cache_manager
 
-    default_location = conn.config["plugins"]["get_weather"]["default_location"]
-    client_ip = conn.client_ip
-
-    # Priority: use user-provided location parameter
-    if not location:
-        # Try to get location from LOCATION cache (set by prompt manager)
-        if client_ip:
-            cached_location = cache_manager.get(CacheType.LOCATION, client_ip)
-            if cached_location:
-                location = cached_location
-        
-        # If not found in cache, use default location
-        if not location:
-            location = default_location
-    
-    # Try to get full weather report from cache
-    weather_cache_key = f"full_weather_{location}_{lang}"
-    cached_weather_report = cache_manager.get(CacheType.WEATHER, weather_cache_key)
-    if cached_weather_report:
-        return ActionResponse(Action.REQLLM, cached_weather_report, None)
-
-    # Cache miss, get real-time weather data
-    # Step 1: Get city coordinates using Open-Meteo Geocoding API
-    city_info = fetch_city_info(location)
-    if not city_info:
-        return ActionResponse(
-            Action.REQLLM, f"City not found: {location}, please verify the location is correct", None
-        )
-    
-    # Step 2: Get weather forecast using Open-Meteo Forecast API
-    weather_data = fetch_weather_forecast(
-        city_info["latitude"],
-        city_info["longitude"],
-        city_info.get("timezone", "auto"),
-        forecast_days=7
+    weather_report = get_weather_report_for_location(
+        location=location,
+        config=conn.config,
+        cache_manager=cache_manager,
+        client_ip=conn.client_ip,
+        lang=lang,
     )
-    
-    if not weather_data:
-        return ActionResponse(Action.REQLLM, None, "Failed to get weather data")
-    
-    # Step 3: Parse weather data
-    parsed_info = parse_weather_info(weather_data, city_info)
-    
-    # Step 4: Format weather report
-    city_name = parsed_info["city_name"]
-    if city_info.get("admin1"):
-        city_name += f", {city_info['admin1']}"
-    if city_info.get("country"):
-        city_name += f", {city_info['country']}"
-    
-    weather_report = f"Location queried: {city_name}\n\n"
-    weather_report += f"Current weather: {parsed_info['current_weather']}\n"
-    weather_report += f"Current temperature: {parsed_info['current_temp']}°C\n"
-    weather_report += f"Humidity: {parsed_info['current_humidity']}%\n"
-    weather_report += f"Wind speed: {parsed_info['current_wind']} km/h\n"
-
-    # Add 7-day forecast
-    weather_report += "\n7-day forecast:\n"
-    for date, weather, high, low in parsed_info["temps_list"]:
-        weather_report += f"{date}: {weather}, temperature {low}°C~{high}°C\n"
-
-    # Hint message
-    weather_report += "\n(If you need specific weather for a particular day, please tell me the date)"
-
-    # Cache the full weather report
-    cache_manager.set(CacheType.WEATHER, weather_cache_key, weather_report)
-
+    if weather_report == "Weather unavailable":
+        return ActionResponse(
+            Action.REQLLM, f"City not found: {location or 'default'}, please verify the location is correct", None
+        )
     return ActionResponse(Action.REQLLM, weather_report, None)
