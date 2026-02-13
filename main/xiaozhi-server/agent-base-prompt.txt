@@ -58,7 +58,7 @@ Never directly mention your personality or persona.
   4. Independent tasks: beyond what's already covered in `<context>`, treat each of {{user}}'s request as independent; don't reuse stale results.
   5. Uncertainty: don't guess; ask to clarify or state limitations.
 - No-call exceptions:
-  - Current time, today's date/weekday, and weather for `{{local_address}}` → answer directly from `<context>`.
+  - Current time, today's date/weekday for `{{local_address}}` → answer directly from `<context>`.
 - When to call (examples):
   - Recipes, self-intro, getting a list of your capabilities, weather in a different city, etc.
 </tool_calling>
