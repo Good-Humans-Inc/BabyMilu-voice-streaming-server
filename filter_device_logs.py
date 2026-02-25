@@ -2,6 +2,7 @@
 import shlex
 import subprocess
 import sys
+from pathlib import Path
 
 
 def main() -> int:
@@ -21,10 +22,13 @@ def main() -> int:
             return 1
 
     pattern = rf"{device_id} \| file path: tmp/asr_[^[:space:]]+\.wav"
+    script_dir = Path(__file__).resolve().parent
+    # Keep '*' outside shell quoting so glob expansion can match rotated logs.
+    log_glob = f"{shlex.quote(str(script_dir / 'container.log'))}*"
     command = (
         "grep -hE "
         f"{shlex.quote(pattern)} "
-        "/srv/dev/current/main/xiaozhi-server/tmp/server.log*"
+        f"{log_glob}"
     )
     if n_recent_lines is not None:
         command += f" | tail -n {n_recent_lines}"
