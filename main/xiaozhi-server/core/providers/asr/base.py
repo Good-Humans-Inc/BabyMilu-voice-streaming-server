@@ -17,6 +17,7 @@ from core.handle.receiveAudioHandle import startToChat
 from core.handle.reportHandle import enqueue_asr_report
 from core.utils.util import remove_punctuation_and_length
 from core.handle.receiveAudioHandle import handleAudioMessage
+from services import log_context
 
 TAG = __name__
 logger = setup_logging()
@@ -93,6 +94,7 @@ class ASRProviderBase(ABC):
             # 定义ASR任务
             def run_asr():
                 start_time = time.monotonic()
+                device_token = log_context.set_device_id(getattr(conn, "device_id", None))
                 try:
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
@@ -109,6 +111,8 @@ class ASRProviderBase(ABC):
                     end_time = time.monotonic()
                     logger.bind(tag=TAG).error(f"ASR失败: {e}")
                     return ("", None)
+                finally:
+                    log_context.reset_device_id(device_token)
             
             # 定义声纹识别任务
             def run_voiceprint():
