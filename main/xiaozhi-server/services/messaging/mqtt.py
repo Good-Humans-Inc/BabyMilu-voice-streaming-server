@@ -8,6 +8,9 @@ import time
 from paho.mqtt import client as mqtt_client
 from core.utils.mac import normalize_mac
 
+# Module tag for consistent log formatting
+TAG = __name__
+
 # Try to import logger, but make it optional for backward compatibility
 try:
     from services.logging import setup_logging
@@ -16,10 +19,15 @@ except Exception:
     _logger = None
 
 
-def _log(level: str, message: str, *args, **kwargs):
-    """Log message if logger is available."""
+def _log(level: str, message: str, *args, device_id: Optional[str] = None, **kwargs):
+    """Log message if logger is available (and bind device_id when provided)."""
+    # Avoid accidentally passing device_id as a formatting kwarg to Loguru.
+    device_id = kwargs.pop("device_id", device_id)
     if _logger:
-        getattr(_logger, level)(message, *args, **kwargs)
+        log = _logger.bind(tag=TAG)
+        if device_id:
+            log = log.bind(device_id=device_id)
+        getattr(log, level)(message, *args, **kwargs)
     else:
         # Fallback to print if logger not available
         print(f"[{level.upper()}] {message}")
@@ -57,11 +65,19 @@ def publish_ws_start(
     cid = f"serverpub-{(device_mac or '').replace(':','')}-{int(time.time()*1000)}"
     client = mqtt_client.Client(client_id=cid, clean_session=True)
     try:
-        _log("info", f"Connecting to MQTT broker {host}:{port} for device {device_mac}")
+        _log(
+            "info",
+            f"Connecting to MQTT broker {host}:{port} for device {device_mac}",
+            device_id=normalized_mac,
+        )
         client.connect(host, port, keepalive=30)
         client.loop_start()
         
-        _log("info", f"Publishing ws_start to topic {topic} for device {device_mac}")
+        _log(
+            "info",
+            f"Publishing ws_start to topic {topic} for device {device_mac}",
+            device_id=normalized_mac,
+        )
         result = client.publish(topic, json.dumps(payload), qos=0)
         # QoS 0 is fire-and-forget. Avoid false negatives from is_published timing.
         result.wait_for_publish(1.0)
@@ -70,7 +86,11 @@ def publish_ws_start(
         return True
             
     except ConnectionRefusedError as e:
-        _log("error", f"MQTT connection refused to {host}:{port} for device {device_mac}: {e}")
+        _log(
+            "error",
+            f"MQTT connection refused to {host}:{port} for device {device_mac}: {e}",
+            device_id=normalized_mac,
+        )
         try:
             client.loop_stop()
             client.disconnect()
@@ -78,7 +98,11 @@ def publish_ws_start(
             pass
         return False
     except TimeoutError as e:
-        _log("error", f"MQTT connection timeout to {host}:{port} for device {device_mac}: {e}")
+        _log(
+            "error",
+            f"MQTT connection timeout to {host}:{port} for device {device_mac}: {e}",
+            device_id=normalized_mac,
+        )
         try:
             client.loop_stop()
             client.disconnect()
@@ -86,7 +110,11 @@ def publish_ws_start(
             pass
         return False
     except Exception as e:
-        _log("error", f"MQTT publish failed for device {device_mac}: {type(e).__name__}: {e}")
+        _log(
+            "error",
+            f"MQTT publish failed for device {device_mac}: {type(e).__name__}: {e}",
+            device_id=normalized_mac,
+        )
         try:
             client.loop_stop()
             client.disconnect()
@@ -143,11 +171,19 @@ def publish_auto_update(
     cid = f"serverpub-{(device_mac or '').replace(':','')}-{int(time.time()*1000)}"
     client = mqtt_client.Client(client_id=cid, clean_session=True)
     try:
-        _log("info", f"Connecting to MQTT broker {host}:{port} for device {device_mac}")
+        _log(
+            "info",
+            f"Connecting to MQTT broker {host}:{port} for device {device_mac}",
+            device_id=normalized_mac,
+        )
         client.connect(host, port, keepalive=30)
         client.loop_start()
 
-        _log("info", f"Publishing auto_update to topic {topic} for device {device_mac}")
+        _log(
+            "info",
+            f"Publishing auto_update to topic {topic} for device {device_mac}",
+            device_id=normalized_mac,
+        )
         result = client.publish(topic, json.dumps(payload), qos=0)
         # QoS 0 is fire-and-forget. Avoid false negatives from is_published timing.
         result.wait_for_publish(1.0)
@@ -155,7 +191,11 @@ def publish_auto_update(
         client.disconnect()
         return True
     except Exception as e:
-        _log("error", f"MQTT auto_update publish failed for device {device_mac}: {type(e).__name__}: {e}")
+        _log(
+            "error",
+            f"MQTT auto_update publish failed for device {device_mac}: {type(e).__name__}: {e}",
+            device_id=normalized_mac,
+        )
         try:
             client.loop_stop()
             client.disconnect()

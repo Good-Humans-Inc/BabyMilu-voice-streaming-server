@@ -4,6 +4,7 @@ from loguru import logger
 from config.config_loader import load_config
 from config.settings import check_config_file
 from datetime import datetime
+from services import log_context
 
 SERVER_VERSION = "0.8.1"
 _logger_initialized = False
@@ -40,9 +41,29 @@ def formatter(record):
     record["extra"].setdefault("tag", record["name"])
     # 如果没有设置 selected_module，使用默认值
     record["extra"].setdefault("selected_module", "00000000000000")
+    # Ensure device_id exists for every record.
+    # Prefer an explicitly bound `device_id`, otherwise pull from async context.
+    device_id = record["extra"].get("device_id")
+    if not device_id:
+        device_id = log_context.get_device_id()
+    record["extra"]["device_id"] = device_id or "-"
     # 将 selected_module 从 extra 提取到顶级，以支持 {selected_module} 格式
     record["selected_module"] = record["extra"]["selected_module"]
     return record["message"]
+
+
+def _ensure_device_id_in_format(fmt: str) -> str:
+    """
+    Make sure the configured Loguru format includes `{extra[device_id]}`.
+
+    Some deployments override `log_format` in YAML; we still want device_id to
+    appear in every log entry without forcing users to update configs.
+    """
+    if "{extra[device_id]}" in fmt:
+        return fmt
+    if "{message}" in fmt:
+        return fmt.replace("{message}", "{extra[device_id]} | {message}", 1)
+    return fmt + " {extra[device_id]}"
 
 
 def setup_logging():
@@ -58,19 +79,22 @@ def setup_logging():
         logger.configure(
             extra={
                 "selected_module": log_config.get("selected_module", "00000000000000"),
+                "device_id": "-",
             }
         )
 
         log_format = log_config.get(
             "log_format",
-            "<green>{time:YYMMDD HH:mm:ss}</green>[{version}_{extra[selected_module]}][<light-blue>{extra[tag]}</light-blue>]-<level>{level}</level>-<light-green>{message}</light-green>",
+            "<green>{time:YYMMDD HH:mm:ss}</green>[{version}_{extra[selected_module]}][<light-blue>{extra[tag]}</light-blue>]-<level>{level}</level>-<light-green>{extra[device_id]} | {message}</light-green>",
         )
         log_format_file = log_config.get(
             "log_format_file",
-            "{time:YYYY-MM-DD HH:mm:ss} - {version}_{extra[selected_module]} - {name} - {level} - {extra[tag]} - {message}",
+            "{time:YYYY-MM-DD HH:mm:ss} - {version}_{extra[selected_module]} - {name} - {level} - {extra[tag]} - {extra[device_id]} | {message}",
         )
         log_format = log_format.replace("{version}", SERVER_VERSION)
         log_format_file = log_format_file.replace("{version}", SERVER_VERSION)
+        log_format = _ensure_device_id_in_format(log_format)
+        log_format_file = _ensure_device_id_in_format(log_format_file)
 
         log_level = log_config.get("log_level", "INFO")
         log_dir = log_config.get("log_dir", "tmp")
@@ -109,6 +133,11 @@ def setup_logging():
     return logger
 
 
-def create_connection_logger(selected_module_str):
-    """为连接创建独立的日志器，绑定特定的模块字符串"""
-    return logger.bind(selected_module=selected_module_str)
+def create_connection_logger(selected_module_str, device_id=None):
+    """为连接创建独立的日志器，绑定特定的模块字符串 (and optionally device_id)."""
+    # NOTE: `.bind()` preserves any existing extras, so callers can add device_id
+    # (or rely on services.log_context) without losing selected_module.
+    bound = logger.bind(selected_module=selected_module_str)
+    if device_id:
+        bound = bound.bind(device_id=device_id)
+    return bound

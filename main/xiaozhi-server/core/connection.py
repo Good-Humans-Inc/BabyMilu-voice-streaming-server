@@ -54,6 +54,7 @@ from core.utils.firestore_client import (
 )
 from services.session_context import store as session_context_store
 from services.alarms.config import MODE_CONFIG
+from services import log_context
 
 from core.utils.api_client import query_task, get_assigned_tasks_for_user, process_user_action
 TAG = __name__
@@ -332,6 +333,7 @@ class ConnectionHandler:
 
 
     async def handle_connection(self, ws):
+        device_token = None
         try:
             # 获取并验证headers
             self.headers = dict(ws.request.headers)
@@ -376,6 +378,12 @@ class ConnectionHandler:
             # Normalize device-id to lower-case so it matches sessionContexts doc IDs
             raw_device_id = self.headers.get("device-id")
             self.device_id = raw_device_id.lower() if isinstance(raw_device_id, str) else raw_device_id
+
+            # Attach device-id to *all* logs emitted within this connection.
+            # - Bind it onto the per-connection logger (covers executor threads too)
+            # - Store it in async context (covers any global logger usage in async code)
+            device_token = log_context.set_device_id(self.device_id)
+            self.logger = self.logger.bind(device_id=self.device_id)
 
 
             # NOTE: Do not hardcode device_id in staging/production.
@@ -586,6 +594,12 @@ class ConnectionHandler:
                     self.logger.bind(tag=TAG).error(
                         f"强制关闭连接时出错: {close_error}"
                     )
+            finally:
+                if device_token is not None:
+                    try:
+                        log_context.reset_device_id(device_token)
+                    except Exception:
+                        pass
 
     def get_current_conversation(self):
         """
@@ -1221,7 +1235,9 @@ Return ONLY the JSON array, no other explanation."""
             self.selected_module_str = build_module_string(
                 self.config.get("selected_module", {})
             )
-            self.logger = create_connection_logger(self.selected_module_str)
+            self.logger = create_connection_logger(
+                self.selected_module_str, device_id=self.device_id
+            )
 
             if self.config.get("prompt") is not None:
                 user_prompt = self.config["prompt"]
