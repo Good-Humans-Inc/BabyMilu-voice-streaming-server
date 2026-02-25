@@ -6,12 +6,28 @@ import sys
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <device_id>")
+        print(f"Usage: {sys.argv[0]} <device_id> [n_recent_lines]")
         return 1
 
     device_id = sys.argv[1]
+    n_recent_lines = None
+    if len(sys.argv) >= 3:
+        try:
+            n_recent_lines = int(sys.argv[2])
+            if n_recent_lines <= 0:
+                raise ValueError
+        except ValueError:
+            print("n_recent_lines must be a positive integer")
+            return 1
+
     pattern = rf"{device_id} \| file path: tmp/asr_[^[:space:]]+\.wav"
-    command = f"docker logs current-server-1 2>&1 | grep -E {shlex.quote(pattern)}"
+    command = (
+        "grep -hE "
+        f"{shlex.quote(pattern)} "
+        "/srv/dev/current/main/xiaozhi-server/tmp/server.log*"
+    )
+    if n_recent_lines is not None:
+        command += f" | tail -n {n_recent_lines}"
 
     result = subprocess.run(command, shell=True)
     return result.returncode
