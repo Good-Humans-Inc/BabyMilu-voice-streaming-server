@@ -10,7 +10,7 @@ services:
     restart: unless-stopped
     volumes:
       - type: bind
-        source: ./mosquitto.conf
+        source: /srv/staging/current/mosquitto.conf
         target: /mosquitto/config/mosquitto.conf
         read_only: true
         bind:
@@ -18,7 +18,7 @@ services:
 
   server:
     build:
-      context: .
+      context: /srv/staging/current
       dockerfile: Dockerfile-server
 
     command: ["python", "app.py"]
@@ -45,24 +45,25 @@ services:
     volumes:
       # 1) Source code (so code changes apply without rebuild)
       - type: bind
-        source: ./main/xiaozhi-server
+        source: /srv/staging/current/main/xiaozhi-server
         target: /opt/xiaozhi-esp32-server
         bind:
           create_host_path: true
 
       # 2) Runtime config & data
       - type: bind
-        source: ./data
+        source: /srv/staging/current/data
         target: /opt/xiaozhi-esp32-server/data
         bind:
           create_host_path: true
 
       # 3) GCP Service Account
       - type: bind
-        source: ./data/.gcp/sa.json
+        source: /srv/staging/current/data/.gcp/sa.json
         target: /opt/secrets/gcp/sa.json
         read_only: true
         
 networks:
   default:
     name: current_default
+
