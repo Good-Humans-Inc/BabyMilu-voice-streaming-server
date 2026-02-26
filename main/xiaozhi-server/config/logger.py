@@ -10,6 +10,24 @@ SERVER_VERSION = "0.8.1"
 _logger_initialized = False
 
 
+def _patch_record(record):
+    """
+    Inject `device_id` into record extras at *log call time*.
+
+    This is important because we use `enqueue=True`, so sink formatting/filtering
+    happens in a background thread where `contextvars` are not available.
+    """
+    try:
+        extra = record.get("extra")
+        if not isinstance(extra, dict):
+            return
+        if not extra.get("device_id"):
+            extra["device_id"] = log_context.get_device_id() or "-"
+    except Exception:
+        # Never let logging crash the app.
+        return
+
+
 def get_module_abbreviation(module_name, module_dict):
     """获取模块名称的缩写，如果为空则返回00
     如果名称中包含下划线，则返回下划线后面的前两个字符
@@ -42,11 +60,9 @@ def formatter(record):
     # 如果没有设置 selected_module，使用默认值
     record["extra"].setdefault("selected_module", "00000000000000")
     # Ensure device_id exists for every record.
-    # Prefer an explicitly bound `device_id`, otherwise pull from async context.
-    device_id = record["extra"].get("device_id")
-    if not device_id:
-        device_id = log_context.get_device_id()
-    record["extra"]["device_id"] = device_id or "-"
+    # NOTE: `_patch_record()` already injects device_id at call time. Here we just
+    # normalize for safety in case a record bypasses the patcher.
+    record["extra"]["device_id"] = record["extra"].get("device_id") or "-"
     # 将 selected_module 从 extra 提取到顶级，以支持 {selected_module} 格式
     record["selected_module"] = record["extra"]["selected_module"]
     return record["message"]
@@ -80,7 +96,8 @@ def setup_logging():
             extra={
                 "selected_module": log_config.get("selected_module", "00000000000000"),
                 "device_id": "-",
-            }
+            },
+            patcher=_patch_record,
         )
 
         log_format = log_config.get(
