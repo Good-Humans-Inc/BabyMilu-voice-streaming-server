@@ -4,6 +4,7 @@ from config.logger import setup_logging
 from typing import Optional, Tuple, List
 from core.providers.asr.dto.dto import InterfaceType
 from core.providers.asr.base import ASRProviderBase
+from services import log_context
 
 import requests
 
@@ -36,7 +37,8 @@ class ASRProvider(ASRProviderBase):
                 f"音频文件保存耗时: {time.time() - start_time:.3f}s | 路径: {file_path}"
             )
 
-            logger.bind(tag=TAG).info(f"file path: {file_path}")
+            device_id = log_context.get_device_id() or "-"
+            logger.bind(tag=TAG).info(f"{device_id} | file path: {file_path}")
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
             }
