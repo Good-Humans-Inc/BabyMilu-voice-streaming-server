@@ -404,134 +404,143 @@ class ConnectionHandler:
                 self.device_id
             )
             if cached_enhanced_prompt:
+                # Important: prompt caching must NOT skip Firestore fetches that
+                # resolve per-user settings (e.g., voice_id). Otherwise we fall back
+                # to provider defaults (often "Caleb" on ElevenLabs).
                 self.logger.bind(tag=TAG).info(
-                    f"Enhanced prompt cache hit for device {self.device_id}, "
-                    "skipping pre-prompt Firestore fetches"
+                    f"Enhanced prompt cache hit for device {self.device_id} (prompt cached); "
+                    "still fetching Firestore profile for voice/user binding"
                 )
-            else:
-                # 从云端获取角色配置（voice, bio 等），并应用到本次会话
-                fields = {}
-                try:
-                    char_id = None
-                    if self.device_id:
-                        self.logger.bind(tag=TAG).info(
-                            f"🔍 Looking up device: {self.device_id}"
+
+            # 从云端获取角色配置（voice, bio 等），并应用到本次会话
+            fields = {}
+            try:
+                char_id = None
+                if self.device_id:
+                    self.logger.bind(tag=TAG).info(
+                        f"🔍 Looking up device: {self.device_id}"
+                    )
+                    char_id = get_active_character_for_device(self.device_id)
+                    if not char_id:
+                        fallback_id = (
+                            get_most_recent_character_via_user_for_device(
+                                self.device_id
+                            )
                         )
-                        char_id = get_active_character_for_device(self.device_id)
-                        if not char_id:
-                            fallback_id = (
-                                get_most_recent_character_via_user_for_device(
-                                    self.device_id
-                                )
+                        if fallback_id:
+                            self.logger.bind(
+                                tag=TAG, device_id=self.device_id
+                            ).warning(
+                                f"activeCharacterId missing; falling back to {fallback_id}"
                             )
-                            if fallback_id:
-                                self.logger.bind(
-                                    tag=TAG, device_id=self.device_id
-                                ).warning(
-                                    f"activeCharacterId missing; falling back to {fallback_id}"
-                                )
-                                char_id = fallback_id
+                            char_id = fallback_id
 
-                    if char_id:
-                        self.logger.info(f"char_id={char_id!r}")
-                        char_doc = get_character_profile(char_id)
-                        fields = extract_character_profile_fields(char_doc or {})
+                if char_id:
+                    self.logger.info(f"char_id={char_id!r}")
+                    char_doc = get_character_profile(char_id)
+                    fields = extract_character_profile_fields(char_doc or {})
 
-                        if not self.voice_id and fields.get("voice"):
-                            self.voice_id = str(fields.get("voice"))
+                    if not self.voice_id and fields.get("voice"):
+                        self.voice_id = str(fields.get("voice"))
 
-                        profile_parts = []
-                        for label, key in (
-                            ("Your Name", "name"),
-                            ("Your Age", "age"),
-                            ("Your Pronouns", "pronouns"),
-                            ("Your Relationship with the user", "relationship"),
-                            ("You like calling the user", "callMe"),
-                        ):
-                            val = fields.get(key)
-                            if val:
-                                profile_parts.append(f"{label}: {val}")
-
-                        if profile_parts:
-                            new_prompt += "\n# About you:\n" + "\n- ".join(
-                                profile_parts
-                            )
-
-                        if fields.get("bio"):
-                            new_prompt += (
-                                f"\nUser's description of you: {fields['bio']}"
-                            )
-                    else:
+                    if not self.voice_id:
+                        # This is the key condition that will trigger TTS provider default voice.
                         self.logger.bind(tag=TAG, device_id=self.device_id).warning(
-                            "MISSING activeCharacterId; using defaults"
+                            "No voice resolved from Firestore character profile; TTS may fall back to default_voice_id"
                         )
 
-                    self.logger.bind(tag=TAG).info(
-                        f"🔍 Getting owner phone for device: {self.device_id}"
-                    )
-                    owner_phone = get_owner_phone_for_device(self.device_id)
-                    self.logger.bind(tag=TAG).info(
-                        f"📞 Owner phone result: {owner_phone}"
-                    )
+                    profile_parts = []
+                    for label, key in (
+                        ("Your Name", "name"),
+                        ("Your Age", "age"),
+                        ("Your Pronouns", "pronouns"),
+                        ("Your Relationship with the user", "relationship"),
+                        ("You like calling the user", "callMe"),
+                    ):
+                        val = fields.get(key)
+                        if val:
+                            profile_parts.append(f"{label}: {val}")
 
-                    if owner_phone:
-                        user_id = owner_phone
-                        self.logger.bind(tag=TAG).info(
-                            f"✅ Updated user_id to: {user_id}"
+                    if profile_parts:
+                        new_prompt += "\n# About you:\n" + "\n- ".join(
+                            profile_parts
                         )
-                        user_doc = get_user_profile_by_phone(owner_phone)
-                        user_fields = extract_user_profile_fields(user_doc or {})
-                        user_name = user_fields.get("name") or owner_phone
-                        self.logger.bind(tag=TAG).info(f"👤 User name: {user_name}")
 
-                        user_parts = []
-                        for label, key in (
-                            ("User's name", "name"),
-                            ("User's Birthday", "birthday"),
-                            ("User's Pronouns", "pronouns"),
-                        ):
-                            val = user_fields.get(key)
-                            if val:
-                                user_parts.append(f"{label}: {val}")
-                        if user_parts:
-                            new_prompt += "\nUser profile:\n" + "\n- ".join(
-                                user_parts
-                            )
+                    if fields.get("bio"):
+                        new_prompt += (
+                            f"\nUser's description of you: {fields['bio']}"
+                        )
+                else:
+                    self.logger.bind(tag=TAG, device_id=self.device_id).warning(
+                        "MISSING activeCharacterId; using defaults"
+                    )
 
-                        # 使用未完成任务的记忆
-                        try:
-                            task_str = query_task(
-                                owner_phone,
-                                fields.get("name")
-                                if isinstance(fields, dict)
-                                else None,
-                                user_fields.get("name")
-                                if isinstance(user_fields, dict)
-                                else None,
+                self.logger.bind(tag=TAG).info(
+                    f"🔍 Getting owner phone for device: {self.device_id}"
+                )
+                owner_phone = get_owner_phone_for_device(self.device_id)
+                self.logger.bind(tag=TAG).info(
+                    f"📞 Owner phone result: {owner_phone}"
+                )
+
+                if owner_phone:
+                    user_id = owner_phone
+                    self.logger.bind(tag=TAG).info(
+                        f"✅ Updated user_id to: {user_id}"
+                    )
+                    user_doc = get_user_profile_by_phone(owner_phone)
+                    user_fields = extract_user_profile_fields(user_doc or {})
+                    user_name = user_fields.get("name") or owner_phone
+                    self.logger.bind(tag=TAG).info(f"👤 User name: {user_name}")
+
+                    user_parts = []
+                    for label, key in (
+                        ("User's name", "name"),
+                        ("User's Birthday", "birthday"),
+                        ("User's Pronouns", "pronouns"),
+                    ):
+                        val = user_fields.get(key)
+                        if val:
+                            user_parts.append(f"{label}: {val}")
+                    if user_parts:
+                        new_prompt += "\nUser profile:\n" + "\n- ".join(
+                            user_parts
+                        )
+
+                    # 使用未完成任务的记忆
+                    try:
+                        task_str = query_task(
+                            owner_phone,
+                            fields.get("name")
+                            if isinstance(fields, dict)
+                            else None,
+                            user_fields.get("name")
+                            if isinstance(user_fields, dict)
+                            else None,
+                        )
+                        if task_str:
+                            display_name = user_fields.get("name") or "User"
+                            new_prompt += (
+                                f"\n{display_name} might be trying to accomplish these tasks:\n {task_str}"
                             )
-                            if task_str:
-                                display_name = user_fields.get("name") or "User"
-                                new_prompt += (
-                                    f"\n{display_name} might be trying to accomplish these tasks:\n {task_str}"
-                                )
-                        except Exception as task_err:
-                            self.logger.bind(tag=TAG).warning(
-                                f"Failed to query tasks for prompt injection: {task_err}"
-                            )
-                    else:
+                    except Exception as task_err:
                         self.logger.bind(tag=TAG).warning(
-                            f"❌ No owner phone found for device {self.device_id}, using fallback user_id: {user_id}"
+                            f"Failed to query tasks for prompt injection: {task_err}"
                         )
-
-                except Exception as e:
-                    self.logger.bind(tag=TAG).error(
-                        f"❌ Failed to fetch/apply character profile: {e}"
+                else:
+                    self.logger.bind(tag=TAG).warning(
+                        f"❌ No owner phone found for device {self.device_id}, using fallback user_id: {user_id}"
                     )
-                    import traceback
 
-                    self.logger.bind(tag=TAG).error(
-                        f"Traceback: {traceback.format_exc()}"
-                    )
+            except Exception as e:
+                self.logger.bind(tag=TAG).error(
+                    f"❌ Failed to fetch/apply character profile: {e}"
+                )
+                import traceback
+
+                self.logger.bind(tag=TAG).error(
+                    f"Traceback: {traceback.format_exc()}"
+                )
 
             # ---- SESSION CREATION (UNCONDITIONAL) ----
             if not getattr(self, "_session_created", False):
