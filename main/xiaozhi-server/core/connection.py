@@ -385,6 +385,10 @@ class ConnectionHandler:
             device_token = log_context.set_device_id(self.device_id)
             self.logger = self.logger.bind(device_id=self.device_id)
 
+            # Enforce single active WebSocket per device_id.
+            # If another connection for this device already exists, supersede it.
+            if self.server and self.device_id:
+                await self.server.claim_device(self.device_id, self)
 
             # NOTE: Do not hardcode device_id in staging/production.
             # 检查是否来自MQTT连接
@@ -641,6 +645,12 @@ class ConnectionHandler:
                         f"强制关闭连接时出错: {close_error}"
                     )
             finally:
+                # Release device claim so the next connection can proceed
+                if self.server and self.device_id:
+                    try:
+                        await self.server.release_device(self.device_id, self)
+                    except Exception:
+                        pass
                 if device_token is not None:
                     try:
                         log_context.reset_device_id(device_token)
@@ -1309,6 +1319,9 @@ Return ONLY the JSON array, no other explanation."""
                 self.tts.open_audio_channels(self), self.loop
             )
 
+            # Create per-connection Memory/Task/Intent to avoid shared mutable state
+            self._ensure_per_connection_providers()
+
             self._initialize_memory()
             self._initialize_intent()
             self._init_report_threads()
@@ -1504,6 +1517,76 @@ Return ONLY the JSON array, no other explanation."""
         if modules.get("memory") is not None:
             self.memory = modules["memory"]
 
+    def _ensure_per_connection_providers(self):
+        """Create fresh Memory/Task/Intent instances so connections don't share mutable state.
+
+        WebSocketServer creates one global instance of each provider.  Those instances
+        carry per-device mutable fields (role_id, short_memory, cached prompts, etc.).
+        Sharing them across concurrent connections causes cross-user memory/voice/intent
+        leakage.  This method replaces the shared references with fresh per-connection
+        instances built from the (possibly private-config-updated) self.config.
+        """
+        try:
+            from core.utils import memory as memory_factory
+            from core.utils import task as task_factory
+            from core.utils import intent as intent_factory
+
+            selected = self.config.get("selected_module", {})
+
+            # ---- Fresh memory instance ----
+            mem_name = selected.get("Memory")
+            if mem_name and self.config.get("Memory", {}).get(mem_name):
+                mem_cfg = self.config["Memory"][mem_name]
+                mem_type = mem_cfg.get("type", mem_name)
+                try:
+                    self.memory = memory_factory.create_instance(
+                        mem_type, mem_cfg, self.config.get("summaryMemory")
+                    )
+                    self.logger.bind(tag=TAG).debug(
+                        f"Created per-connection memory provider: {mem_type}"
+                    )
+                except Exception as e:
+                    self.logger.bind(tag=TAG).warning(
+                        f"Failed to create per-connection memory: {e}"
+                    )
+
+            # ---- Fresh task instance ----
+            task_name = selected.get("Task")
+            if task_name and self.config.get("Task", {}).get(task_name):
+                task_cfg = self.config["Task"][task_name]
+                task_type = task_cfg.get("type", task_name)
+                try:
+                    self.task = task_factory.create_instance(task_type, task_cfg)
+                    self.logger.bind(tag=TAG).debug(
+                        f"Created per-connection task provider: {task_type}"
+                    )
+                except Exception as e:
+                    self.logger.bind(tag=TAG).warning(
+                        f"Failed to create per-connection task: {e}"
+                    )
+
+            # ---- Fresh intent instance (caches function-list prompt per connection) ----
+            intent_name = selected.get("Intent")
+            if intent_name and self.config.get("Intent", {}).get(intent_name):
+                intent_cfg = self.config["Intent"][intent_name]
+                intent_type = intent_cfg.get("type", intent_name)
+                try:
+                    self.intent = intent_factory.create_instance(
+                        intent_type, intent_cfg
+                    )
+                    self.logger.bind(tag=TAG).debug(
+                        f"Created per-connection intent provider: {intent_type}"
+                    )
+                except Exception as e:
+                    self.logger.bind(tag=TAG).warning(
+                        f"Failed to create per-connection intent: {e}"
+                    )
+
+        except Exception as e:
+            self.logger.bind(tag=TAG).error(
+                f"Per-connection provider creation failed: {e}"
+            )
+
     def _initialize_memory(self):
         if self.memory is None:
             return
@@ -1513,11 +1596,12 @@ Return ONLY the JSON array, no other explanation."""
             summary_memory=self.config.get("summaryMemory", None),
             save_to_file=not self.read_config_from_api,
         )
-        """初始化任务模块"""
-        self.task.init_task(
-            role_id=self.device_id,
-            llm=self.llm,
-        )
+        # Initialize task module (guard: Task provider may not be configured)
+        if self.task:
+            self.task.init_task(
+                role_id=self.device_id,
+                llm=self.llm,
+            )
         # 获取记忆总结配置
         memory_config = self.config["Memory"]
         memory_type = memory_config[self.config["selected_module"]["Memory"]]["type"]
