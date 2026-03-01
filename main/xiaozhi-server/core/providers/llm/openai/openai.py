@@ -79,6 +79,14 @@ class LLMProvider(LLMProviderBase):
                 f"Adopted conversation {conversation_id} for session {session_id}"
             )
 
+    def release_conversation(self, session_id: str):
+        """Drop local session->conversation mapping to avoid unbounded growth."""
+        if session_id in self._conversations:
+            try:
+                del self._conversations[session_id]
+            except Exception:
+                pass
+
     def ensure_conversation_with_system(self, session_id, system_text: str):
         """Create conversation and seed a system message as the first item."""
         state = self._conversations.get(session_id)
