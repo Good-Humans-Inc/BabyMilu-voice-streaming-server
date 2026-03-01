@@ -61,6 +61,7 @@ def prepare_wake_requests(
                 "alarmId": alarm.alarm_id,
                 "userId": alarm.user_id,
                 "label": alarm.label,
+                "context": alarm.context,  # reason/purpose for the alarm conversation
             }
             new_session = session_context_store.create_session(
                 device_id=target.device_id,
@@ -74,17 +75,29 @@ def prepare_wake_requests(
             )
             alarm_triggered = True
         if alarm_triggered:
-            try:
-                next_occurrence = compute_next_occurrence(alarm, now=now)
-                firestore_client.mark_alarm_processed(
-                    alarm,
-                    last_processed=alarm.next_occurrence_utc,
-                    next_occurrence=next_occurrence,
-                )
-            except Exception as exc:
-                logger.bind(tag=TAG).warning(
-                    f"Failed to advance alarm {alarm.alarm_id}: {exc}"
-                )
+            if alarm.schedule.repeat == models.AlarmRepeat.NONE:
+                # One-time alarm: turn it off after firing
+                try:
+                    firestore_client.mark_one_time_alarm_complete(
+                        alarm,
+                        last_processed=alarm.next_occurrence_utc,
+                    )
+                except Exception as exc:
+                    logger.bind(tag=TAG).warning(
+                        f"Failed to complete one-time alarm {alarm.alarm_id}: {exc}"
+                    )
+            else:
+                try:
+                    next_occurrence = compute_next_occurrence(alarm, now=now)
+                    firestore_client.mark_alarm_processed(
+                        alarm,
+                        last_processed=alarm.next_occurrence_utc,
+                        next_occurrence=next_occurrence,
+                    )
+                except Exception as exc:
+                    logger.bind(tag=TAG).warning(
+                        f"Failed to advance alarm {alarm.alarm_id}: {exc}"
+                    )
     logger.bind(tag=TAG).info(f"Prepared {len(wake_requests)} wake requests")
     return wake_requests
 
