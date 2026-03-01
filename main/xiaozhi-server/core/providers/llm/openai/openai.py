@@ -151,6 +151,9 @@ class LLMProvider(LLMProviderBase):
             logger.bind(tag=TAG).error(f"Error in response generation: {e}")
 
     def response_with_functions(self, session_id, dialogue, functions=None, **kwargs):
+        yield from self._do_response_with_functions(session_id, dialogue, functions, **kwargs)
+
+    def _do_response_with_functions(self, session_id, dialogue, functions=None, **kwargs):
         try:
             # Convert Chat Completions function schema to Responses tool schema
             tools = []
@@ -270,4 +273,16 @@ class LLMProvider(LLMProviderBase):
                             )
 
         except Exception as e:
-            logger.bind(tag=TAG).error(f"Error in function call streaming: {e}")
+            # When a function call is interrupted by an abort, OpenAI stores the
+            # pending tool call server-side. The next turn then fails with 400
+            # because no tool output was provided. Reset the conversation so the
+            # next user message rebuilds full history from the local dialogue.
+            if "No tool output found for function call" in str(e):
+                logger.bind(tag=TAG).warning(
+                    f"Dangling tool call detected for session {session_id} "
+                    f"(aborted mid-function-call). Resetting conversation — "
+                    f"please repeat your message."
+                )
+                self._conversations.pop(session_id, None)
+            else:
+                logger.bind(tag=TAG).error(f"Error in function call streaming: {e}")
