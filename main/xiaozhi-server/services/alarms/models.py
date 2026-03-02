@@ -12,6 +12,7 @@ logger = setup_logging()
 
 class AlarmRepeat(str, Enum):
     WEEKLY = "weekly"
+    NONE = "none"  # one-time; fires once then status -> off
 
 
 class AlarmStatus(str, Enum):
@@ -58,6 +59,7 @@ class AlarmDoc:
     raw: Dict = field(default_factory=dict)
     doc_path: Optional[str] = None
     last_processed_utc: Optional[datetime] = None
+    context: Optional[str] = None  # reason/purpose; used to customize the alarm conversation
 
 
 @dataclass

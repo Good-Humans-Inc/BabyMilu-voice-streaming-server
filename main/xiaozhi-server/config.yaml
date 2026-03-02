@@ -230,6 +230,7 @@ Intent:
       - change_role
       - get_weather
       - play_music
+      - set_alarm
       - get_capabilities
       - self_introduction
       - lookup_recipe

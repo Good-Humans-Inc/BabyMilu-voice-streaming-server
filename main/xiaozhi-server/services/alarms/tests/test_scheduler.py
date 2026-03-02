@@ -111,6 +111,7 @@ def test_prepare_wake_requests_creates_session(monkeypatch):
         "alarmId": "alarm-123",
         "userId": "user-xyz",
         "label": "Morning Wake",
+        "context": None,
     }
     assert recorded["last_processed"] == next_occurrence
     assert recorded["next_occurrence"] > next_occurrence

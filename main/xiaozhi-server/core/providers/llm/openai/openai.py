@@ -324,7 +324,16 @@ class LLMProvider(LLMProviderBase):
                     )
                     time.sleep(delay)
                     continue
-                logger.bind(tag=TAG).error(f"Error in function call streaming: {e}")
+                # If a function call was aborted mid-stream, OpenAI can leave a
+                # dangling server-side tool call that causes next-turn 400 errors.
+                if "No tool output found for function call" in str(e):
+                    logger.bind(tag=TAG).warning(
+                        f"Dangling tool call detected for session {session_id} "
+                        f"(aborted mid-function-call). Resetting conversation."
+                    )
+                    self._conversations.pop(session_id, None)
+                else:
+                    logger.bind(tag=TAG).error(f"Error in function call streaming: {e}")
 
     def response_with_structured_output(self, dialogue, structured_output, **kwargs):
         try:
