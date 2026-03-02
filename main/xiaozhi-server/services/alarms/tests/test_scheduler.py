@@ -41,6 +41,7 @@ def _make_alarm(
     device_id: str,
     mode: str,
     *,
+    repeat: models.AlarmRepeat = models.AlarmRepeat.WEEKLY,
     days: list[str] | None = None,
     next_occurrence: datetime | None = None,
     last_processed: datetime | None = None,
@@ -48,7 +49,7 @@ def _make_alarm(
     timezone_name: str | None = "UTC",
 ) -> models.AlarmDoc:
     schedule = models.AlarmSchedule(
-        repeat=models.AlarmRepeat.WEEKLY,
+        repeat=repeat,
         time_local=time_local,
         days=days or ["Mon"],
     )
@@ -185,6 +186,52 @@ def test_prepare_wake_requests_skips_when_last_processed_matches(monkeypatch):
 
     assert wake_requests == []
     assert called is False
+
+
+def test_prepare_wake_requests_marks_one_time_alarm_complete(monkeypatch):
+    fake_store = _FakeSessionStore()
+    monkeypatch.setattr(scheduler, "session_context_store", fake_store)
+
+    next_occurrence = datetime(2024, 1, 1, 7, tzinfo=timezone.utc)
+
+    def fake_fetch(now, lookahead):
+        return [
+            _make_alarm(
+                "DEV123",
+                "morning_alarm",
+                repeat=models.AlarmRepeat.NONE,
+                days=["2024-01-01"],
+                next_occurrence=next_occurrence,
+            )
+        ]
+
+    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
+    completed = {}
+    processed_called = False
+
+    def fake_complete(alarm, *, last_processed):
+        completed["alarm_id"] = alarm.alarm_id
+        completed["last_processed"] = last_processed
+
+    def fake_mark(*args, **kwargs):
+        nonlocal processed_called
+        processed_called = True
+
+    monkeypatch.setattr(
+        scheduler.firestore_client, "mark_one_time_alarm_complete", fake_complete
+    )
+    monkeypatch.setattr(
+        scheduler.firestore_client, "mark_alarm_processed", fake_mark
+    )
+
+    wake_requests = scheduler.prepare_wake_requests(
+        datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
+    )
+
+    assert len(wake_requests) == 1
+    assert completed["alarm_id"] == "alarm-123"
+    assert completed["last_processed"] == next_occurrence
+    assert processed_called is False
 
 
 def test_compute_next_occurrence_uses_schedule_days():
