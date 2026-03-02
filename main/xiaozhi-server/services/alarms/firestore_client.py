@@ -16,6 +16,15 @@ from services.alarms import models
 TAG = __name__
 logger = setup_logging()
 
+_REPEAT_ALIASES = {
+    "weekly": models.AlarmRepeat.WEEKLY,
+    "none": models.AlarmRepeat.NONE,
+    "once": models.AlarmRepeat.NONE,
+    "one_time": models.AlarmRepeat.NONE,
+    "one-time": models.AlarmRepeat.NONE,
+    "no_repeat": models.AlarmRepeat.NONE,
+}
+
 
 def _build_client() -> firestore.Client:
     creds_path = get_gcp_credentials_path()
@@ -84,7 +93,7 @@ def fetch_due_alarms(
             )
             continue
         try:
-            repeat = models.AlarmRepeat(str(schedule_payload["repeat"]).lower())
+            repeat = _parse_repeat(schedule_payload["repeat"])
             schedule = models.AlarmSchedule(
                 repeat=repeat,
                 time_local=schedule_payload["timeLocal"],
@@ -208,6 +217,13 @@ def _normalize_device_id(value) -> str:
     if not isinstance(value, str):
         raise ValueError("Alarm target deviceId must be a string")
     return normalize_mac(value)
+
+
+def _parse_repeat(raw_repeat) -> models.AlarmRepeat:
+    key = str(raw_repeat).strip().lower()
+    if key in _REPEAT_ALIASES:
+        return _REPEAT_ALIASES[key]
+    raise ValueError(f"Unsupported repeat value: {raw_repeat}")
 
 
 def mark_alarm_processed(
