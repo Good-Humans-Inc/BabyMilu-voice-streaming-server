@@ -131,10 +131,18 @@
                 </span>
             </h2>
             <div class="connection-controls">
-                <input type="text" id="otaUrl" value="http://127.0.0.1:8002/xiaozhi/ota/"
-                    placeholder="OTA服务器地址，如：http://127.0.0.1:8002/xiaozhi/ota/" />
-                <input type="text" id="serverUrl" value="ws://127.0.0.1:8000/xiaozhi/v1/"
+                <input type="text" id="otaUrl" value=""
+                    placeholder="OTA服务器地址，如：http://127.0.0.1:8003/xiaozhi/ota/" />
+                <input type="text" id="serverUrl" value=""
                     placeholder="WebSocket服务器地址，如：ws://127.0.0.1:8000/xiaozhi/v1/" />
+                <script>
+                    // Auto-detect server address from page origin
+                    (function() {
+                        var h = window.location.hostname || '127.0.0.1';
+                        document.getElementById('otaUrl').value = 'http://' + h + ':8003/xiaozhi/ota/';
+                        document.getElementById('serverUrl').value = 'ws://' + h + ':8000/xiaozhi/v1/';
+                    })();
+                </script>
                 <button id="connectButton">连接</button>
                 <button id="authTestButton">测试认证</button>
             </div>
