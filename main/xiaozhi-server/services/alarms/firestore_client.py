@@ -287,7 +287,9 @@ def create_alarm(
         "label": label,
         "context": context,
         "schedule": {
-            "repeat": models.AlarmRepeat.NONE.value,
+            # Keep "once" for backward compatibility with currently deployed
+            # cloud scheduler revisions that may not recognize "none".
+            "repeat": "once",
             "timeLocal": time_local,
             "days": [date_local],  # ISO date string for one-time alarms
         },
