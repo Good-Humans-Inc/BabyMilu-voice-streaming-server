@@ -74,13 +74,30 @@ def fetch_due_alarms(
                 f"label={data.get('label')} targets={len(data.get('targets', []))}"
             )
         )
-        schedule_payload = data["schedule"]
-        repeat = models.AlarmRepeat(str(schedule_payload["repeat"]).lower())
-        schedule = models.AlarmSchedule(
-            repeat=repeat,
-            time_local=schedule_payload["timeLocal"],
-            days=schedule_payload.get("days") or [],
-        )
+        schedule_payload = data.get("schedule")
+        if not isinstance(schedule_payload, dict):
+            logger.bind(tag=TAG).warning(
+                (
+                    f"Skipping alarm {doc.reference.path} (user={user_id}): "
+                    f"missing or invalid schedule payload ({schedule_payload})"
+                )
+            )
+            continue
+        try:
+            repeat = models.AlarmRepeat(str(schedule_payload["repeat"]).lower())
+            schedule = models.AlarmSchedule(
+                repeat=repeat,
+                time_local=schedule_payload["timeLocal"],
+                days=schedule_payload.get("days") or [],
+            )
+        except (KeyError, ValueError) as exc:
+            logger.bind(tag=TAG).warning(
+                (
+                    f"Skipping alarm {doc.reference.path} (user={user_id}): "
+                    f"invalid schedule payload ({schedule_payload}) ({exc})"
+                )
+            )
+            continue
 
         targets_payload = data.get("targets")
         if not isinstance(targets_payload, list) or not targets_payload:
