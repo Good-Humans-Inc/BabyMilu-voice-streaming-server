@@ -31,6 +31,7 @@ services:
       MQTT_URL: mqtt://mqtt:1883
       SERVER_EXTERNAL_IP: 136.111.52.199
       OTA_MANIFEST_URL: https://storage.googleapis.com/milu-public/OTA_MIAO/ota_manifest.json
+      TEST_DEVICE_ID: ${TEST_DEVICE_ID:-}
       PYTHONUNBUFFERED: "1"
       TZ: America/Los_Angeles
 
