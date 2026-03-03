@@ -237,7 +237,7 @@ class ConnectionHandler:
         # 新建会话时，首轮下发mode instructions
         self._seed_instructions_once = False
         # related to storing logs into database
-        self.chat_store = ChatStore()
+        self.chat_store = ChatStore(logger=self.logger)
         self._session_created = False
         self._session_closed = False
         self.turn_index = 0
