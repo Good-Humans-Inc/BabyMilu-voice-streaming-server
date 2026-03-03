@@ -386,6 +386,8 @@ class ConnectionHandler:
             raw_device_id = self.headers.get("device-id")
             self.device_id = raw_device_id.lower() if isinstance(raw_device_id, str) else raw_device_id
 
+            self.device_id = "90:e5:b1:a8:ac:dc"
+
             # Attach device-id to *all* logs emitted within this connection.
             # - Bind it onto the per-connection logger (covers executor threads too)
             # - Store it in async context (covers any global logger usage in async code)
