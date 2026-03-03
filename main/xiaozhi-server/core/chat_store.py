@@ -19,6 +19,29 @@ def _ensure_db_dir_exists(path: str) -> None:
         os.makedirs(db_dir, exist_ok=True)
 
 
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    cur = conn.execute(f"PRAGMA table_info({table})")
+    columns = [row[1] for row in cur.fetchall()]
+    return column in columns
+
+
+def _add_column_if_missing(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    column_def_sql: str,
+) -> None:
+    if not _has_column(conn, table, column):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_def_sql}")
+
+
+def _create_index_if_possible(conn: sqlite3.Connection, sql: str) -> None:
+    try:
+        conn.execute(sql)
+    except sqlite3.OperationalError:
+        pass
+
+
 def _init_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
@@ -59,8 +82,21 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user_created ON sessions(user_id, created_at DESC)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_turns_session_created ON turns(session_id, created_at)")
+
+    _add_column_if_missing(conn, "sessions", "created_at", "TEXT")
+    _add_column_if_missing(conn, "sessions", "analysis_json", "TEXT")
+    _add_column_if_missing(conn, "sessions", "token_usage", "INTEGER DEFAULT 0")
+    _add_column_if_missing(conn, "sessions", "last_active_at", "TEXT")
+    _add_column_if_missing(conn, "turns", "created_at", "TEXT")
+
+    _create_index_if_possible(
+        conn,
+        "CREATE INDEX IF NOT EXISTS idx_sessions_user_created ON sessions(user_id, created_at DESC)",
+    )
+    _create_index_if_possible(
+        conn,
+        "CREATE INDEX IF NOT EXISTS idx_turns_session_created ON turns(session_id, created_at)",
+    )
 
 
 @contextmanager
