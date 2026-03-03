@@ -156,10 +156,23 @@ class OTAHandler(BaseHandler):
             self.logger.bind(tag=TAG).debug(f"OTA请求头: {request.headers}")
             self.logger.bind(tag=TAG).debug(f"OTA请求数据: {data}")
 
-            device_id = request.headers.get("device-id", "")
-            if device_id:
+            header_device_id = request.headers.get("device-id", "")
+            forced_device_id = os.getenv("TEST_DEVICE_ID") or self.config.get(
+                "test_device_id"
+            )
+            raw_device_id = (
+                forced_device_id.strip()
+                if isinstance(forced_device_id, str) and forced_device_id.strip()
+                else header_device_id
+            )
+
+            if raw_device_id:
                 # 标准化：始终输出冒号分隔小写
-                device_id = normalize_mac(device_id)
+                device_id = normalize_mac(raw_device_id)
+                if raw_device_id != header_device_id:
+                    self.logger.bind(tag=TAG).warning(
+                        f"Using TEST_DEVICE_ID override for OTA: {device_id}"
+                    )
                 self.logger.bind(tag=TAG).info(f"OTA请求设备ID: {device_id}")
             else:
                 raise Exception("OTA请求设备ID为空")

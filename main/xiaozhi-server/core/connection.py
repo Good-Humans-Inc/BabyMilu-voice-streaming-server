@@ -384,9 +384,28 @@ class ConnectionHandler:
 
             # Normalize device-id to lower-case so it matches sessionContexts doc IDs
             raw_device_id = self.headers.get("device-id")
-            self.device_id = raw_device_id.lower() if isinstance(raw_device_id, str) else raw_device_id
+            normalized_device_id = (
+                raw_device_id.lower()
+                if isinstance(raw_device_id, str)
+                else raw_device_id
+            )
 
-            self.device_id = "90:e5:b1:a8:ac:dc"
+            # Optional test override for server-side debugging.
+            # Priority: env TEST_DEVICE_ID > config.test_device_id > request header.
+            forced_device_id = os.getenv("TEST_DEVICE_ID") or self.config.get(
+                "test_device_id"
+            )
+            if isinstance(forced_device_id, str) and forced_device_id.strip():
+                self.device_id = forced_device_id.strip().lower()
+                self.logger.bind(tag=TAG).warning(
+                    f"Using test device_id override: {self.device_id}"
+                )
+            else:
+                self.device_id = normalized_device_id
+
+            # Keep headers in sync so all downstream code paths use the same device id.
+            if self.device_id:
+                self.headers["device-id"] = self.device_id
 
             # Attach device-id to *all* logs emitted within this connection.
             # - Bind it onto the per-connection logger (covers executor threads too)
