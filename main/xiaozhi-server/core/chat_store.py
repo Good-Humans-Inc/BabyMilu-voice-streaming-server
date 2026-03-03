@@ -364,15 +364,15 @@ class SupabaseChatStore:
 class ChatStore:
     def __init__(self, logger=None):
         self.logger = logger
-        backend = (os.environ.get("CHAT_STORE_BACKEND", "sqlite") or "sqlite").strip().lower()
+        backend = (os.environ.get("CHAT_STORE_BACKEND", "auto") or "auto").strip().lower()
 
         self.store = None
-        if backend == "supabase":
+        if backend in ("supabase", "auto"):
             supabase_store = SupabaseChatStore(logger=logger)
             if supabase_store.is_configured():
                 self.store = supabase_store
             else:
-                if self.logger:
+                if self.logger and backend == "supabase":
                     self.logger.warning(
                         "[ChatStore] CHAT_STORE_BACKEND=supabase but SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY missing, falling back to sqlite"
                     )
