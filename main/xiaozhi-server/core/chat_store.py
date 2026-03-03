@@ -235,6 +235,7 @@ class SupabaseChatStore:
         self.service_role_key = (os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
         self.timeout_seconds = int(os.environ.get("SUPABASE_TIMEOUT_SECONDS", "10"))
         self.users_table = os.environ.get("SUPABASE_USERS_TABLE", "users")
+        self.devices_table = os.environ.get("SUPABASE_DEVICES_TABLE", "devices")
         self.sessions_table = os.environ.get("SUPABASE_SESSIONS_TABLE", "sessions")
         self.turns_table = os.environ.get("SUPABASE_TURNS_TABLE", "turns")
 
@@ -246,7 +247,7 @@ class SupabaseChatStore:
 
         if self.logger:
             self.logger.info(
-                f"[ChatStore:init] backend=supabase base_url={self.base_url}, users_table={self.users_table}, sessions_table={self.sessions_table}, turns_table={self.turns_table}"
+                f"[ChatStore:init] backend=supabase base_url={self.base_url}, users_table={self.users_table}, devices_table={self.devices_table}, sessions_table={self.sessions_table}, turns_table={self.turns_table}"
             )
 
     def is_configured(self) -> bool:
@@ -260,7 +261,10 @@ class SupabaseChatStore:
             json=payload,
             timeout=self.timeout_seconds,
         )
-        response.raise_for_status()
+        if not response.ok:
+            raise RuntimeError(
+                f"Supabase insert failed table={table} status={response.status_code} body={response.text}"
+            )
 
     def _upsert(self, table: str, payload: dict, on_conflict: str):
         url = f"{self.base_url}/rest/v1/{table}?on_conflict={quote(on_conflict, safe='')}"
@@ -270,7 +274,10 @@ class SupabaseChatStore:
             json=payload,
             timeout=self.timeout_seconds,
         )
-        response.raise_for_status()
+        if not response.ok:
+            raise RuntimeError(
+                f"Supabase upsert failed table={table} status={response.status_code} body={response.text}"
+            )
 
     def _update_eq(self, table: str, field: str, value: str, payload: dict):
         url = f"{self.base_url}/rest/v1/{table}?{field}=eq.{quote(str(value), safe='')}"
@@ -280,7 +287,10 @@ class SupabaseChatStore:
             json=payload,
             timeout=self.timeout_seconds,
         )
-        response.raise_for_status()
+        if not response.ok:
+            raise RuntimeError(
+                f"Supabase update failed table={table} filter={field}=eq.{value} status={response.status_code} body={response.text}"
+            )
 
     def get_or_create_user(self, user_id: str, name: str):
         if self.logger:
@@ -297,6 +307,15 @@ class SupabaseChatStore:
         if self.logger:
             self.logger.info(
                 f"[ChatStore:supabase] create_session(session_id={session_id}, user_id={user_id}, user_name={user_name})"
+            )
+        if device_id:
+            self._upsert(
+                self.devices_table,
+                {
+                    "device_id": device_id,
+                    "user_id": user_id,
+                },
+                on_conflict="device_id",
             )
         self._upsert(
             self.sessions_table,
