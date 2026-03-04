@@ -63,7 +63,6 @@ export SUPABASE_SERVICE_ROLE_KEY="<service-role-key>"
 # Optional tuning
 export SUPABASE_TIMEOUT_SECONDS=10
 export SUPABASE_USERS_TABLE="users"
-export SUPABASE_DEVICES_TABLE="devices"
 export SUPABASE_SESSIONS_TABLE="sessions"
 export SUPABASE_TURNS_TABLE="turns"
 ```

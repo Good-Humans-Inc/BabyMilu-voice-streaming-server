@@ -513,12 +513,21 @@ class ConnectionHandler:
                 )
 
                 if owner_phone:
-                    user_id = owner_phone
-                    self.logger.bind(tag=TAG).info(
-                        f"✅ Updated user_id to: {user_id}"
-                    )
                     user_doc = get_user_profile_by_phone(owner_phone)
                     user_fields = extract_user_profile_fields(user_doc or {})
+                    firestore_uid = user_fields.get("uid")
+
+                    if firestore_uid:
+                        user_id = firestore_uid
+                        self.logger.bind(tag=TAG).info(
+                            f"✅ Updated user_id to Firebase uid: {user_id}"
+                        )
+                    else:
+                        user_id = owner_phone
+                        self.logger.bind(tag=TAG).warning(
+                            f"⚠️ Firebase uid missing for owner {owner_phone}; fallback user_id to phone"
+                        )
+
                     user_name = user_fields.get("name") or owner_phone
                     self.logger.bind(tag=TAG).info(f"👤 User name: {user_name}")
 
@@ -585,7 +594,8 @@ class ConnectionHandler:
 
                 self.chat_store.get_or_create_user(
                     user_id=self.user_id,
-                    name=self.user_name
+                    name=self.user_name,
+                    device_id=self.device_id,
                 )
 
                 self.chat_store.create_session(

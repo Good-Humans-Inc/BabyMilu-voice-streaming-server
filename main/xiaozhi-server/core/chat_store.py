@@ -42,12 +42,22 @@ def _create_index_if_possible(conn: sqlite3.Connection, sql: str) -> None:
         pass
 
 
+def _merge_device_ids(existing: str, new_device_id: str) -> str:
+    if not new_device_id:
+        return (existing or "").strip()
+    existing_ids = [item.strip() for item in (existing or "").split(",") if item.strip()]
+    if new_device_id not in existing_ids:
+        existing_ids.append(new_device_id)
+    return ",".join(existing_ids)
+
+
 def _init_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
             user_id TEXT PRIMARY KEY,
-            name TEXT
+            name TEXT,
+            device_ids TEXT
         )
         """
     )
@@ -88,6 +98,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "sessions", "token_usage", "INTEGER DEFAULT 0")
     _add_column_if_missing(conn, "sessions", "last_active_at", "TEXT")
     _add_column_if_missing(conn, "turns", "created_at", "TEXT")
+    _add_column_if_missing(conn, "users", "device_ids", "TEXT")
 
     _create_index_if_possible(
         conn,
@@ -117,18 +128,28 @@ class SQLiteChatStore:
         if self.logger:
             self.logger.info(f"[ChatStore:init] backend=sqlite DB_PATH={DB_PATH}")
 
-    def get_or_create_user(self, user_id: str, name: str):
+    def get_or_create_user(self, user_id: str, name: str, device_id: str = ""):
         if self.logger:
             self.logger.info(
-                f"[ChatStore:sqlite] get_or_create_user(user_id={user_id}, name={name})"
+                f"[ChatStore:sqlite] get_or_create_user(user_id={user_id}, name={name}, device_id={device_id})"
             )
         with get_db() as db:
+            existing = db.execute(
+                """
+                SELECT device_ids FROM users WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            merged_device_ids = _merge_device_ids(existing[0] if existing else "", device_id)
             db.execute(
                 """
-                INSERT OR IGNORE INTO users (user_id, name)
-                VALUES (?, ?)
+                INSERT INTO users (user_id, name, device_ids)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    name = excluded.name,
+                    device_ids = excluded.device_ids
                 """,
-                (user_id, name),
+                (user_id, name, merged_device_ids),
             )
 
     def create_session(self, *, session_id, user_id, user_name, device_id):
@@ -235,7 +256,6 @@ class SupabaseChatStore:
         self.service_role_key = (os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
         self.timeout_seconds = int(os.environ.get("SUPABASE_TIMEOUT_SECONDS", "10"))
         self.users_table = os.environ.get("SUPABASE_USERS_TABLE", "users")
-        self.devices_table = os.environ.get("SUPABASE_DEVICES_TABLE", "devices")
         self.sessions_table = os.environ.get("SUPABASE_SESSIONS_TABLE", "sessions")
         self.turns_table = os.environ.get("SUPABASE_TURNS_TABLE", "turns")
 
@@ -247,7 +267,7 @@ class SupabaseChatStore:
 
         if self.logger:
             self.logger.info(
-                f"[ChatStore:init] backend=supabase base_url={self.base_url}, users_table={self.users_table}, devices_table={self.devices_table}, sessions_table={self.sessions_table}, turns_table={self.turns_table}"
+                f"[ChatStore:init] backend=supabase base_url={self.base_url}, users_table={self.users_table}, sessions_table={self.sessions_table}, turns_table={self.turns_table}"
             )
 
     def is_configured(self) -> bool:
@@ -292,14 +312,35 @@ class SupabaseChatStore:
                 f"Supabase update failed table={table} filter={field}=eq.{value} status={response.status_code} body={response.text}"
             )
 
-    def get_or_create_user(self, user_id: str, name: str):
+    def _select_eq(self, table: str, field: str, value: str):
+        url = f"{self.base_url}/rest/v1/{table}?{field}=eq.{quote(str(value), safe='')}&select=*"
+        response = requests.get(
+            url,
+            headers=self.headers,
+            timeout=self.timeout_seconds,
+        )
+        if not response.ok:
+            raise RuntimeError(
+                f"Supabase select failed table={table} filter={field}=eq.{value} status={response.status_code} body={response.text}"
+            )
+        rows = response.json()
+        if rows:
+            return rows[0]
+        return None
+
+    def get_or_create_user(self, user_id: str, name: str, device_id: str = ""):
         if self.logger:
             self.logger.info(
-                f"[ChatStore:supabase] get_or_create_user(user_id={user_id}, name={name})"
+                f"[ChatStore:supabase] get_or_create_user(user_id={user_id}, name={name}, device_id={device_id})"
             )
+        existing = self._select_eq(self.users_table, "user_id", user_id)
+        merged_device_ids = _merge_device_ids(
+            (existing or {}).get("device_ids", ""),
+            device_id,
+        )
         self._upsert(
             self.users_table,
-            {"user_id": user_id, "name": name},
+            {"user_id": user_id, "name": name, "device_ids": merged_device_ids},
             on_conflict="user_id",
         )
 
@@ -307,15 +348,6 @@ class SupabaseChatStore:
         if self.logger:
             self.logger.info(
                 f"[ChatStore:supabase] create_session(session_id={session_id}, user_id={user_id}, user_name={user_name})"
-            )
-        if device_id:
-            self._upsert(
-                self.devices_table,
-                {
-                    "device_id": device_id,
-                    "user_id": user_id,
-                },
-                on_conflict="device_id",
             )
         self._upsert(
             self.sessions_table,
@@ -399,9 +431,9 @@ class ChatStore:
         if self.store is None:
             self.store = SQLiteChatStore(logger=logger)
 
-    def get_or_create_user(self, user_id: str, name: str):
+    def get_or_create_user(self, user_id: str, name: str, device_id: str = ""):
         try:
-            self.store.get_or_create_user(user_id=user_id, name=name)
+            self.store.get_or_create_user(user_id=user_id, name=name, device_id=device_id)
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ChatStore] get_or_create_user failed: {e}")

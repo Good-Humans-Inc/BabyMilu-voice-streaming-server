@@ -9,15 +9,8 @@ Run this SQL in your Supabase project:
 ```sql
 create table if not exists public.users (
   user_id text primary key,
-  name text
-);
-
-create table if not exists public.devices (
-  device_id text primary key,
-  user_id text references public.users(user_id),
   name text,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  device_ids text
 );
 
 create table if not exists public.sessions (
@@ -33,8 +26,7 @@ create table if not exists public.sessions (
   analysis_json text,
   token_usage integer not null default 0,
   last_active_at timestamptz,
-  constraint sessions_user_fk foreign key (user_id) references public.users(user_id),
-  constraint sessions_device_fk foreign key (device_id) references public.devices(device_id)
+  constraint sessions_user_fk foreign key (user_id) references public.users(user_id)
 );
 
 create table if not exists public.turns (
@@ -50,7 +42,7 @@ create table if not exists public.turns (
 create table if not exists public.memory_events (
   id bigserial primary key,
   user_id text not null references public.users(user_id),
-  device_id text references public.devices(device_id),
+  device_id text,
   session_id text references public.sessions(session_id),
   event_type text not null,
   payload jsonb,
@@ -106,7 +98,6 @@ After env changes, restart the server container/process.
 Look for startup/store logs and then check rows in:
 
 - `public.users`
-- `public.devices`
 - `public.sessions`
 - `public.turns`
 - `public.memory_events`
@@ -118,7 +109,7 @@ A new device conversation should create one session row and multiple turn rows.
 Current runtime write path is:
 
 - writes: `users`, `sessions`, `turns`
-- not yet written by runtime: `devices`, `memory_events`, `memory_read_model`, `memory_jobs`
+- not yet written by runtime: `memory_events`, `memory_read_model`, `memory_jobs`
 
 ## Notes
 
