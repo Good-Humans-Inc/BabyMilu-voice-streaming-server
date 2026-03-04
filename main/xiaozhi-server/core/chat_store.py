@@ -162,6 +162,15 @@ class SQLiteChatStore:
                 """
                 INSERT INTO sessions (session_id, user_name, user_id, device_id, created_at, start_time, last_active_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    user_name = excluded.user_name,
+                    user_id = excluded.user_id,
+                    device_id = excluded.device_id,
+                    created_at = excluded.created_at,
+                    start_time = excluded.start_time,
+                    end_time = NULL,
+                    analysis_status = NULL,
+                    last_active_at = excluded.last_active_at
                 """,
                 (
                     session_id,
@@ -349,19 +358,37 @@ class SupabaseChatStore:
             self.logger.info(
                 f"[ChatStore:supabase] create_session(session_id={session_id}, user_id={user_id}, user_name={user_name})"
             )
-        self._upsert(
-            self.sessions_table,
-            {
-                "session_id": session_id,
-                "user_name": user_name,
-                "user_id": user_id,
-                "device_id": device_id,
-                "created_at": _now_iso(),
-                "start_time": _now_iso(),
-                "last_active_at": _now_iso(),
-            },
-            on_conflict="session_id",
-        )
+        now_iso = _now_iso()
+        payload = {
+            "session_id": session_id,
+            "user_name": user_name,
+            "user_id": user_id,
+            "device_id": device_id,
+            "created_at": now_iso,
+            "start_time": now_iso,
+            "last_active_at": now_iso,
+        }
+        try:
+            self._insert(self.sessions_table, payload)
+        except RuntimeError as e:
+            if "status=409" in str(e):
+                self._update_eq(
+                    self.sessions_table,
+                    "session_id",
+                    session_id,
+                    {
+                        "user_name": user_name,
+                        "user_id": user_id,
+                        "device_id": device_id,
+                        "created_at": now_iso,
+                        "start_time": now_iso,
+                        "end_time": None,
+                        "analysis_status": None,
+                        "last_active_at": now_iso,
+                    },
+                )
+            else:
+                raise
 
     def insert_turn(self, session_id, turn_index, speaker, text):
         if self.logger:
