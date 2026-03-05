@@ -1931,6 +1931,21 @@ Return ONLY the JSON array, no other explanation."""
                     f"Failed to load mode instructions from {instructions_file}: {exc}"
                 )
 
+        reminder_context = session_config.get("context")
+        if isinstance(reminder_context, str):
+            reminder_context = reminder_context.strip()
+        else:
+            reminder_context = ""
+        if reminder_context:
+            # Make reminder purpose explicit in first-turn prompt guidance so
+            # server-initiated alarm speech consistently mentions the reason.
+            context_block = (
+                "\n\nReminder context:\n"
+                f"- The user asked to be reminded about: \"{reminder_context}\".\n"
+                "- Mention this reason explicitly in your very first sentence."
+            )
+            instructions = (instructions or "") + context_block
+
         self.mode_specific_instructions = instructions
         self.server_initiate_chat = config.get("server_initiate_chat", False)
         self.followup_enabled = config.get("followup_enabled", False)

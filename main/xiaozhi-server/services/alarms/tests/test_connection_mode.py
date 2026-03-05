@@ -21,6 +21,7 @@ def _build_conn(mode_config: dict, monkeypatch) -> ConnectionHandler:
     monkeypatch.setattr("core.connection.MODE_CONFIG", {"morning_alarm": mode_config})
     conn = ConnectionHandler.__new__(ConnectionHandler)
     conn.config = {"mode_config": {"morning_alarm": mode_config}}
+    conn.device_id = "DEV1"
     conn.logger = _DummyLogger()
     conn._mode_state = ModeRuntimeState()
     conn._followup_state = FollowupState()
@@ -66,4 +67,25 @@ def test_apply_mode_session_settings_without_mode_noops(monkeypatch):
 
     assert conn.active_mode is None
     assert conn.mode_specific_instructions == ""
+
+
+def test_apply_mode_session_settings_injects_reminder_context(monkeypatch):
+    conn = _build_conn(
+        {
+            "instructions": "WAKE UP",
+            "server_initiate_chat": True,
+            "followup_enabled": True,
+        },
+        monkeypatch,
+    )
+    conn.mode_session.session_config = {
+        "mode": "morning_alarm",
+        "context": "water plants",
+    }
+
+    ConnectionHandler._apply_mode_session_settings(conn)
+
+    assert "WAKE UP" in conn.mode_specific_instructions
+    assert 'The user asked to be reminded about: "water plants".' in conn.mode_specific_instructions
+    assert "Mention this reason explicitly in your very first sentence." in conn.mode_specific_instructions
 
