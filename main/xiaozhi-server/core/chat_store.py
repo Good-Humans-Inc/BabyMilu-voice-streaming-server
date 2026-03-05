@@ -392,6 +392,7 @@ class SupabaseChatStore:
             "created_at": now_iso,
             "start_time": now_iso,
             "last_active_at": now_iso,
+            "memory_status": "pending",
         }
         try:
             self._insert(self.sessions_table, payload)
@@ -410,6 +411,7 @@ class SupabaseChatStore:
                         "end_time": None,
                         "analysis_status": None,
                         "last_active_at": now_iso,
+                        "memory_status": "pending",
                     },
                 )
             else:
