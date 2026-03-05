@@ -226,14 +226,14 @@ class SQLiteChatStore:
                 """,
                 (
                     _now_iso(),
-                    self._append_turn_to_json_array(db, session_id, text),
+                    self._append_turn_id_to_json_array(db, session_id, cur.lastrowid),
                     session_id,
                 ),
             )
             if self.logger:
                 self.logger.info(f"[ChatStore:sqlite] insert_turn rowcount={cur.rowcount}")
 
-    def _append_turn_to_json_array(self, db: sqlite3.Connection, session_id: str, text: str) -> str:
+    def _append_turn_id_to_json_array(self, db: sqlite3.Connection, session_id: str, turn_id) -> str:
         existing_row = db.execute(
             """
             SELECT turns FROM sessions WHERE session_id = ?
@@ -248,7 +248,7 @@ class SQLiteChatStore:
                     existing_turns = parsed
             except Exception:
                 existing_turns = []
-        existing_turns.append(text)
+        existing_turns.append(turn_id)
         return json.dumps(existing_turns, ensure_ascii=False)
 
     def end_session(self, session_id):
@@ -341,11 +341,12 @@ class SupabaseChatStore:
     def is_configured(self) -> bool:
         return bool(self.base_url and self.service_role_key)
 
-    def _insert(self, table: str, payload: dict):
+    def _insert(self, table: str, payload: dict, return_row: bool = False):
         url = f"{self.base_url}/rest/v1/{table}"
+        prefer_header = "return=representation" if return_row else "return=minimal"
         response = requests.post(
             url,
-            headers={**self.headers, "Prefer": "return=minimal"},
+            headers={**self.headers, "Prefer": prefer_header},
             json=payload,
             timeout=self.timeout_seconds,
         )
@@ -353,6 +354,11 @@ class SupabaseChatStore:
             raise RuntimeError(
                 f"Supabase insert failed table={table} status={response.status_code} body={response.text}"
             )
+        if return_row:
+            rows = response.json()
+            if isinstance(rows, list) and rows:
+                return rows[0]
+            return None
 
     def _upsert(self, table: str, payload: dict, on_conflict: str):
         url = f"{self.base_url}/rest/v1/{table}?on_conflict={quote(on_conflict, safe='')}"
@@ -491,7 +497,7 @@ class SupabaseChatStore:
             self.logger.info(
                 f"[ChatStore:supabase] insert_turn(session_id={session_id}, turn_index={turn_index}, speaker={speaker}, text_len={len(text)})"
             )
-        self._insert(
+        inserted_row = self._insert(
             self.turns_table,
             {
                 "session_id": session_id,
@@ -501,24 +507,34 @@ class SupabaseChatStore:
                 "created_at": _now_iso(),
                 "timestamp": _now_iso(),
             },
+            return_row=True,
         )
+        turn_id = self._extract_turn_id(inserted_row, default=turn_index)
         self._update_eq(
             self.sessions_table,
             "session_id",
             session_id,
             {
                 "last_active_at": _now_iso(),
-                "turns": self._append_turn_to_supabase_array(session_id, text),
+                "turns": self._append_turn_id_to_supabase_array(session_id, turn_id),
             },
         )
 
-    def _append_turn_to_supabase_array(self, session_id: str, text: str):
+    def _append_turn_id_to_supabase_array(self, session_id: str, turn_id):
         existing = self._select_eq(self.sessions_table, "session_id", session_id) or {}
         turns = existing.get("turns")
         if not isinstance(turns, list):
             turns = []
-        turns.append(text)
+        turns.append(turn_id)
         return turns
+
+    def _extract_turn_id(self, inserted_row: dict, default):
+        if isinstance(inserted_row, dict):
+            if "id" in inserted_row and inserted_row.get("id") is not None:
+                return inserted_row.get("id")
+            if "turn_id" in inserted_row and inserted_row.get("turn_id") is not None:
+                return inserted_row.get("turn_id")
+        return default
 
     def end_session(self, session_id):
         if self.logger:
