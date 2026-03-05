@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -73,6 +74,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             end_time TEXT,
             analysis_status TEXT,
             memory_status TEXT,
+            turns TEXT,
             conversation_id TEXT,
             analysis_json TEXT,
             token_usage INTEGER DEFAULT 0,
@@ -99,6 +101,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "sessions", "token_usage", "INTEGER DEFAULT 0")
     _add_column_if_missing(conn, "sessions", "last_active_at", "TEXT")
     _add_column_if_missing(conn, "sessions", "memory_status", "TEXT")
+    _add_column_if_missing(conn, "sessions", "turns", "TEXT")
     _add_column_if_missing(conn, "turns", "created_at", "TEXT")
     _add_column_if_missing(conn, "users", "device_ids", "TEXT")
 
@@ -162,8 +165,8 @@ class SQLiteChatStore:
         with get_db() as db:
             cur = db.execute(
                 """
-                INSERT INTO sessions (session_id, user_name, user_id, device_id, created_at, start_time, last_active_at, memory_status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO sessions (session_id, user_name, user_id, device_id, created_at, start_time, last_active_at, memory_status, turns)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     user_name = excluded.user_name,
                     user_id = excluded.user_id,
@@ -173,6 +176,7 @@ class SQLiteChatStore:
                     end_time = NULL,
                     analysis_status = NULL,
                     memory_status = 'pending',
+                    turns = COALESCE(sessions.turns, '[]'),
                     last_active_at = excluded.last_active_at
                 """,
                 (
@@ -184,6 +188,7 @@ class SQLiteChatStore:
                     _now_iso(),
                     _now_iso(),
                     "pending",
+                    "[]",
                 ),
             )
 
@@ -215,13 +220,36 @@ class SQLiteChatStore:
             db.execute(
                 """
                 UPDATE sessions
-                SET last_active_at = ?
+                SET last_active_at = ?,
+                    turns = ?
                 WHERE session_id = ?
                 """,
-                (_now_iso(), session_id),
+                (
+                    _now_iso(),
+                    self._append_turn_to_json_array(db, session_id, text),
+                    session_id,
+                ),
             )
             if self.logger:
                 self.logger.info(f"[ChatStore:sqlite] insert_turn rowcount={cur.rowcount}")
+
+    def _append_turn_to_json_array(self, db: sqlite3.Connection, session_id: str, text: str) -> str:
+        existing_row = db.execute(
+            """
+            SELECT turns FROM sessions WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+        existing_turns = []
+        if existing_row and existing_row[0]:
+            try:
+                parsed = json.loads(existing_row[0])
+                if isinstance(parsed, list):
+                    existing_turns = parsed
+            except Exception:
+                existing_turns = []
+        existing_turns.append(text)
+        return json.dumps(existing_turns, ensure_ascii=False)
 
     def end_session(self, session_id):
         if self.logger:
@@ -433,6 +461,7 @@ class SupabaseChatStore:
             "start_time": now_iso,
             "last_active_at": now_iso,
             "memory_status": "pending",
+            "turns": [],
         }
         try:
             self._insert(self.sessions_table, payload)
@@ -477,8 +506,19 @@ class SupabaseChatStore:
             self.sessions_table,
             "session_id",
             session_id,
-            {"last_active_at": _now_iso()},
+            {
+                "last_active_at": _now_iso(),
+                "turns": self._append_turn_to_supabase_array(session_id, text),
+            },
         )
+
+    def _append_turn_to_supabase_array(self, session_id: str, text: str):
+        existing = self._select_eq(self.sessions_table, "session_id", session_id) or {}
+        turns = existing.get("turns")
+        if not isinstance(turns, list):
+            turns = []
+        turns.append(text)
+        return turns
 
     def end_session(self, session_id):
         if self.logger:
