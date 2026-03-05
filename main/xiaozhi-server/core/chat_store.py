@@ -72,6 +72,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             start_time TEXT,
             end_time TEXT,
             analysis_status TEXT,
+            memory_status TEXT,
             conversation_id TEXT,
             analysis_json TEXT,
             token_usage INTEGER DEFAULT 0,
@@ -97,6 +98,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "sessions", "analysis_json", "TEXT")
     _add_column_if_missing(conn, "sessions", "token_usage", "INTEGER DEFAULT 0")
     _add_column_if_missing(conn, "sessions", "last_active_at", "TEXT")
+    _add_column_if_missing(conn, "sessions", "memory_status", "TEXT")
     _add_column_if_missing(conn, "turns", "created_at", "TEXT")
     _add_column_if_missing(conn, "users", "device_ids", "TEXT")
 
@@ -160,8 +162,8 @@ class SQLiteChatStore:
         with get_db() as db:
             cur = db.execute(
                 """
-                INSERT INTO sessions (session_id, user_name, user_id, device_id, created_at, start_time, last_active_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO sessions (session_id, user_name, user_id, device_id, created_at, start_time, last_active_at, memory_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     user_name = excluded.user_name,
                     user_id = excluded.user_id,
@@ -170,6 +172,7 @@ class SQLiteChatStore:
                     start_time = excluded.start_time,
                     end_time = NULL,
                     analysis_status = NULL,
+                    memory_status = 'pending',
                     last_active_at = excluded.last_active_at
                 """,
                 (
@@ -180,6 +183,7 @@ class SQLiteChatStore:
                     _now_iso(),
                     _now_iso(),
                     _now_iso(),
+                    "pending",
                 ),
             )
 
@@ -227,7 +231,8 @@ class SQLiteChatStore:
                 """
                 UPDATE sessions
                 SET end_time = ?,
-                    analysis_status = 'pending'
+                    analysis_status = 'pending',
+                    memory_status = 'pending'
                 WHERE session_id = ?
                 """,
                 (_now_iso(), session_id),
@@ -485,6 +490,7 @@ class SupabaseChatStore:
             {
                 "end_time": _now_iso(),
                 "analysis_status": "pending",
+                "memory_status": "pending",
             },
         )
 
