@@ -267,6 +267,9 @@ class SupabaseChatStore:
         self.users_table = os.environ.get("SUPABASE_USERS_TABLE", "users")
         self.sessions_table = os.environ.get("SUPABASE_SESSIONS_TABLE", "sessions")
         self.turns_table = os.environ.get("SUPABASE_TURNS_TABLE", "turns")
+        self.memory_read_model_table = os.environ.get(
+            "SUPABASE_MEMORY_READ_MODEL_TABLE", "memory_read_model"
+        )
 
         self.headers = {
             "apikey": self.service_role_key,
@@ -276,7 +279,7 @@ class SupabaseChatStore:
 
         if self.logger:
             self.logger.info(
-                f"[ChatStore:init] backend=supabase base_url={self.base_url}, users_table={self.users_table}, sessions_table={self.sessions_table}, turns_table={self.turns_table}"
+                f"[ChatStore:init] backend=supabase base_url={self.base_url}, users_table={self.users_table}, sessions_table={self.sessions_table}, turns_table={self.turns_table}, memory_read_model_table={self.memory_read_model_table}"
             )
 
     def is_configured(self) -> bool:
@@ -337,6 +340,17 @@ class SupabaseChatStore:
             return rows[0]
         return None
 
+    def _ensure_memory_read_model(self, user_id: str):
+        if not user_id:
+            return
+        self._upsert(
+            self.memory_read_model_table,
+            {
+                "user_id": user_id,
+            },
+            on_conflict="user_id",
+        )
+
     def get_or_create_user(self, user_id: str, name: str, device_id: str = ""):
         if self.logger:
             self.logger.info(
@@ -352,6 +366,17 @@ class SupabaseChatStore:
             {"user_id": user_id, "name": name, "device_ids": merged_device_ids},
             on_conflict="user_id",
         )
+        try:
+            self._ensure_memory_read_model(user_id)
+            if self.logger:
+                self.logger.info(
+                    f"[ChatStore:supabase] ensured memory_read_model(user_id={user_id})"
+                )
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(
+                    f"[ChatStore:supabase] ensure memory_read_model failed for user_id={user_id}: {e}"
+                )
 
     def create_session(self, *, session_id, user_id, user_name, device_id):
         if self.logger:
