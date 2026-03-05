@@ -1208,7 +1208,13 @@ Return ONLY the JSON array, no other explanation."""
             # Ensure session is ended even if memory saving is disabled or fails
             if getattr(self, "_session_created", False) and not getattr(self, "_session_closed", False):
                 try:
-                    self.chat_store.end_session(self.session_id)
+                    if getattr(self, "turn_index", 0) == 0:
+                        self.logger.bind(tag=TAG).info(
+                            f"No turns recorded, deleting empty session: {self.session_id}"
+                        )
+                        self.chat_store.delete_session(self.session_id)
+                    else:
+                        self.chat_store.end_session(self.session_id)
                 finally:
                     self._session_closed = True
         except Exception as e:

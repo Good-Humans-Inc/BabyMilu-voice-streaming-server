@@ -236,6 +236,29 @@ class SQLiteChatStore:
             if self.logger:
                 self.logger.info(f"[ChatStore:sqlite] end_session rowcount={cur.rowcount}")
 
+    def delete_session(self, session_id):
+        if self.logger:
+            self.logger.info(f"[ChatStore:sqlite] delete_session(session_id={session_id})")
+        with get_db() as db:
+            turns_cur = db.execute(
+                """
+                DELETE FROM turns
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            )
+            session_cur = db.execute(
+                """
+                DELETE FROM sessions
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            )
+            if self.logger:
+                self.logger.info(
+                    f"[ChatStore:sqlite] delete_session turns_rowcount={turns_cur.rowcount} session_rowcount={session_cur.rowcount}"
+                )
+
     def update_session_conversation_id(self, session_id: str, conversation_id: str):
         if self.logger:
             self.logger.info(
@@ -322,6 +345,18 @@ class SupabaseChatStore:
         if not response.ok:
             raise RuntimeError(
                 f"Supabase update failed table={table} filter={field}=eq.{value} status={response.status_code} body={response.text}"
+            )
+
+    def _delete_eq(self, table: str, field: str, value: str):
+        url = f"{self.base_url}/rest/v1/{table}?{field}=eq.{quote(str(value), safe='')}"
+        response = requests.delete(
+            url,
+            headers={**self.headers, "Prefer": "return=minimal"},
+            timeout=self.timeout_seconds,
+        )
+        if not response.ok:
+            raise RuntimeError(
+                f"Supabase delete failed table={table} filter={field}=eq.{value} status={response.status_code} body={response.text}"
             )
 
     def _select_eq(self, table: str, field: str, value: str):
@@ -453,6 +488,12 @@ class SupabaseChatStore:
             },
         )
 
+    def delete_session(self, session_id):
+        if self.logger:
+            self.logger.info(f"[ChatStore:supabase] delete_session(session_id={session_id})")
+        self._delete_eq(self.turns_table, "session_id", session_id)
+        self._delete_eq(self.sessions_table, "session_id", session_id)
+
     def update_session_conversation_id(self, session_id: str, conversation_id: str):
         if self.logger:
             self.logger.info(
@@ -522,6 +563,13 @@ class ChatStore:
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ChatStore] end_session failed: {e}")
+
+    def delete_session(self, session_id):
+        try:
+            self.store.delete_session(session_id=session_id)
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"[ChatStore] delete_session failed: {e}")
 
     def update_session_conversation_id(self, session_id: str, conversation_id: str):
         try:
