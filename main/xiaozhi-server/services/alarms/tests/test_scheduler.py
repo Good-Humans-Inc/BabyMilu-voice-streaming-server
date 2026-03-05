@@ -36,6 +36,9 @@ class _FakeSessionStore:
         self.created.append((device_id, session_config))
         return session
 
+    def delete_session(self, device_id: str):
+        self.sessions.pop(device_id, None)
+
 
 def _make_alarm(
     device_id: str,
@@ -90,15 +93,6 @@ def test_prepare_wake_requests_creates_session(monkeypatch):
         ]
 
     monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
-    recorded = {}
-
-    def fake_mark(alarm, *, last_processed, next_occurrence):
-        recorded["last_processed"] = last_processed
-        recorded["next_occurrence"] = next_occurrence
-
-    monkeypatch.setattr(
-        scheduler.firestore_client, "mark_alarm_processed", fake_mark
-    )
 
     now = datetime.now(timezone.utc)
     wake_requests = scheduler.prepare_wake_requests(now, lookahead=timedelta(minutes=1))
@@ -114,8 +108,6 @@ def test_prepare_wake_requests_creates_session(monkeypatch):
         "label": "Morning Wake",
         "context": None,
     }
-    assert recorded["last_processed"] == next_occurrence
-    assert recorded["next_occurrence"] > next_occurrence
 
 
 def test_prepare_wake_requests_skips_existing_session(monkeypatch):
@@ -134,23 +126,12 @@ def test_prepare_wake_requests_skips_existing_session(monkeypatch):
         return [_make_alarm("DEV123", "morning_alarm")]
 
     monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
-    called = False
-
-    def fake_mark(*args, **kwargs):
-        nonlocal called
-        called = True
-
-    monkeypatch.setattr(
-        scheduler.firestore_client, "mark_alarm_processed", fake_mark
-    )
-
     wake_requests = scheduler.prepare_wake_requests(
         datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
     )
 
     assert wake_requests == []
     assert fake_store.created == []
-    assert called is False
 
 
 def test_prepare_wake_requests_skips_when_last_processed_matches(monkeypatch):
@@ -170,42 +151,31 @@ def test_prepare_wake_requests_skips_when_last_processed_matches(monkeypatch):
         ]
 
     monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
-    called = False
-
-    def fake_mark(*args, **kwargs):
-        nonlocal called
-        called = True
-
-    monkeypatch.setattr(
-        scheduler.firestore_client, "mark_alarm_processed", fake_mark
-    )
-
     wake_requests = scheduler.prepare_wake_requests(
         datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
     )
 
     assert wake_requests == []
-    assert called is False
 
 
-def test_prepare_wake_requests_marks_one_time_alarm_complete(monkeypatch):
-    fake_store = _FakeSessionStore()
-    monkeypatch.setattr(scheduler, "session_context_store", fake_store)
-
+def test_finalize_wake_request_marks_one_time_alarm_complete(monkeypatch):
     next_occurrence = datetime(2024, 1, 1, 7, tzinfo=timezone.utc)
-
-    def fake_fetch(now, lookahead):
-        return [
-            _make_alarm(
-                "DEV123",
-                "morning_alarm",
-                repeat=models.AlarmRepeat.NONE,
-                days=["2024-01-01"],
-                next_occurrence=next_occurrence,
-            )
-        ]
-
-    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
+    alarm = _make_alarm(
+        "DEV123",
+        "morning_alarm",
+        repeat=models.AlarmRepeat.NONE,
+        days=["2024-01-01"],
+        next_occurrence=next_occurrence,
+    )
+    target = models.AlarmTarget(device_id="DEV123", mode="morning_alarm")
+    fake_session = session_models.ModeSession(
+        device_id="DEV123",
+        session_type="alarm",
+        triggered_at=datetime.now(timezone.utc),
+        ttl_seconds=300,
+        session_config={"mode": "morning_alarm"},
+    )
+    wake_request = scheduler.tasks.WakeRequest(alarm=alarm, target=target, session=fake_session)
     completed = {}
     processed_called = False
 
@@ -224,14 +194,31 @@ def test_prepare_wake_requests_marks_one_time_alarm_complete(monkeypatch):
         scheduler.firestore_client, "mark_alarm_processed", fake_mark
     )
 
-    wake_requests = scheduler.prepare_wake_requests(
-        datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
-    )
-
-    assert len(wake_requests) == 1
+    scheduler.finalize_wake_request(wake_request, now=datetime.now(timezone.utc))
     assert completed["alarm_id"] == "alarm-123"
     assert completed["last_processed"] == next_occurrence
     assert processed_called is False
+
+
+def test_rollback_wake_request_deletes_session(monkeypatch):
+    fake_store = _FakeSessionStore()
+    fake_store.sessions["DEV123"] = session_models.ModeSession(
+        device_id="DEV123",
+        session_type="alarm",
+        triggered_at=datetime.now(timezone.utc),
+        ttl_seconds=300,
+        session_config={"mode": "morning_alarm"},
+    )
+    monkeypatch.setattr(scheduler, "session_context_store", fake_store)
+    wake_request = scheduler.tasks.WakeRequest(
+        alarm=_make_alarm("DEV123", "morning_alarm"),
+        target=models.AlarmTarget(device_id="DEV123", mode="morning_alarm"),
+        session=fake_store.sessions["DEV123"],
+    )
+
+    scheduler.rollback_wake_request(wake_request)
+
+    assert "DEV123" not in fake_store.sessions
 
 
 def test_compute_next_occurrence_uses_schedule_days():

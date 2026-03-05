@@ -17,7 +17,7 @@ MODE_CONFIG: Dict[str, Dict[str, Any]] = {
         # Alarm persistence: keep trying to wake user up.
         "followup_enabled": True,
         "followup_delay": 10,  # seconds between follow-ups
-        "followup_max": 5,  # max number of follow-ups
+        "followup_max": 1,  # cap nudges to reduce accidental repetitive prompts
         "use_separate_conversation": True,
     },
 }

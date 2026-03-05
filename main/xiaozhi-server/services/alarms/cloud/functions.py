@@ -26,6 +26,19 @@ def scan_due_alarms(request) -> Dict[str, Any]:
         fired = _wake_device(wake_request)
         if fired:
             triggered += 1
+            try:
+                scheduler.finalize_wake_request(wake_request, now=now)
+            except Exception as exc:
+                logger.bind(tag=TAG).warning(
+                    f"Failed to finalize alarm {wake_request.alarm.alarm_id}: {exc}"
+                )
+        else:
+            try:
+                scheduler.rollback_wake_request(wake_request)
+            except Exception as exc:
+                logger.bind(tag=TAG).warning(
+                    f"Failed to rollback wake request for {wake_request.target.device_id}: {exc}"
+                )
         results.append(
             {
                 "alarmId": wake_request.alarm.alarm_id,
