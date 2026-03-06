@@ -6,12 +6,64 @@ from core.utils.util import audio_to_data
 from core.providers.tts.dto.dto import SentenceType
 
 TAG = __name__
+DEFAULT_TTS_STOP_WATCHDOG_SECONDS = 15
+
+
+def _disarm_tts_stop_watchdog(conn):
+    task = getattr(conn, "tts_stop_watchdog_task", None)
+    if task and not task.done():
+        task.cancel()
+    conn.tts_stop_watchdog_task = None
+
+
+def _arm_tts_stop_watchdog(conn):
+    _disarm_tts_stop_watchdog(conn)
+    conn.tts_stop_watchdog_seq = int(getattr(conn, "tts_stop_watchdog_seq", 0)) + 1
+    seq = conn.tts_stop_watchdog_seq
+    timeout_s = float(
+        conn.config.get("tts_stop_watchdog_seconds", DEFAULT_TTS_STOP_WATCHDOG_SECONDS)
+    )
+
+    async def _watchdog():
+        try:
+            await asyncio.sleep(timeout_s)
+            if seq != getattr(conn, "tts_stop_watchdog_seq", -1):
+                return
+            conn.logger.bind(tag=TAG).error(
+                "TTS watchdog timeout: no tts:stop observed after tts:start "
+                f"(session={getattr(conn, 'session_id', None)}, device={getattr(conn, 'device_id', None)}, timeout={timeout_s}s). "
+                "Forcing stop signal."
+            )
+            try:
+                await conn.websocket.send(
+                    json.dumps(
+                        {
+                            "type": "tts",
+                            "state": "stop",
+                            "session_id": getattr(conn, "session_id", ""),
+                        }
+                    )
+                )
+            except Exception as exc:
+                conn.logger.bind(tag=TAG).error(
+                    f"TTS watchdog failed to send forced stop: {exc}"
+                )
+            try:
+                conn.client_is_speaking = False
+                conn.clearSpeakStatus()
+            except Exception:
+                pass
+        except asyncio.CancelledError:
+            return
+
+    conn.tts_stop_watchdog_task = asyncio.create_task(_watchdog())
 
 
 async def sendAudioMessage(conn, sentenceType, audios, text):
     if conn.tts.tts_audio_first_sentence:
         conn.logger.bind(tag=TAG).info(f"发送第一段语音: {text}")
         conn.tts.tts_audio_first_sentence = False
+        _arm_tts_stop_watchdog(conn)
         await send_tts_message(conn, "start", None)
 
     if sentenceType == SentenceType.FIRST:
@@ -198,6 +250,7 @@ async def send_tts_message(conn, state, text=None):
 
     # TTS播放结束
     if state == "stop":
+        _disarm_tts_stop_watchdog(conn)
         # 标记TTS停止时间，用于后续“静音窗口”计算
         try:
             conn.last_tts_stop_ms = int(time.time() * 1000)

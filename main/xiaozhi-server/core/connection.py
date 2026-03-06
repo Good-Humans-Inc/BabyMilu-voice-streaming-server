@@ -156,6 +156,8 @@ class ConnectionHandler:
         self.followup_exit_after = 120  # seconds since last speech before exit
         self.last_tts_stop_ms = 0
         self.last_stt_activity_ms = 0
+        self.tts_stop_watchdog_task = None
+        self.tts_stop_watchdog_seq = 0
 
         # 线程/任务
         self.loop = asyncio.get_event_loop()
@@ -2712,6 +2714,10 @@ Return ONLY the JSON array, no other explanation."""
                 except asyncio.CancelledError:
                     pass
                 self.timeout_task = None
+
+            if self.tts_stop_watchdog_task and not self.tts_stop_watchdog_task.done():
+                self.tts_stop_watchdog_task.cancel()
+                self.tts_stop_watchdog_task = None
 
             if hasattr(self, "func_handler") and self.func_handler:
                 try:
