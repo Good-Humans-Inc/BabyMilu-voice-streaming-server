@@ -34,6 +34,14 @@ def _is_retryable(exc: Exception) -> bool:
     return any(token in msg for token in _RETRYABLE_MESSAGES)
 
 
+def _is_conversation_not_found(exc: Exception) -> bool:
+    """Return True when OpenAI reports the referenced conversation ID is missing."""
+    msg = str(exc).lower()
+    if isinstance(exc, openai.APIStatusError) and exc.status_code == 404:
+        return "conversation" in msg and "not found" in msg
+    return "conversation with id" in msg and "not found" in msg
+
+
 class LLMProvider(LLMProviderBase):
     def __init__(self, config):
         self.model_name = config.get("model_name")
@@ -184,6 +192,21 @@ class LLMProvider(LLMProviderBase):
 
             except Exception as e:
                 last_exc = e
+                if _is_conversation_not_found(e):
+                    logger.bind(tag=TAG).warning(
+                        f"Conversation not found for session {session_id}; resetting conversation binding and retrying: {e}"
+                    )
+                    self._conversations.pop(session_id, None)
+                    callback = kwargs.get("on_conversation_not_found")
+                    if callable(callback):
+                        try:
+                            callback()
+                        except Exception as callback_exc:
+                            logger.bind(tag=TAG).warning(
+                                f"on_conversation_not_found callback failed: {callback_exc}"
+                            )
+                    if attempt < _MAX_RETRIES - 1:
+                        continue
                 if _is_retryable(e) and attempt < _MAX_RETRIES - 1:
                     delay = _RETRY_BASE_DELAY * (2 ** attempt)
                     logger.bind(tag=TAG).warning(
@@ -317,6 +340,21 @@ class LLMProvider(LLMProviderBase):
 
             except Exception as e:
                 last_exc = e
+                if _is_conversation_not_found(e):
+                    logger.bind(tag=TAG).warning(
+                        f"Conversation not found for session {session_id}; resetting function-call conversation binding and retrying: {e}"
+                    )
+                    self._conversations.pop(session_id, None)
+                    callback = kwargs.get("on_conversation_not_found")
+                    if callable(callback):
+                        try:
+                            callback()
+                        except Exception as callback_exc:
+                            logger.bind(tag=TAG).warning(
+                                f"on_conversation_not_found callback failed: {callback_exc}"
+                            )
+                    if attempt < _MAX_RETRIES - 1:
+                        continue
                 if _is_retryable(e) and attempt < _MAX_RETRIES - 1:
                     delay = _RETRY_BASE_DELAY * (2 ** attempt)
                     logger.bind(tag=TAG).warning(

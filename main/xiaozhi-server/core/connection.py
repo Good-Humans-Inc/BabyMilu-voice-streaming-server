@@ -2161,6 +2161,25 @@ Return ONLY the JSON array, no other explanation."""
             summary = summary[-max_chars:]
         return summary
 
+    def _handle_llm_conversation_not_found(self):
+        """Clear stale persisted conversation IDs when provider reports 404."""
+        self.current_conversation_id = None
+        if self.use_mode_conversation and self.mode_session:
+            self.logger.bind(tag=TAG).warning(
+                f"Clearing stale mode conversation ID for device {self.device_id}"
+            )
+            self._update_mode_session_conversation({})
+            return
+        if self.device_id:
+            self.logger.bind(tag=TAG).warning(
+                f"Clearing stale device conversation ID for {self.device_id}"
+            )
+            update_conversation_state_for_device(
+                self.device_id,
+                conversation_id=None,
+                last_used=None,
+            )
+
     def _derive_conversation_ttl(self) -> timedelta:
         try:
             selected_llm = (self.config.get("selected_module") or {}).get("LLM")
@@ -2330,7 +2349,9 @@ Return ONLY the JSON array, no other explanation."""
             if memory_str:
                 instructions += f"\n\n<memory>\n{memory_str}\n</memory>"
 
-            kwargs: Dict[str, Any] = {}
+            kwargs: Dict[str, Any] = {
+                "on_conversation_not_found": self._handle_llm_conversation_not_found
+            }
             if instructions:
                 kwargs["instructions"] = instructions
                 self.logger.bind(tag=TAG).debug(
