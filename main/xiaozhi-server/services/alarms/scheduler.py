@@ -13,6 +13,7 @@ TAG = __name__
 logger = setup_logging()
 SESSION_TYPE = "alarm"
 SESSION_TTL = ALARM_TIMING["session_ttl"]
+ONE_TIME_SESSION_TTL = ALARM_TIMING["one_time_session_ttl"]
 
 _DAY_TO_INDEX = {name: idx for idx, name in enumerate(models.DAY_NAMES)}
 
@@ -62,10 +63,15 @@ def prepare_wake_requests(
                 "label": alarm.label,
                 "context": alarm.context,  # reason/purpose for the alarm conversation
             }
+            ttl = (
+                ONE_TIME_SESSION_TTL
+                if alarm.schedule.repeat == models.AlarmRepeat.NONE
+                else SESSION_TTL
+            )
             new_session = session_context_store.create_session(
                 device_id=target.device_id,
                 session_type=SESSION_TYPE,
-                ttl=SESSION_TTL,
+                ttl=ttl,
                 triggered_at=now,
                 session_config=session_config,
             )

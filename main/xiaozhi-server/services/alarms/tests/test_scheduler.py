@@ -221,6 +221,32 @@ def test_rollback_wake_request_deletes_session(monkeypatch):
     assert "DEV123" not in fake_store.sessions
 
 
+def test_prepare_wake_requests_one_time_uses_short_session_ttl(monkeypatch):
+    fake_store = _FakeSessionStore()
+    monkeypatch.setattr(scheduler, "session_context_store", fake_store)
+
+    def fake_fetch(now, lookahead):
+        return [
+            _make_alarm(
+                "DEV123",
+                "morning_alarm",
+                repeat=models.AlarmRepeat.NONE,
+                days=["2024-01-01"],
+            )
+        ]
+
+    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
+
+    wake_requests = scheduler.prepare_wake_requests(
+        datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
+    )
+
+    assert len(wake_requests) == 1
+    assert wake_requests[0].session.ttl_seconds == int(
+        scheduler.ONE_TIME_SESSION_TTL.total_seconds()
+    )
+
+
 def test_compute_next_occurrence_uses_schedule_days():
     reference = datetime(2024, 1, 1, 7, tzinfo=timezone.utc)  # Monday
     alarm = _make_alarm(
