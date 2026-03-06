@@ -523,7 +523,7 @@ class SupabaseChatStore:
         profile = existing.get("profile") if isinstance(existing.get("profile"), dict) else {}
         identity = profile.get("identity") if isinstance(profile.get("identity"), dict) else {}
 
-        keys_to_fill = ("name", "pronouns", "city", "timezone")
+        keys_to_fill = ("name", "pronouns", "city", "timezone", "birthday")
 
         def _is_empty(value):
             if value is None:
