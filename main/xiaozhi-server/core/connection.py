@@ -754,6 +754,10 @@ class ConnectionHandler:
             # 获取差异化配置
             self._initialize_private_config()
 
+            # Hydrate any active server-owned mode session (e.g., alarm) so
+            # hello handling can correctly trigger server-initiated greeting.
+            self._hydrate_mode_session()
+
             # 同步构建首轮系统提示词（包含增强）
             try:
                 base_prompt = self.config.get("prompt")
