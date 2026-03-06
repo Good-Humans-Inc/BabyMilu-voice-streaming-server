@@ -9,6 +9,7 @@ from services.logging import setup_logging
 from services.alarms import scheduler, tasks
 from services.messaging.mqtt import publish_ws_start
 from services.alarms.config import ALARM_TIMING
+from core.utils.mac import normalize_mac
 
 TAG = __name__
 logger = setup_logging()
@@ -23,6 +24,27 @@ def scan_due_alarms(request) -> Dict[str, Any]:
     triggered = 0
     results: List[Dict[str, Any]] = []
     for wake_request in wake_requests:
+        if not _is_device_allowed(wake_request.target.device_id):
+            logger.bind(tag=TAG).info(
+                f"Skipping wake for filtered device {wake_request.target.device_id}"
+            )
+            try:
+                scheduler.rollback_wake_request(wake_request)
+            except Exception as exc:
+                logger.bind(tag=TAG).warning(
+                    f"Failed to rollback filtered wake request for {wake_request.target.device_id}: {exc}"
+                )
+            results.append(
+                {
+                    "alarmId": wake_request.alarm.alarm_id,
+                    "label": wake_request.alarm.label,
+                    "deviceId": wake_request.target.device_id,
+                    "mode": wake_request.target.mode,
+                    "fired": False,
+                    "skipped": "device_filter",
+                }
+            )
+            continue
         fired = _wake_device(wake_request)
         if fired:
             triggered += 1
@@ -84,4 +106,24 @@ def _resolve_ws_url() -> str:
 
 def _resolve_broker_url() -> str:
     return os.environ.get("ALARM_MQTT_URL") or os.environ.get("MQTT_URL", "")
+
+
+def _is_device_allowed(device_id: str) -> bool:
+    raw = os.environ.get("ALARM_DEVICE_ALLOWLIST", "").strip()
+    if not raw:
+        return True
+    allowed = set()
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            allowed.add(normalize_mac(token))
+        except Exception:
+            allowed.add(token.lower())
+    try:
+        normalized = normalize_mac(device_id)
+    except Exception:
+        normalized = (device_id or "").lower()
+    return normalized in allowed
 
