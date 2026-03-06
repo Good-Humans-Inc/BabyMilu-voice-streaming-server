@@ -322,6 +322,9 @@ class SQLiteChatStore:
     def ensure_memory_profile_identity(self, user_id: str, device_id: str = ""):
         return
 
+    def get_system_memory_block(self, user_id: str) -> str:
+        return ""
+
 
 class SupabaseChatStore:
     def __init__(self, logger=None):
@@ -563,6 +566,26 @@ class SupabaseChatStore:
             },
         )
 
+    def get_system_memory_block(self, user_id: str) -> str:
+        if not user_id:
+            return ""
+
+        existing = self._select_eq(self.memory_read_model_table, "user_id", user_id)
+        if not isinstance(existing, dict):
+            return ""
+
+        prompt_pack = existing.get("prompt_pack") if isinstance(existing.get("prompt_pack"), dict) else {}
+        memory_block = prompt_pack.get("systemMemoryBlock")
+        if isinstance(memory_block, str):
+            return memory_block
+
+        profile = existing.get("profile") if isinstance(existing.get("profile"), dict) else {}
+        legacy_block = profile.get("systemMemoryBlock")
+        if isinstance(legacy_block, str):
+            return legacy_block
+
+        return ""
+
     def get_or_create_user(self, user_id: str, name: str, device_id: str = ""):
         if self.logger:
             self.logger.info(
@@ -788,4 +811,14 @@ class ChatStore:
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ChatStore] ensure_memory_profile_identity failed: {e}")
+
+    def get_system_memory_block(self, user_id: str) -> str:
+        try:
+            if hasattr(self.store, "get_system_memory_block"):
+                result = self.store.get_system_memory_block(user_id=user_id)
+                return result if isinstance(result, str) else ""
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"[ChatStore] get_system_memory_block failed: {e}")
+        return ""
 

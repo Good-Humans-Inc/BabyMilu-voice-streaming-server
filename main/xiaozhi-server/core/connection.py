@@ -1579,11 +1579,27 @@ Return ONLY the JSON array, no other explanation."""
     def _initialize_memory(self):
         if self.memory is None:
             return
+
+        summary_memory_block = ""
+        try:
+            summary_memory_block = self.chat_store.get_system_memory_block(
+                user_id=getattr(self, "user_id", None)
+            )
+            if summary_memory_block:
+                self.logger.bind(tag=TAG).info(
+                    f"Loaded systemMemoryBlock from memory_read_model for user {getattr(self, 'user_id', None)}"
+                )
+        except Exception as e:
+            self.logger.bind(tag=TAG).warning(
+                f"Failed loading systemMemoryBlock from memory_read_model: {e}"
+            )
+
         self.memory.init_memory(
             role_id=self.device_id,
+            user_id=getattr(self, "user_id", None),
             llm=self.llm,
-            summary_memory=self.config.get("summaryMemory", None),
-            save_to_file=not self.read_config_from_api,
+            summary_memory=summary_memory_block,
+            save_to_file=False,
         )
         """初始化任务模块"""
         self.task.init_task(

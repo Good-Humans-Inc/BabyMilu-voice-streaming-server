@@ -1,9 +1,6 @@
 from ..base import MemoryProviderBase, logger
 import time
 import json
-import os
-import yaml
-from config.config_loader import get_project_dir
 from config.manage_api_client import save_mem_local_short
 from core.utils.util import check_model_key
 
@@ -186,38 +183,23 @@ class MemoryProvider(MemoryProviderBase):
     def __init__(self, config, summary_memory):
         super().__init__(config)
         self.short_memory = ""
-        self.save_to_file = True
-        self.memory_path = get_project_dir() + "data/.memory.yaml"
+        self.save_to_file = False
+        self.user_id = None
         self.load_memory(summary_memory)
 
     def init_memory(
-        self, role_id, llm, summary_memory=None, save_to_file=True, **kwargs
+        self, role_id, llm, summary_memory=None, save_to_file=False, **kwargs
     ):
         super().init_memory(role_id, llm, **kwargs)
-        self.save_to_file = save_to_file
+        self.user_id = kwargs.get("user_id")
+        self.save_to_file = False
         self.load_memory(summary_memory)
 
     def load_memory(self, summary_memory):
-        # api获取到总结记忆后直接返回
-        if summary_memory or not self.save_to_file:
-            self.short_memory = summary_memory
-            return
-
-        all_memory = {}
-        if os.path.exists(self.memory_path):
-            with open(self.memory_path, "r", encoding="utf-8") as f:
-                all_memory = yaml.safe_load(f) or {}
-        if self.role_id in all_memory:
-            self.short_memory = all_memory[self.role_id]
+        self.short_memory = summary_memory or ""
 
     def save_memory_to_file(self):
-        all_memory = {}
-        if os.path.exists(self.memory_path):
-            with open(self.memory_path, "r", encoding="utf-8") as f:
-                all_memory = yaml.safe_load(f) or {}
-        all_memory[self.role_id] = self.short_memory
-        with open(self.memory_path, "w", encoding="utf-8") as f:
-            yaml.dump(all_memory, f, allow_unicode=True)
+        return
 
     async def save_memory(self, msgs):
         # 打印使用的模型信息
@@ -248,28 +230,14 @@ class MemoryProvider(MemoryProviderBase):
         time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         msgStr += f"当前时间：{time_str}"
 
-        if self.save_to_file:
-            result = self.llm.response_no_stream(
-                short_term_memory_prompt,
-                msgStr,
-                max_tokens=2000,
-                temperature=0.2,
-            )
-            json_str = extract_json_data(result)
-            try:
-                json.loads(json_str)  # 检查json格式是否正确
-                self.short_memory = json_str
-                self.save_memory_to_file()
-            except Exception as e:
-                print("Error:", e)
-        else:
-            result = self.llm.response_no_stream(
-                short_term_memory_prompt_only_content,
-                msgStr,
-                max_tokens=2000,
-                temperature=0.2,
-            )
-            save_mem_local_short(self.role_id, result)
+        result = self.llm.response_no_stream(
+            short_term_memory_prompt_only_content,
+            msgStr,
+            max_tokens=2000,
+            temperature=0.2,
+        )
+        self.short_memory = result or ""
+        save_mem_local_short(self.role_id, self.short_memory)
         logger.bind(tag=TAG).info(f"Save memory successful - Role: {self.role_id}")
 
         return self.short_memory
