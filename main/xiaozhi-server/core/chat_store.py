@@ -463,8 +463,33 @@ class SupabaseChatStore:
 
         return identity
 
+    def _build_initial_system_memory_block(self, identity: dict) -> str:
+        identity = identity or {}
+        name = (identity.get("name") or "").strip() or "unknown"
+        pronouns = (identity.get("pronouns") or "").strip() or "unknown"
+        timezone = (identity.get("timezone") or "").strip() or "unknown"
+
+        stable_facts = []
+        city = (identity.get("city") or "").strip()
+        birthday = (identity.get("birthday") or "").strip()
+        if city:
+            stable_facts.append(f"city: {city}")
+        if birthday:
+            stable_facts.append(f"birthday: {birthday}")
+        if not stable_facts:
+            stable_facts.append("none yet")
+
+        facts_text = "\n".join([f"- {fact}" for fact in stable_facts])
+        return (
+            "## Who they are\n"
+            f"[{name}, {pronouns}, {timezone}, stable identity facts]\n\n"
+            "stable identity facts:\n"
+            f"{facts_text}"
+        )
+
     def _build_memory_read_model_payload(self, user_id: str, device_id: str = "") -> dict:
         identity = self._build_identity_from_firestore(user_id=user_id, device_id=device_id)
+        system_memory_block = self._build_initial_system_memory_block(identity)
         return {
             "user_id": user_id,
             "profile": {
@@ -489,7 +514,7 @@ class SupabaseChatStore:
                 "cosmicDraw": "",
             },
             "prompt_pack": {
-                "systemMemoryBlock": "",
+                "systemMemoryBlock": system_memory_block,
                 "structuredFacts": [],
             },
             "stats": {
