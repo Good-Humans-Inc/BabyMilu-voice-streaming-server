@@ -68,6 +68,15 @@ async def startToChat(conn, text):
         await check_bind_device(conn)
         return
 
+    # Avoid overlapping user turns while an LLM response is still in-flight.
+    # Concurrent chat() calls can lock provider conversations and produce
+    # duplicated/conflicting TTS outputs.
+    if not getattr(conn, "llm_finish_task", True):
+        conn.logger.bind(tag=TAG).warning(
+            f"Dropping user query while LLM busy: {actual_text[:80]!r}"
+        )
+        return
+
     # 如果当日的输出字数大于限定的字数
     if conn.max_output_size > 0:
         if check_device_output_limit(
