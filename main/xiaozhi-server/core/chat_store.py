@@ -319,6 +319,9 @@ class SQLiteChatStore:
                     f"[ChatStore:sqlite] update_session_conversation_id rowcount={cur.rowcount}"
                 )
 
+    def ensure_memory_profile_identity(self, user_id: str, device_id: str = ""):
+        return
+
 
 class SupabaseChatStore:
     def __init__(self, logger=None):
@@ -507,6 +510,58 @@ class SupabaseChatStore:
             if "status=409" in str(e):
                 return
             raise
+
+    def ensure_memory_profile_identity(self, user_id: str, device_id: str = ""):
+        if not user_id:
+            return
+
+        existing = self._select_eq(self.memory_read_model_table, "user_id", user_id)
+        if not existing:
+            self._ensure_memory_read_model(user_id=user_id, device_id=device_id)
+            return
+
+        profile = existing.get("profile") if isinstance(existing.get("profile"), dict) else {}
+        identity = profile.get("identity") if isinstance(profile.get("identity"), dict) else {}
+
+        keys_to_fill = ("name", "pronouns", "city", "timezone")
+
+        def _is_empty(value):
+            if value is None:
+                return True
+            if isinstance(value, str):
+                return value.strip() == ""
+            return False
+
+        needs_fill = any(_is_empty(identity.get(k)) for k in keys_to_fill)
+        if not needs_fill:
+            return
+
+        firestore_identity = self._build_identity_from_firestore(user_id=user_id, device_id=device_id)
+
+        updated_identity = dict(identity)
+        changed = False
+        for key in keys_to_fill:
+            current_value = updated_identity.get(key)
+            fetched_value = firestore_identity.get(key)
+            if _is_empty(current_value) and isinstance(fetched_value, str) and fetched_value.strip():
+                updated_identity[key] = fetched_value.strip()
+                changed = True
+
+        if not changed:
+            return
+
+        updated_profile = dict(profile)
+        updated_profile["identity"] = updated_identity
+
+        self._update_eq(
+            self.memory_read_model_table,
+            "user_id",
+            user_id,
+            {
+                "profile": updated_profile,
+                "updated_at": _now_iso(),
+            },
+        )
 
     def get_or_create_user(self, user_id: str, name: str, device_id: str = ""):
         if self.logger:
@@ -725,4 +780,12 @@ class ChatStore:
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ChatStore] update_session_conversation_id failed: {e}")
+
+    def ensure_memory_profile_identity(self, user_id: str, device_id: str = ""):
+        try:
+            if hasattr(self.store, "ensure_memory_profile_identity"):
+                self.store.ensure_memory_profile_identity(user_id=user_id, device_id=device_id)
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"[ChatStore] ensure_memory_profile_identity failed: {e}")
 

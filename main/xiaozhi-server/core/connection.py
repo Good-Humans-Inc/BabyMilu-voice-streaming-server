@@ -1208,6 +1208,16 @@ Return ONLY the JSON array, no other explanation."""
             # Ensure session is ended even if memory saving is disabled or fails
             if getattr(self, "_session_created", False) and not getattr(self, "_session_closed", False):
                 try:
+                    try:
+                        self.chat_store.ensure_memory_profile_identity(
+                            user_id=getattr(self, "user_id", None),
+                            device_id=self.device_id,
+                        )
+                    except Exception as identity_err:
+                        self.logger.bind(tag=TAG).warning(
+                            f"Memory profile identity hydration skipped: {identity_err}"
+                        )
+
                     if getattr(self, "turn_index", 0) == 0:
                         self.logger.bind(tag=TAG).info(
                             f"No turns recorded, deleting empty session: {self.session_id}"
