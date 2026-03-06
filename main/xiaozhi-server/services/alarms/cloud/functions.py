@@ -109,21 +109,28 @@ def _resolve_broker_url() -> str:
 
 
 def _is_device_allowed(device_id: str) -> bool:
-    raw = os.environ.get("ALARM_DEVICE_ALLOWLIST", "").strip()
-    if not raw:
-        return True
-    allowed = set()
-    for token in raw.split(","):
-        token = token.strip()
-        if not token:
-            continue
-        try:
-            allowed.add(normalize_mac(token))
-        except Exception:
-            allowed.add(token.lower())
+    allowed = _parse_device_set(os.environ.get("ALARM_DEVICE_ALLOWLIST", ""))
+    denied = _parse_device_set(os.environ.get("ALARM_DEVICE_DENYLIST", ""))
     try:
         normalized = normalize_mac(device_id)
     except Exception:
         normalized = (device_id or "").lower()
+    if normalized in denied:
+        return False
+    if not allowed:
+        return True
     return normalized in allowed
+
+
+def _parse_device_set(raw: str) -> set[str]:
+    tokens = set()
+    for token in (raw or "").split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            tokens.add(normalize_mac(token))
+        except Exception:
+            tokens.add(token.lower())
+    return tokens
 

@@ -151,3 +151,42 @@ def test_scan_due_alarms_filters_devices_by_allowlist(monkeypatch):
     assert finalized == ["DEV1"]
     assert rolled_back == ["DEV2"]
 
+
+def test_scan_due_alarms_honors_denylist(monkeypatch):
+    fake_requests = [_DummyWakeRequest("DEV1"), _DummyWakeRequest("DEV2")]
+    monkeypatch.setattr(
+        cloud_functions.scheduler,
+        "prepare_wake_requests",
+        lambda now, lookahead: fake_requests,
+    )
+    monkeypatch.setenv("ALARM_DEVICE_DENYLIST", "DEV2")
+    monkeypatch.setenv("ALARM_WS_URL", "ws://fake")
+    monkeypatch.setenv("ALARM_MQTT_URL", "mqtt://fake")
+
+    published = []
+    monkeypatch.setattr(
+        cloud_functions,
+        "publish_ws_start",
+        lambda broker, device_id, ws_url, version=3: published.append(device_id) or True,
+    )
+    finalized = []
+    rolled_back = []
+    monkeypatch.setattr(
+        cloud_functions.scheduler,
+        "finalize_wake_request",
+        lambda wake_request, now=None: finalized.append(wake_request.target.device_id),
+    )
+    monkeypatch.setattr(
+        cloud_functions.scheduler,
+        "rollback_wake_request",
+        lambda wake_request: rolled_back.append(wake_request.target.device_id),
+    )
+
+    response = cloud_functions.scan_due_alarms(request={})  # type: ignore[arg-type]
+
+    assert response["count"] == 2
+    assert response["triggered"] == 1
+    assert published == ["DEV1"]
+    assert finalized == ["DEV1"]
+    assert rolled_back == ["DEV2"]
+
