@@ -6,11 +6,18 @@
 import os
 import requests
 import json
+import hashlib
 import cnlunar
 from typing import Dict, Any
 from config.logger import setup_logging
 from jinja2 import Template
-from core.utils.firestore_client import get_timezone_for_device, get_owner_phone_for_device, get_user_profile_by_phone, extract_user_profile_fields
+from core.utils.firestore_client import (
+    get_timezone_for_device,
+    get_owner_phone_for_device,
+    get_user_profile_by_phone,
+    extract_user_profile_fields,
+    get_active_character_for_device,
+)
 
 TAG = __name__
 
@@ -74,18 +81,58 @@ class PromptManager:
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"加载提示词模板失败: {e}")
 
-    def _get_enhanced_prompt_cache_key(self, device_id: str) -> str:
-        return f"enhanced_prompt:{device_id}"
+    def _get_enhanced_prompt_cache_key(
+        self, device_id: str, prompt_text: str = None
+    ) -> str:
+        """Build a cache key scoped by device + active character + prompt hash.
 
-    def _get_cached_enhanced_prompt(self, device_id: str) -> str:
+        This prevents stale prompt reuse after character switch:
+        same device_id with new activeCharacterId should miss old cache.
+        """
+        if not device_id:
+            return "enhanced_prompt:anonymous"
+
+        char_id = "unknown"
+        try:
+            resolved = get_active_character_for_device(device_id)
+            if resolved:
+                char_id = str(resolved)
+        except Exception:
+            # Best-effort key enrichment; fallback still works
+            pass
+
+        prompt_hash = "nohash"
+        if prompt_text is not None:
+            try:
+                prompt_hash = hashlib.sha1(
+                    str(prompt_text).encode("utf-8")
+                ).hexdigest()[:12]
+            except Exception:
+                prompt_hash = "nohash"
+
+        return f"enhanced_prompt:{device_id}:{char_id}:{prompt_hash}"
+
+    def _get_cached_enhanced_prompt(self, device_id: str, prompt_text: str = None) -> str:
         if not device_id:
             return ""
-        cache_key = self._get_enhanced_prompt_cache_key(device_id)
+        cache_key = self._get_enhanced_prompt_cache_key(device_id, prompt_text=prompt_text)
         cached_prompt = self.cache_manager.get(self.CacheType.DEVICE_PROMPT, cache_key)
         return cached_prompt or ""
 
-    def get_cached_enhanced_prompt(self, device_id: str) -> str:
-        return self._get_cached_enhanced_prompt(device_id)
+    def get_cached_enhanced_prompt(self, device_id: str, prompt_text: str = None) -> str:
+        return self._get_cached_enhanced_prompt(device_id, prompt_text=prompt_text)
+
+    def invalidate_device_prompt_cache(self, device_id: str) -> int:
+        """Invalidate all prompt cache entries for a device."""
+        if not device_id:
+            return 0
+        deleted = self.cache_manager.invalidate_pattern(
+            self.CacheType.DEVICE_PROMPT, f"enhanced_prompt:{device_id}:"
+        )
+        deleted += self.cache_manager.invalidate_pattern(
+            self.CacheType.DEVICE_PROMPT, f"device_prompt:{device_id}"
+        )
+        return deleted
 
     def get_quick_prompt(self, user_prompt: str, device_id: str = None) -> str:
         """快速获取系统提示词（使用用户配置）"""
@@ -104,7 +151,9 @@ class PromptManager:
         # 使用传入的提示词并缓存（如果有设备ID）
         if device_id:
             device_cache_key = f"device_prompt:{device_id}"
-            self.cache_manager.set(self.CacheType.CONFIG, device_cache_key, user_prompt)
+            self.cache_manager.set(
+                self.CacheType.DEVICE_PROMPT, device_cache_key, user_prompt
+            )
             self.logger.bind(tag=TAG).debug(f"设备 {device_id} 的提示词已缓存")
 
         self.logger.bind(tag=TAG).info(f"使用快速提示词: {user_prompt[:50]}...")
@@ -311,7 +360,9 @@ class PromptManager:
         """同步更新上下文信息"""
         try:
             device_id = getattr(conn, "device_id", None)
-            cached_enhanced = self._get_cached_enhanced_prompt(device_id)
+            cached_enhanced = self._get_cached_enhanced_prompt(
+                device_id, prompt_text=self.config.get("prompt")
+            )
             if cached_enhanced:
                 self.logger.bind(tag=TAG).info(
                     f"Enhanced prompt cache hit for device {device_id}, "
@@ -341,7 +392,9 @@ class PromptManager:
             return user_prompt
 
         try:
-            cached_enhanced = self._get_cached_enhanced_prompt(device_id)
+            cached_enhanced = self._get_cached_enhanced_prompt(
+                device_id, prompt_text=user_prompt
+            )
             if cached_enhanced:
                 self.logger.bind(tag=TAG).info(
                     f"Enhanced prompt cache hit for device {device_id}, "
@@ -401,7 +454,9 @@ class PromptManager:
             print(f"[WeatherDebug] build_enhanced_prompt: template has local={contains_local}, weather={contains_weather}")
             print(f"[WeatherDebug] build_enhanced_prompt: values -> local_address={local_address!r}, weather_info={weather_info!r}")
             print(f"[WeatherDebug] build_enhanced_prompt: enhanced prompt length={len(enhanced_prompt)}")
-            device_cache_key = self._get_enhanced_prompt_cache_key(device_id)
+            device_cache_key = self._get_enhanced_prompt_cache_key(
+                device_id, prompt_text=user_prompt
+            )
             self.cache_manager.set(
                 self.CacheType.DEVICE_PROMPT,
                 device_cache_key,

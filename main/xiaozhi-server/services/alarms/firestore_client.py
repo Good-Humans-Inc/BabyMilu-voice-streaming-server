@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from google.cloud import firestore
 from google.cloud.firestore_v1 import FieldFilter
@@ -13,6 +15,15 @@ from services.alarms import models
 
 TAG = __name__
 logger = setup_logging()
+
+_REPEAT_ALIASES = {
+    "weekly": models.AlarmRepeat.WEEKLY,
+    "none": models.AlarmRepeat.NONE,
+    "once": models.AlarmRepeat.NONE,
+    "one_time": models.AlarmRepeat.NONE,
+    "one-time": models.AlarmRepeat.NONE,
+    "no_repeat": models.AlarmRepeat.NONE,
+}
 
 
 def _build_client() -> firestore.Client:
@@ -72,13 +83,30 @@ def fetch_due_alarms(
                 f"label={data.get('label')} targets={len(data.get('targets', []))}"
             )
         )
-        schedule_payload = data["schedule"]
-        repeat = models.AlarmRepeat(str(schedule_payload["repeat"]).lower())
-        schedule = models.AlarmSchedule(
-            repeat=repeat,
-            time_local=schedule_payload["timeLocal"],
-            days=schedule_payload.get("days") or [],
-        )
+        schedule_payload = data.get("schedule")
+        if not isinstance(schedule_payload, dict):
+            logger.bind(tag=TAG).warning(
+                (
+                    f"Skipping alarm {doc.reference.path} (user={user_id}): "
+                    f"missing or invalid schedule payload ({schedule_payload})"
+                )
+            )
+            continue
+        try:
+            repeat = _parse_repeat(schedule_payload["repeat"])
+            schedule = models.AlarmSchedule(
+                repeat=repeat,
+                time_local=schedule_payload["timeLocal"],
+                days=schedule_payload.get("days") or [],
+            )
+        except (KeyError, ValueError) as exc:
+            logger.bind(tag=TAG).warning(
+                (
+                    f"Skipping alarm {doc.reference.path} (user={user_id}): "
+                    f"invalid schedule payload ({schedule_payload}) ({exc})"
+                )
+            )
+            continue
 
         targets_payload = data.get("targets")
         if not isinstance(targets_payload, list) or not targets_payload:
@@ -119,6 +147,7 @@ def _build_alarm_doc(
         user_id=_resolve_user_id(doc),
         uid=data.get("uid"),
         label=data.get("label"),
+        context=data.get("context"),
         schedule=schedule,
         status=models.AlarmStatus(str(data["status"]).lower()),
         next_occurrence_utc=_parse_datetime(data["nextOccurrenceUTC"]),
@@ -190,6 +219,13 @@ def _normalize_device_id(value) -> str:
     return normalize_mac(value)
 
 
+def _parse_repeat(raw_repeat) -> models.AlarmRepeat:
+    key = str(raw_repeat).strip().lower()
+    if key in _REPEAT_ALIASES:
+        return _REPEAT_ALIASES[key]
+    raise ValueError(f"Unsupported repeat value: {raw_repeat}")
+
+
 def mark_alarm_processed(
     alarm: models.AlarmDoc,
     *,
@@ -218,5 +254,87 @@ def mark_alarm_processed(
 def _resolve_user_id(doc) -> str:
     parent = doc.reference.parent.parent
     return parent.id if parent else ""
+
+
+def create_alarm(
+    uid: str,
+    device_id: str,
+    resolved_dt: datetime,
+    label: str,
+    context: str,
+    tz_str: str,
+    client: Optional[firestore.Client] = None,
+) -> str:
+    """Write a one-time alarm doc to /users/{uid}/alarms/{alarm_id} and return the alarm_id.
+
+    Args:
+        uid: The user's document ID (ownerPhone).
+        device_id: The device MAC address that should ring.
+        resolved_dt: Timezone-aware absolute datetime for the alarm.
+        label: Short human-readable name (e.g. "take vitamins").
+        context: Full reason/purpose used to customize the alarm conversation.
+        tz_str: IANA timezone string (e.g. "America/Los_Angeles").
+    """
+    client = client or _build_client()
+    alarm_id = str(uuid.uuid4())
+
+    resolved_local = resolved_dt.astimezone(ZoneInfo(tz_str))
+    time_local = resolved_local.strftime("%H:%M")
+    date_local = resolved_local.strftime("%Y-%m-%d")
+
+    now_utc = datetime.now(timezone.utc)
+    doc = {
+        "label": label,
+        "context": context,
+        "schedule": {
+            # Keep "once" for backward compatibility with currently deployed
+            # cloud scheduler revisions that may not recognize "none".
+            "repeat": "once",
+            "timeLocal": time_local,
+            "days": [date_local],  # ISO date string for one-time alarms
+        },
+        "nextOccurrenceUTC": _format_datetime(resolved_dt),
+        "status": models.AlarmStatus.ON.value,
+        "targets": [{"deviceId": device_id, "mode": "morning_alarm"}],
+        "uid": uid,
+        "source": "voice",
+        "createdAt": _format_datetime(now_utc),
+        "updatedAt": _format_datetime(now_utc),
+    }
+
+    client.collection("users").document(uid).collection("alarms").document(alarm_id).set(doc)
+    logger.bind(tag=TAG).info(
+        f"Created one-time alarm {alarm_id} for user {uid} device {device_id} "
+        f"at {_format_datetime(resolved_dt)} (local {time_local} {tz_str}): '{label}'"
+    )
+    return alarm_id
+
+
+def mark_one_time_alarm_complete(
+    alarm: models.AlarmDoc,
+    *,
+    last_processed: datetime,
+    client: Optional[firestore.Client] = None,
+) -> None:
+    """Turn off a one-time alarm after it fires (sets status=off, records lastProcessedUTC)."""
+    if not alarm.doc_path:
+        logger.bind(tag=TAG).warning(
+            f"Alarm {alarm.alarm_id} missing doc_path; cannot mark complete"
+        )
+        return
+    client = client or _build_client()
+    doc_ref = client.document(alarm.doc_path)
+    now = datetime.now(timezone.utc)
+    doc_ref.set(
+        {
+            "status": models.AlarmStatus.OFF.value,
+            "lastProcessedUTC": _format_datetime(last_processed),
+            "updatedAt": _format_datetime(now),
+        },
+        merge=True,
+    )
+    logger.bind(tag=TAG).info(
+        f"One-time alarm {alarm.alarm_id} (user={alarm.user_id}) marked complete/off"
+    )
 
 

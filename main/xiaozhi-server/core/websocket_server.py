@@ -145,3 +145,34 @@ class WebSocketServer:
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"更新服务器配置失败: {str(e)}")
             return False
+
+    async def claim_device(self, device_id, handler):
+        """Claim a device_id for a connection handler.
+
+        If another handler already holds this device_id, close the old
+        connection first (last-writer-wins / supersede policy).
+        """
+        if not device_id:
+            return
+        async with self.ws_lock:
+            old_handler = self.active_ws_by_device.get(device_id)
+            if old_handler is not None and old_handler is not handler:
+                self.logger.bind(tag=TAG).warning(
+                    f"Device {device_id} already has active connection — superseding"
+                )
+                try:
+                    await old_handler.close()
+                except Exception as e:
+                    self.logger.bind(tag=TAG).error(
+                        f"Failed to close superseded connection for {device_id}: {e}"
+                    )
+            self.active_ws_by_device[device_id] = handler
+
+    async def release_device(self, device_id, handler):
+        """Release a device_id claim, but only if *handler* still owns it."""
+        if not device_id:
+            return
+        async with self.ws_lock:
+            current = self.active_ws_by_device.get(device_id)
+            if current is handler:
+                del self.active_ws_by_device[device_id]
