@@ -1538,8 +1538,6 @@ Return ONLY the JSON array, no other explanation."""
             self.config["prompt"] = private_config["prompt"]
         if private_config.get("voiceprint") is not None:
             self.config["voiceprint"] = private_config["voiceprint"]
-        if private_config.get("summaryMemory") is not None:
-            self.config["summaryMemory"] = private_config["summaryMemory"]
         if private_config.get("device_max_output_size") is not None:
             self.max_output_size = int(private_config["device_max_output_size"])
         if private_config.get("chat_history_conf") is not None:
@@ -1611,7 +1609,6 @@ Return ONLY the JSON array, no other explanation."""
             user_id=getattr(self, "user_id", None),
             llm=self.llm,
             summary_memory=summary_memory_block,
-            save_to_file=False,
         )
         """初始化任务模块"""
         self.task.init_task(

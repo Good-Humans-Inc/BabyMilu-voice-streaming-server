@@ -1,151 +1,6 @@
 from ..base import MemoryProviderBase, logger
 import time
-import json
-from config.manage_api_client import save_mem_local_short
 from core.utils.util import check_model_key
-
-short_term_memory_prompt = """
-# Memory Curator
-
-## Core Mission
-
-Build a growing, dynamic memory network that preserves key information within limited space while intelligently maintaining how that information evolves over time.
-Summarize important facts about the user from past conversations to provide more personalized and emotionally aware interactions in the future.
-
-## Memory Principles
-
-### 1. Three-Dimensional Memory Evaluation (applied on every update)
-
-| Dimension          | Evaluation Criteria                               | Weight |
-| ------------------ | ------------------------------------------------- | ------ |
-| Timeliness         | Recency of the information (by dialogue turn)     | 40%    |
-| Emotional Strength | Presence of emotional markers or frequency of repetition | 35%    |
-| Connection Density | Number of links to other memory nodes             | 25%    |
-
-### 2. Dynamic Update Mechanism
-
-Example — Job Change Handling:
-Original memory: "Job": "pharmacist"
-Trigger condition: detects statements like “I started a new job” or “I just started working at X”
-
-Process:
-- Move the old job title into "Former Jobs" list.
-- Record the timeline entry: "2024-03-10 09:42 — Changed job to product designer."
-- Append to the memory cube: “Transitioned from pharmacist to product designer.”
-
-### 3. Space Optimization Strategy
-
-Information Compression: Use compact symbolic notation to increase density.
-✅ "Alice [NYC / Product Designer / 🐱]"
-❌ "Alice is a product designer in New York who has a cat"
-* **Eviction Warning:** Triggered when total text ≥ 900 characters.
-
-  1. Delete items with total score < 60 and not mentioned in the last 3 rounds.
-  2. Merge similar entries, keeping the most recent timestamp.
-
-## Memory Structure
-
-Output must be a valid, machine-readable JSON string.
-No explanations or comments are needed.
-Only extract information from the dialogue itself — do not include example content.
-
-```json
-{
-  "TemporalArchive": {
-    "IdentityMap": {
-      "CurrentName": "",
-      "Traits": []
-    },
-    "MemoryCube": [
-      {
-        "Event": "Joined new company",
-        "Timestamp": "2024-03-20",
-        "EmotionScore": 0.9,
-        "Links": ["afternoon tea"],
-        "RetentionDays": 30
-      }
-    ]
-  },
-  "RelationshipNetwork": {
-    "FrequentTopics": {"Workplace": 12},
-    "HiddenConnections": [""]
-  },
-  "PendingResponses": {
-    "UrgentTasks": ["Tasks requiring immediate action"],
-    "PotentialCare": ["Possible acts of support to offer"]
-  },
-  "HighlightQuotes": [
-    "Most moving moments, intense emotional expressions, or the user's own words"
-  ]
-}
-```
-
-"""
-short_term_memory_prompt_cn = """
-# 时空记忆编织者
-
-## 核心使命
-构建可生长的动态记忆网络，在有限空间内保留关键信息的同时，智能维护信息演变轨迹
-根据对话记录，总结user的重要信息，以便在未来的对话中提供更个性化的服务
-
-## 记忆法则
-### 1. 三维度记忆评估（每次更新必执行）
-| 维度       | 评估标准                  | 权重分 |
-|------------|---------------------------|--------|
-| 时效性     | 信息新鲜度（按对话轮次） | 40%    |
-| 情感强度   | 含💖标记/重复提及次数     | 35%    |
-| 关联密度   | 与其他信息的连接数量      | 25%    |
-
-### 2. 动态更新机制
-**名字变更处理示例：**
-原始记忆："曾用名": ["张三"], "现用名": "张三丰"
-触发条件：当检测到「我叫X」「称呼我Y」等命名信号时
-操作流程：
-1. 将旧名移入"曾用名"列表
-2. 记录命名时间轴："2024-02-15 14:32:启用张三丰"
-3. 在记忆立方追加：「从张三到张三丰的身份蜕变」
-
-### 3. 空间优化策略
-- **信息压缩术**：用符号体系提升密度
-  - ✅"张三丰[北/软工/🐱]"
-  - ❌"北京软件工程师，养猫"
-- **淘汰预警**：当总字数≥900时触发
-  1. 删除权重分<60且3轮未提及的信息
-  2. 合并相似条目（保留时间戳最近的）
-
-## 记忆结构
-输出格式必须为可解析的json字符串，不需要解释、注释和说明，保存记忆时仅从对话提取信息，不要混入示例内容
-```json
-{
-  "时空档案": {
-    "身份图谱": {
-      "现用名": "",
-      "特征标记": [] 
-    },
-    "记忆立方": [
-      {
-        "事件": "入职新公司",
-        "时间戳": "2024-03-20",
-        "情感值": 0.9,
-        "关联项": ["下午茶"],
-        "保鲜期": 30 
-      }
-    ]
-  },
-  "关系网络": {
-    "高频话题": {"职场": 12},
-    "暗线联系": [""]
-  },
-  "待响应": {
-    "紧急事项": ["需立即处理的任务"], 
-    "潜在关怀": ["可主动提供的帮助"]
-  },
-  "高光语录": [
-    "最打动人心的瞬间，强烈的情感表达，user的原话"
-  ]
-}
-```
-"""
 
 short_term_memory_prompt_only_content = """
 你是一个经验丰富的记忆总结者，擅长将对话内容进行总结摘要，遵循以下规则：
@@ -160,22 +15,6 @@ short_term_memory_prompt_only_content = """
 """
 
 
-def extract_json_data(json_code):
-    start = json_code.find("```json")
-    # 从start开始找到下一个```结束
-    end = json_code.find("```", start + 1)
-    # print("start:", start, "end:", end)
-    if start == -1 or end == -1:
-        try:
-            jsonData = json.loads(json_code)
-            return json_code
-        except Exception as e:
-            print("Error:", e)
-        return ""
-    jsonData = json_code[start + 7 : end]
-    return jsonData
-
-
 TAG = __name__
 
 
@@ -183,23 +22,16 @@ class MemoryProvider(MemoryProviderBase):
     def __init__(self, config, summary_memory):
         super().__init__(config)
         self.short_memory = ""
-        self.save_to_file = False
         self.user_id = None
         self.load_memory(summary_memory)
 
-    def init_memory(
-        self, role_id, llm, summary_memory=None, save_to_file=False, **kwargs
-    ):
+    def init_memory(self, role_id, llm, summary_memory=None, **kwargs):
         super().init_memory(role_id, llm, **kwargs)
         self.user_id = kwargs.get("user_id")
-        self.save_to_file = False
         self.load_memory(summary_memory)
 
     def load_memory(self, summary_memory):
         self.short_memory = summary_memory or ""
-
-    def save_memory_to_file(self):
-        return
 
     async def save_memory(self, msgs):
         # 打印使用的模型信息
@@ -237,8 +69,9 @@ class MemoryProvider(MemoryProviderBase):
             temperature=0.2,
         )
         self.short_memory = result or ""
-        save_mem_local_short(self.role_id, self.short_memory)
-        logger.bind(tag=TAG).info(f"Save memory successful - Role: {self.role_id}")
+        logger.bind(tag=TAG).info(
+            f"Memory summary updated in runtime cache - Role: {self.role_id}"
+        )
 
         return self.short_memory
 

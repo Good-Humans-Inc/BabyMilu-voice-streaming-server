@@ -72,7 +72,7 @@ def initialize_modules(
         modules["memory"] = memory.create_instance(
             memory_type,
             config["Memory"][select_memory_module],
-            config.get("summaryMemory", None),
+            None,
         )
         logger.bind(tag=TAG).info(f"初始化组件: memory成功 {select_memory_module}")
     # 初始化Task模块
