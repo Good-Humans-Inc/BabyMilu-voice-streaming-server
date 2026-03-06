@@ -2516,14 +2516,17 @@ Return ONLY the JSON array, no other explanation."""
                     speaker="assistant",
                     text=text_buff
                 )
-                if depth == 0:
-                    self.tts.tts_text_queue.put(
-                        TTSMessageDTO(
-                            sentence_id=self.sentence_id,
-                            sentence_type=SentenceType.LAST,
-                            content_type=ContentType.ACTION,
-                        )
+            # Always enqueue LAST marker for a completed assistant response.
+            # Function-call follow-up responses run at depth>0; gating on depth==0
+            # can skip LAST and leave firmware waiting without a tts:stop signal.
+            if text_buff.strip():
+                self.tts.tts_text_queue.put(
+                    TTSMessageDTO(
+                        sentence_id=self.sentence_id,
+                        sentence_type=SentenceType.LAST,
+                        content_type=ContentType.ACTION,
                     )
+                )
             
             # ✅ Send LLM response to frontend websocket for display
             if self.websocket and text_buff.strip():

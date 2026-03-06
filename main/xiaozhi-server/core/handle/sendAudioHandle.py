@@ -25,7 +25,7 @@ async def sendAudioMessage(conn, sentenceType, audios, text):
         conn.logger.bind(tag=TAG).info(f"发送音频消息: {sentenceType}, {text}")
 
     # 发送结束消息（如果是最后一个文本）
-    if conn.llm_finish_task and sentenceType == SentenceType.LAST:
+    if sentenceType == SentenceType.LAST:
         await send_tts_message(conn, "stop", None)
         conn.client_is_speaking = False
         if conn.close_after_chat:
