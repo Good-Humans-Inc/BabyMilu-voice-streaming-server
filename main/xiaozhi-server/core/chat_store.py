@@ -7,6 +7,12 @@ from urllib.parse import quote
 
 import requests
 
+from core.utils.firestore_client import (
+    get_owner_phone_for_device,
+    get_user_profile_by_phone,
+    extract_user_profile_fields,
+)
+
 DB_PATH = os.environ.get("CHAT_DB_PATH", "/opt/xiaozhi-esp32-server/data/conversations.db")
 
 
@@ -414,16 +420,93 @@ class SupabaseChatStore:
             return rows[0]
         return None
 
-    def _ensure_memory_read_model(self, user_id: str):
+    def _build_identity_from_firestore(self, user_id: str, device_id: str = "") -> dict:
+        identity = {
+            "name": "",
+            "pronouns": "",
+            "timezone": "",
+            "city": "",
+            "birthday": "",
+        }
+
+        owner_phone = None
+        if device_id:
+            try:
+                owner_phone = get_owner_phone_for_device(device_id)
+            except Exception:
+                owner_phone = None
+
+        if not owner_phone and isinstance(user_id, str):
+            if user_id.startswith("+") or user_id.isdigit():
+                owner_phone = user_id
+
+        if not owner_phone:
+            return identity
+
+        user_doc = get_user_profile_by_phone(owner_phone) or {}
+        user_fields = extract_user_profile_fields(user_doc)
+
+        identity["name"] = (user_fields.get("name") or "").strip()
+        identity["pronouns"] = (user_fields.get("pronouns") or "").strip()
+        identity["timezone"] = (user_fields.get("timezone") or "").strip()
+        identity["birthday"] = (user_fields.get("birthday") or "").strip()
+
+        city = user_doc.get("city")
+        if isinstance(city, str):
+            identity["city"] = city.strip()
+
+        return identity
+
+    def _build_memory_read_model_payload(self, user_id: str, device_id: str = "") -> dict:
+        identity = self._build_identity_from_firestore(user_id=user_id, device_id=device_id)
+        return {
+            "user_id": user_id,
+            "profile": {
+                "identity": identity,
+                "longTermFacts": [],
+                "peoplePetsPlaces": [],
+                "ongoingTopics": [],
+                "importantDates": [],
+                "characterStyleHints": [],
+            },
+            "active_context": {
+                "recentSummary": "",
+                "last7dHighlights": [],
+                "openLoops": [],
+                "dueReminders": [],
+            },
+            "modality_digests": {
+                "conversation": "",
+                "audio": "",
+                "photo": "",
+                "reminder": "",
+                "cosmicDraw": "",
+            },
+            "prompt_pack": {
+                "systemMemoryBlock": "",
+                "structuredFacts": [],
+            },
+            "stats": {
+                "eventCount": 0,
+                "lastSessionId": "",
+            },
+        }
+
+    def _ensure_memory_read_model(self, user_id: str, device_id: str = ""):
         if not user_id:
             return
-        self._upsert(
-            self.memory_read_model_table,
-            {
-                "user_id": user_id,
-            },
-            on_conflict="user_id",
-        )
+
+        existing = self._select_eq(self.memory_read_model_table, "user_id", user_id)
+        if existing:
+            return
+
+        payload = self._build_memory_read_model_payload(user_id=user_id, device_id=device_id)
+        try:
+            self._insert(self.memory_read_model_table, payload)
+        except RuntimeError as e:
+            if "status=409" in str(e):
+                return
+            raise
 
     def get_or_create_user(self, user_id: str, name: str, device_id: str = ""):
         if self.logger:
@@ -441,7 +524,7 @@ class SupabaseChatStore:
             on_conflict="user_id",
         )
         try:
-            self._ensure_memory_read_model(user_id)
+            self._ensure_memory_read_model(user_id, device_id)
             if self.logger:
                 self.logger.info(
                     f"[ChatStore:supabase] ensured memory_read_model(user_id={user_id})"
