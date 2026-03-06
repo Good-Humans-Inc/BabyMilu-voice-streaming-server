@@ -1589,6 +1589,18 @@ Return ONLY the JSON array, no other explanation."""
                 self.logger.bind(tag=TAG).info(
                     f"Loaded systemMemoryBlock from memory_read_model for user {getattr(self, 'user_id', None)}"
                 )
+                self.logger.bind(tag=TAG).info(
+                    f"systemMemoryBlock length={len(summary_memory_block)}"
+                )
+                self.logger.bind(tag=TAG).info(
+                    "systemMemoryBlock content START\n"
+                    f"{summary_memory_block}\n"
+                    "systemMemoryBlock content END"
+                )
+            else:
+                self.logger.bind(tag=TAG).info(
+                    f"systemMemoryBlock is empty for user {getattr(self, 'user_id', None)}"
+                )
         except Exception as e:
             self.logger.bind(tag=TAG).warning(
                 f"Failed loading systemMemoryBlock from memory_read_model: {e}"
