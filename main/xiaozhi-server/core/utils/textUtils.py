@@ -39,34 +39,6 @@ def _is_skin_tone_modifier(char: str) -> bool:
     return 0x1F3FB <= cp <= 0x1F3FF
 
 
-def _extract_emoji_tokens(text: str):
-    """Extract emoji tokens, including ZWJ/variation-selector sequences."""
-    tokens = []
-    i = 0
-    n = len(text)
-    while i < n:
-        ch = text[i]
-        if not is_emoji(ch):
-            i += 1
-            continue
-
-        token = ch
-        i += 1
-        while i < n:
-            nxt = text[i]
-            if nxt == "\u200d" and i + 1 < n:
-                token += nxt + text[i + 1]
-                i += 2
-                continue
-            if nxt in EMOJI_JOINERS or _is_skin_tone_modifier(nxt):
-                token += nxt
-                i += 1
-                continue
-            break
-        tokens.append(token)
-    return tokens
-
-
 def get_allowed_emoji_list_string() -> str:
     """Return space-separated allowed emoji list from canonical mapping."""
     ordered = []
@@ -126,14 +98,26 @@ async def get_emotion(conn, text):
     emoji = _DEFAULT_EMOJI
     emotion = _DEFAULT_EMOTION
     stripped_text = text.lstrip()
-    tokens = _extract_emoji_tokens(stripped_text)
-    if tokens:
-        leading_token = tokens[0]
-        if stripped_text.startswith(leading_token):
-            mapped_emotion = EMOJI_MAP.get(leading_token, _DEFAULT_EMOTION)
-            if leading_token in EMOJI_MAP:
-                emoji = leading_token
-            emotion = mapped_emotion
+    if stripped_text and is_emoji(stripped_text[0]):
+        leading_token = stripped_text[0]
+        i = 1
+        max_scan = min(len(stripped_text), 8)
+        while i < max_scan:
+            nxt = stripped_text[i]
+            if nxt == "\u200d" and i + 1 < max_scan:
+                leading_token += nxt + stripped_text[i + 1]
+                i += 2
+                continue
+            if nxt in EMOJI_JOINERS or _is_skin_tone_modifier(nxt):
+                leading_token += nxt
+                i += 1
+                continue
+            break
+
+        mapped_emotion = EMOJI_MAP.get(leading_token, _DEFAULT_EMOTION)
+        if leading_token in EMOJI_MAP:
+            emoji = leading_token
+        emotion = mapped_emotion
     try:
         await conn.websocket.send(
             json.dumps(
@@ -158,12 +142,4 @@ def is_emoji(char):
 
 def check_emoji(text):
     """去除文本中的所有emoji表情"""
-    cleaned = text
-    for token in _extract_emoji_tokens(text):
-        cleaned = cleaned.replace(token, "")
-    cleaned = "".join(
-        ch
-        for ch in cleaned
-        if ch not in EMOJI_JOINERS and not _is_skin_tone_modifier(ch) and ch != "\n"
-    )
-    return cleaned
+    return ''.join(char for char in text if not is_emoji(char) and char != "\n")
