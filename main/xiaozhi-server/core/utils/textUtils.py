@@ -30,8 +30,8 @@ EMOJI_MAP = {
     for emotion, emojis in CANONICAL_EMOTION_MAP.items()
     for emoji in emojis
 }
-_DEFAULT_EMOTION = "smirk"
-_DEFAULT_EMOJI = CANONICAL_EMOTION_MAP[_DEFAULT_EMOTION][0]
+_DEFAULT_EMOTION = "happy"
+_DEFAULT_EMOJI = "😄"
 
 
 def _is_skin_tone_modifier(char: str) -> bool:
@@ -125,11 +125,15 @@ async def get_emotion(conn, text):
     """获取文本内的情绪消息"""
     emoji = _DEFAULT_EMOJI
     emotion = _DEFAULT_EMOTION
-    for token in _extract_emoji_tokens(text):
-        if token in EMOJI_MAP:
-            emoji = token
-            emotion = EMOJI_MAP[token]
-            break
+    stripped_text = text.lstrip()
+    tokens = _extract_emoji_tokens(stripped_text)
+    if tokens:
+        leading_token = tokens[0]
+        if stripped_text.startswith(leading_token):
+            mapped_emotion = EMOJI_MAP.get(leading_token, _DEFAULT_EMOTION)
+            if leading_token in EMOJI_MAP:
+                emoji = leading_token
+            emotion = mapped_emotion
     try:
         await conn.websocket.send(
             json.dumps(
