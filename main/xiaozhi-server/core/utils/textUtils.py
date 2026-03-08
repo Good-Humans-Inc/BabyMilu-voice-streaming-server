@@ -30,7 +30,7 @@ EMOJI_MAP = {
     for emotion, emojis in CANONICAL_EMOTION_MAP.items()
     for emoji in emojis
 }
-_DEFAULT_EMOTION = "happy"
+_DEFAULT_EMOTION = "normal"
 _DEFAULT_EMOJI = "😄"
 
 
