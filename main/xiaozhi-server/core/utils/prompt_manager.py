@@ -18,6 +18,7 @@ from core.utils.firestore_client import (
     extract_user_profile_fields,
     get_active_character_for_device,
 )
+from core.utils.textUtils import get_allowed_emoji_list_string
 
 TAG = __name__
 
@@ -30,9 +31,6 @@ WEEKDAY_MAP = {
     "Saturday": "Saturday",
     "Sunday": "Sunday",
 }
-
-EMOJI_List = "🥺 🥰 😍 😘 😳 🙁 😄 😁 😴 😪 🤩 😭 😡 😤 😠"
-
 
 class PromptManager:
     """系统提示词管理器，负责管理和更新系统提示词"""
@@ -444,7 +442,7 @@ class PromptManager:
                 today_weekday=today_weekday,
                 local_address=local_address,
                 weather_info=weather_info,
-                emojiList=EMOJI_List,
+                emojiList=get_allowed_emoji_list_string(),
                 device_id=device_id,
                 user=user_name,
             )
