@@ -1,5 +1,8 @@
+import os
+import uuid
 import requests
 import ormsgpack
+from datetime import datetime
 from core.utils.util import check_model_key
 from core.providers.tts.base import TTSProviderBase
 from core.providers.tts.fishspeech import ServeTTSRequest, ServeReferenceAudio
@@ -33,6 +36,12 @@ class TTSProvider(TTSProviderBase):
         model_key_msg = check_model_key("FishAudio TTS", self.api_key)
         if model_key_msg:
             logger.bind(tag=TAG).error(model_key_msg)
+
+    def generate_filename(self):
+        return os.path.join(
+            self.output_file,
+            f"tts-{datetime.now().date()}@{uuid.uuid4().hex}.{self.format}",
+        )
 
     async def text_to_speak(self, text, output_file):
         reference_id = None
