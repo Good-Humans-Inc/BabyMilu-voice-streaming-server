@@ -146,6 +146,7 @@ class TTSProvider(TTSProviderBase):
         try:
             self.opus_encoder.reset_state()
             resample_state = None
+            pcm_carry = b""  # carry odd byte between chunks for 16-bit alignment
 
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -166,6 +167,14 @@ class TTSProvider(TTSProviderBase):
                             return
                         if not chunk:
                             continue
+
+                        # Prepend any leftover byte from previous chunk, then align to 2-byte boundary
+                        chunk = pcm_carry + chunk
+                        if len(chunk) % 2:
+                            pcm_carry = chunk[-1:]
+                            chunk = chunk[:-1]
+                        else:
+                            pcm_carry = b""
 
                         # Resample 44100Hz → 16000Hz in real time, per chunk
                         resampled, resample_state = audioop.ratecv(
