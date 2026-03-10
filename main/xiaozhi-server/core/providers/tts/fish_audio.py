@@ -1,11 +1,10 @@
 import os
 import queue
+import audioop
 import asyncio
 import aiohttp
 import ormsgpack
 import traceback
-from io import BytesIO
-from pydub import AudioSegment
 from core.utils import textUtils
 from core.utils.util import check_model_key
 from core.providers.tts.base import TTSProviderBase
@@ -18,6 +17,10 @@ from config.logger import setup_logging
 TAG = __name__
 logger = setup_logging()
 
+# Fish Audio PCM output sample rate (44100Hz mono 16-bit)
+FISH_AUDIO_SAMPLE_RATE = 44100
+OPUS_SAMPLE_RATE = 16000
+
 
 class TTSProvider(TTSProviderBase):
     def __init__(self, config, delete_audio_file):
@@ -25,8 +28,6 @@ class TTSProvider(TTSProviderBase):
         self.api_key = config.get("api_key", "YOUR_API_KEY")
         self.api_url = config.get("api_url", "https://api.fish.audio/v1/tts")
         self.default_reference_id = config.get("reference_id")
-        self.format = config.get("format", "mp3")
-        self.audio_file_type = self.format
         self.latency = config.get("latency", "normal")
         self.normalize = str(config.get("normalize", True)).lower() in ("true", "1", "yes")
 
@@ -45,7 +46,7 @@ class TTSProvider(TTSProviderBase):
             logger.bind(tag=TAG).error(model_key_msg)
 
         self.opus_encoder = opus_encoder_utils.OpusEncoderUtils(
-            sample_rate=16000, channels=1, frame_size_ms=60
+            sample_rate=OPUS_SAMPLE_RATE, channels=1, frame_size_ms=60
         )
 
     def _resolve_reference_id(self):
@@ -128,7 +129,7 @@ class TTSProvider(TTSProviderBase):
         request_data = ServeTTSRequest(
             text=text,
             reference_id=reference_id,
-            format=self.format,
+            format="pcm",  # raw PCM: no decode overhead, true per-chunk streaming
             normalize=self.normalize,
             chunk_length=self.chunk_length,
             top_p=self.top_p,
@@ -143,6 +144,9 @@ class TTSProvider(TTSProviderBase):
         }
 
         try:
+            self.opus_encoder.reset_state()
+            resample_state = None
+
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     self.api_url,
@@ -156,21 +160,26 @@ class TTSProvider(TTSProviderBase):
 
                     self.tts_audio_queue.put((SentenceType.FIRST, [], text))
 
-                    mp3_buffer = bytearray()
                     async for chunk in resp.content.iter_any():
                         if self.conn and self.conn.client_abort:
                             logger.bind(tag=TAG).info("TTS interrupted by client")
                             return
-                        if chunk:
-                            mp3_buffer.extend(chunk)
+                        if not chunk:
+                            continue
 
-            # Decode MP3 → 16kHz mono PCM → Opus
-            audio = AudioSegment.from_file(
-                BytesIO(bytes(mp3_buffer)), format=self.format
-            )
-            audio = audio.set_channels(1).set_frame_rate(16000).set_sample_width(2)
+                        # Resample 44100Hz → 16000Hz in real time, per chunk
+                        resampled, resample_state = audioop.ratecv(
+                            chunk, 2, 1, FISH_AUDIO_SAMPLE_RATE, OPUS_SAMPLE_RATE, resample_state
+                        )
+
+                        # Encode directly to Opus — no buffering, true streaming
+                        self.opus_encoder.encode_pcm_to_opus_stream(
+                            resampled, end_of_stream=False, callback=self.handle_opus
+                        )
+
+            # Flush any remaining samples in the encoder buffer
             self.opus_encoder.encode_pcm_to_opus_stream(
-                audio.raw_data, end_of_stream=True, callback=self.handle_opus
+                b"", end_of_stream=True, callback=self.handle_opus
             )
 
             logger.bind(tag=TAG).info(f"Fish Audio TTS success: {text[:50]}")
