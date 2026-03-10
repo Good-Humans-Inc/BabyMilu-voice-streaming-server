@@ -1,6 +1,5 @@
 import os
 import queue
-import audioop
 import asyncio
 import traceback
 import ormsgpack
@@ -15,8 +14,6 @@ from core.providers.tts.dto.dto import SentenceType, ContentType, InterfaceType
 TAG = __name__
 logger = setup_logging()
 
-# Fish Audio PCM output sample rate (44100Hz mono 16-bit)
-FISH_AUDIO_SAMPLE_RATE = 44100
 OPUS_SAMPLE_RATE = 16000
 
 
@@ -97,8 +94,8 @@ class TTSProvider(TTSProviderBase):
                     if message.content_detail:
                         self.pending_text += message.content_detail
 
-                        # Send when we reach a safe word/clause boundary
-                        safe_chars = ["\n", ".", "!", "?", "！", "？", "，", ","]
+                        # Send at every word boundary to keep Fish Audio fed continuously
+                        safe_chars = [" ", "\n", ".", "!", "?", "！", "？", "，", ","]
                         last_idx = -1
                         for ch in safe_chars:
                             idx = self.pending_text.rfind(ch)
@@ -180,6 +177,7 @@ class TTSProvider(TTSProviderBase):
                 "text": "",
                 "reference_id": reference_id,
                 "format": "pcm",
+                "sample_rate": OPUS_SAMPLE_RATE,  # request 16kHz directly, skip resampling
                 "latency": self.latency,
                 "chunk_length": self.chunk_length,
                 "normalize": self.normalize,
@@ -241,8 +239,7 @@ class TTSProvider(TTSProviderBase):
             raise
 
     async def _monitor_response(self):
-        """Receive PCM audio from Fish Audio, resample, encode to Opus, push to queue."""
-        resample_state = None
+        """Receive 16kHz PCM audio from Fish Audio, encode to Opus, push to queue."""
         pcm_carry = b""
         try:
             while True:
@@ -263,7 +260,7 @@ class TTSProvider(TTSProviderBase):
                         self.tts_audio_queue.put((SentenceType.FIRST, [], None))
                         self.tts_audio_first_sentence = False
 
-                    # Align to 16-bit boundary
+                    # Align to 16-bit (2-byte) boundary
                     audio_bytes = pcm_carry + audio_bytes
                     if len(audio_bytes) % 2:
                         pcm_carry = audio_bytes[-1:]
@@ -271,14 +268,9 @@ class TTSProvider(TTSProviderBase):
                     else:
                         pcm_carry = b""
 
-                    # Resample 44100Hz → 16000Hz
-                    resampled, resample_state = audioop.ratecv(
-                        audio_bytes, 2, 1, FISH_AUDIO_SAMPLE_RATE, OPUS_SAMPLE_RATE, resample_state
-                    )
-
-                    # Encode to Opus frames and push to audio queue
+                    # Encode 16kHz PCM directly to Opus frames
                     self.opus_encoder.encode_pcm_to_opus_stream(
-                        resampled, end_of_stream=False, callback=self.handle_opus
+                        audio_bytes, end_of_stream=False, callback=self.handle_opus
                     )
 
                 elif event == "finish":
