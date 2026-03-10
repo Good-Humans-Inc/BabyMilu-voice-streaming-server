@@ -2,17 +2,15 @@ import os
 import queue
 import audioop
 import asyncio
-import aiohttp
-import ormsgpack
 import traceback
-from core.utils import textUtils
+import ormsgpack
+import websockets
+from config.logger import setup_logging
 from core.utils.util import check_model_key
 from core.providers.tts.base import TTSProviderBase
-from core.providers.tts.fishspeech import ServeTTSRequest
 from core.utils import opus_encoder_utils
 from core.utils.tts import MarkdownCleaner
-from core.providers.tts.dto.dto import SentenceType, ContentType
-from config.logger import setup_logging
+from core.providers.tts.dto.dto import SentenceType, ContentType, InterfaceType
 
 TAG = __name__
 logger = setup_logging()
@@ -25,10 +23,13 @@ OPUS_SAMPLE_RATE = 16000
 class TTSProvider(TTSProviderBase):
     def __init__(self, config, delete_audio_file):
         super().__init__(config, delete_audio_file)
+        self.interface_type = InterfaceType.DUAL_STREAM
+
         self.api_key = config.get("api_key", "YOUR_API_KEY")
-        self.api_url = config.get("api_url", "https://api.fish.audio/v1/tts")
+        self.ws_url = config.get("ws_url", "wss://api.fish.audio/v1/tts/live")
+        self.model = config.get("model", "speech-1.5")
         self.default_reference_id = config.get("reference_id")
-        self.latency = config.get("latency", "normal")
+        self.latency = config.get("latency", "balanced")
         self.normalize = str(config.get("normalize", True)).lower() in ("true", "1", "yes")
 
         chunk_length = config.get("chunk_length", "200")
@@ -44,6 +45,10 @@ class TTSProvider(TTSProviderBase):
         model_key_msg = check_model_key("FishAudio TTS", self.api_key)
         if model_key_msg:
             logger.bind(tag=TAG).error(model_key_msg)
+
+        self.ws = None
+        self._monitor_task = None
+        self.pending_text = ""
 
         self.opus_encoder = opus_encoder_utils.OpusEncoderUtils(
             sample_rate=OPUS_SAMPLE_RATE, channels=1, frame_size_ms=60
@@ -61,24 +66,57 @@ class TTSProvider(TTSProviderBase):
 
                 if message.sentence_type == SentenceType.FIRST:
                     self.conn.client_abort = False
-
-                if self.conn.client_abort:
-                    logger.bind(tag=TAG).info("Client aborted, skipping TTS")
-                    continue
-
-                if message.sentence_type == SentenceType.FIRST:
-                    self.tts_stop_request = False
-                    self.processed_chars = 0
-                    self.tts_text_buff = []
-                    self.is_first_sentence = True
+                    self.pending_text = ""
                     self.tts_audio_first_sentence = True
                     self.before_stop_play_files.clear()
+                    try:
+                        future = asyncio.run_coroutine_threadsafe(
+                            self.start_session(getattr(self.conn, "sentence_id", None)),
+                            loop=self.conn.loop,
+                        )
+                        future.result()
+                    except Exception as e:
+                        logger.bind(tag=TAG).error(f"Failed to start Fish Audio session: {e}")
+                        self.tts_audio_queue.put((SentenceType.LAST, [], None))
+                        continue
+
+                elif self.conn.client_abort:
+                    logger.bind(tag=TAG).info("Client aborted, skipping TTS")
+                    self.pending_text = ""
+                    try:
+                        future = asyncio.run_coroutine_threadsafe(
+                            self.finish_session(getattr(self.conn, "sentence_id", None)),
+                            loop=self.conn.loop,
+                        )
+                        future.result(timeout=3)
+                    except Exception:
+                        pass
+                    continue
 
                 elif ContentType.TEXT == message.content_type:
-                    self.tts_text_buff.append(message.content_detail)
-                    segment_text = self._get_segment_text()
-                    if segment_text:
-                        self._stream_tts(segment_text, is_last=False)
+                    if message.content_detail:
+                        self.pending_text += message.content_detail
+
+                        # Send when we reach a safe word/clause boundary
+                        safe_chars = ["\n", ".", "!", "?", "！", "？", "，", ","]
+                        last_idx = -1
+                        for ch in safe_chars:
+                            idx = self.pending_text.rfind(ch)
+                            if idx > last_idx:
+                                last_idx = idx
+
+                        if last_idx != -1:
+                            to_send = self.pending_text[: last_idx + 1]
+                            self.pending_text = self.pending_text[last_idx + 1 :]
+                            if to_send.strip():
+                                try:
+                                    future = asyncio.run_coroutine_threadsafe(
+                                        self.text_to_speak(to_send, None),
+                                        loop=self.conn.loop,
+                                    )
+                                    future.result()
+                                except Exception as e:
+                                    logger.bind(tag=TAG).error(f"Failed to send text: {e}")
 
                 elif ContentType.FILE == message.content_type:
                     if message.content_file and os.path.exists(message.content_file):
@@ -90,7 +128,15 @@ class TTSProvider(TTSProviderBase):
                         )
 
                 if message.sentence_type == SentenceType.LAST:
-                    self._process_remaining_text(is_last=True)
+                    try:
+                        future = asyncio.run_coroutine_threadsafe(
+                            self.finish_session(getattr(self.conn, "sentence_id", None)),
+                            loop=self.conn.loop,
+                        )
+                        future.result()
+                    except Exception as e:
+                        logger.bind(tag=TAG).error(f"Failed to finish Fish Audio session: {e}")
+                        self.tts_audio_queue.put((SentenceType.LAST, [], None))
 
             except queue.Empty:
                 continue
@@ -99,24 +145,7 @@ class TTSProvider(TTSProviderBase):
                     f"TTS text thread error: {e}\n{traceback.format_exc()}"
                 )
 
-    def _process_remaining_text(self, is_last=False):
-        full_text = "".join(self.tts_text_buff)
-        remaining = full_text[self.processed_chars:]
-        if remaining:
-            segment_text = textUtils.get_string_no_punctuation_or_emoji(remaining)
-            if segment_text:
-                self._stream_tts(segment_text, is_last=is_last)
-                self.processed_chars += len(full_text)
-                return
-        self._process_before_stop_play_files()
-
-    def _stream_tts(self, text, is_last=False):
-        try:
-            asyncio.run(self.text_to_speak(text, is_last))
-        except Exception as e:
-            logger.bind(tag=TAG).error(f"Fish Audio TTS failed: {e}")
-
-    async def text_to_speak(self, text, is_last=False):
+    async def start_session(self, session_id):
         reference_id = self._resolve_reference_id()
         if not reference_id:
             raise Exception(
@@ -124,83 +153,169 @@ class TTSProvider(TTSProviderBase):
                 "Set 'reference_id' in FishAudio config or the character's 'voice' field in Firestore."
             )
 
-        text = MarkdownCleaner.clean_markdown(text)
+        # Close any stale connection
+        if self.ws:
+            try:
+                await self.ws.close()
+            except Exception:
+                pass
+            self.ws = None
 
-        request_data = ServeTTSRequest(
-            text=text,
-            reference_id=reference_id,
-            format="pcm",  # raw PCM: no decode overhead, true per-chunk streaming
-            normalize=self.normalize,
-            chunk_length=self.chunk_length,
-            top_p=self.top_p,
-            temperature=self.temperature,
-            repetition_penalty=self.repetition_penalty,
-            streaming=True,
+        logger.bind(tag=TAG).info("Connecting to Fish Audio WebSocket...")
+        self.ws = await websockets.connect(
+            self.ws_url,
+            additional_headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "model": self.model,
+            },
+            ping_interval=20,
+            ping_timeout=10,
         )
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/msgpack",
+        self.opus_encoder.reset_state()
+
+        start_event = {
+            "event": "start",
+            "request": {
+                "text": "",
+                "reference_id": reference_id,
+                "format": "pcm",
+                "latency": self.latency,
+                "chunk_length": self.chunk_length,
+                "normalize": self.normalize,
+                "top_p": self.top_p,
+                "temperature": self.temperature,
+                "repetition_penalty": self.repetition_penalty,
+            },
         }
+        await self.ws.send(ormsgpack.packb(start_event))
 
+        self._monitor_task = asyncio.create_task(self._monitor_response())
+        logger.bind(tag=TAG).info("Fish Audio WebSocket session started")
+
+    async def text_to_speak(self, text, _output_file):
+        """Send a text chunk to the open Fish Audio WebSocket."""
+        if not self.ws:
+            logger.bind(tag=TAG).warning("WebSocket not open, dropping text")
+            return
+        text = MarkdownCleaner.clean_markdown(text)
+        if text.strip():
+            await self.ws.send(ormsgpack.packb({"event": "text", "text": text}))
+            logger.bind(tag=TAG).debug(f"Sent text chunk: {text[:60]}")
+
+    async def finish_session(self, session_id):
+        logger.bind(tag=TAG).info("Finishing Fish Audio session")
         try:
-            self.opus_encoder.reset_state()
-            resample_state = None
-            pcm_carry = b""  # carry odd byte between chunks for 16-bit alignment
+            if self.ws:
+                # Flush any remaining pending text
+                if self.pending_text.strip():
+                    try:
+                        await self.text_to_speak(self.pending_text, None)
+                    except Exception:
+                        pass
+                    self.pending_text = ""
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.api_url,
-                    data=ormsgpack.packb(request_data, option=ormsgpack.OPT_SERIALIZE_PYDANTIC),
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as resp:
-                    if resp.status != 200:
-                        body = await resp.text()
-                        raise Exception(f"Fish Audio TTS failed: {resp.status} - {body}")
+                try:
+                    await self.ws.send(ormsgpack.packb({"event": "flush"}))
+                    await self.ws.send(ormsgpack.packb({"event": "stop"}))
+                except Exception as e:
+                    logger.bind(tag=TAG).warning(f"Error sending stop signal: {e}")
 
-                    self.tts_audio_queue.put((SentenceType.FIRST, [], text))
+                # Wait for monitor to drain remaining audio
+                if self._monitor_task:
+                    try:
+                        await self._monitor_task
+                    except Exception as e:
+                        logger.bind(tag=TAG).error(f"Monitor task error: {e}")
+                    finally:
+                        self._monitor_task = None
 
-                    async for chunk in resp.content.iter_any():
-                        if self.conn and self.conn.client_abort:
-                            logger.bind(tag=TAG).info("TTS interrupted by client")
-                            return
-                        if not chunk:
-                            continue
-
-                        # Prepend any leftover byte from previous chunk, then align to 2-byte boundary
-                        chunk = pcm_carry + chunk
-                        if len(chunk) % 2:
-                            pcm_carry = chunk[-1:]
-                            chunk = chunk[:-1]
-                        else:
-                            pcm_carry = b""
-
-                        # Resample 44100Hz → 16000Hz in real time, per chunk
-                        resampled, resample_state = audioop.ratecv(
-                            chunk, 2, 1, FISH_AUDIO_SAMPLE_RATE, OPUS_SAMPLE_RATE, resample_state
-                        )
-
-                        # Encode directly to Opus — no buffering, true streaming
-                        self.opus_encoder.encode_pcm_to_opus_stream(
-                            resampled, end_of_stream=False, callback=self.handle_opus
-                        )
-
-            # Flush any remaining samples in the encoder buffer
-            self.opus_encoder.encode_pcm_to_opus_stream(
-                b"", end_of_stream=True, callback=self.handle_opus
-            )
-
-            logger.bind(tag=TAG).info(f"Fish Audio TTS success: {text[:50]}")
-
-            if is_last:
-                self._process_before_stop_play_files()
-
+                try:
+                    await self.ws.close()
+                except Exception:
+                    pass
+                self.ws = None
         except Exception as e:
-            logger.bind(tag=TAG).error(f"Fish Audio TTS error: {e}")
+            logger.bind(tag=TAG).error(f"Error in finish_session: {e}")
             self.tts_audio_queue.put((SentenceType.LAST, [], None))
             raise
 
+    async def _monitor_response(self):
+        """Receive PCM audio from Fish Audio, resample, encode to Opus, push to queue."""
+        resample_state = None
+        pcm_carry = b""
+        try:
+            while True:
+                if not self.ws:
+                    break
+
+                raw = await self.ws.recv()
+                data = ormsgpack.unpackb(raw)
+                event = data.get("event")
+
+                if event == "audio":
+                    audio_bytes = data.get("audio", b"")
+                    if not audio_bytes:
+                        continue
+
+                    # Signal start of audio to playback thread on first chunk
+                    if self.tts_audio_first_sentence:
+                        self.tts_audio_queue.put((SentenceType.FIRST, [], None))
+                        self.tts_audio_first_sentence = False
+
+                    # Align to 16-bit boundary
+                    audio_bytes = pcm_carry + audio_bytes
+                    if len(audio_bytes) % 2:
+                        pcm_carry = audio_bytes[-1:]
+                        audio_bytes = audio_bytes[:-1]
+                    else:
+                        pcm_carry = b""
+
+                    # Resample 44100Hz → 16000Hz
+                    resampled, resample_state = audioop.ratecv(
+                        audio_bytes, 2, 1, FISH_AUDIO_SAMPLE_RATE, OPUS_SAMPLE_RATE, resample_state
+                    )
+
+                    # Encode to Opus frames and push to audio queue
+                    self.opus_encoder.encode_pcm_to_opus_stream(
+                        resampled, end_of_stream=False, callback=self.handle_opus
+                    )
+
+                elif event == "finish":
+                    reason = data.get("reason", "stop")
+                    if reason == "error":
+                        logger.bind(tag=TAG).error("Fish Audio stream ended with error")
+                        raise Exception("Fish Audio stream error")
+
+                    # Flush remaining samples in encoder buffer
+                    self.opus_encoder.encode_pcm_to_opus_stream(
+                        b"", end_of_stream=True, callback=self.handle_opus
+                    )
+                    self._process_before_stop_play_files()
+                    logger.bind(tag=TAG).info("Fish Audio stream finished successfully")
+                    break
+
+        except Exception as e:
+            logger.bind(tag=TAG).error(
+                f"Fish Audio monitor error: {e}\n{traceback.format_exc()}"
+            )
+            self.tts_audio_queue.put((SentenceType.LAST, [], None))
+
     async def close(self):
+        if self._monitor_task:
+            try:
+                self._monitor_task.cancel()
+                await self._monitor_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._monitor_task = None
+
+        if self.ws:
+            try:
+                await self.ws.close()
+            except Exception:
+                pass
+            self.ws = None
+
         if hasattr(self, "opus_encoder"):
             self.opus_encoder.close()
