@@ -310,6 +310,150 @@ def create_alarm(
     return alarm_id
 
 
+# ---------------------------------------------------------------------------
+# Reminder functions  (collection: users/{uid}/reminders/{id})
+# ---------------------------------------------------------------------------
+
+def create_reminder(
+    uid: str,
+    device_id: str,
+    resolved_dt: datetime,
+    label: str,
+    context: str,
+    tz_str: str,
+    delivery_channels: Optional[List[str]] = None,
+    client: Optional[firestore.Client] = None,
+) -> str:
+    """Write a one-time reminder doc to /users/{uid}/reminders/{reminder_id}.
+
+    Separate from create_alarm() — reminders live in the 'reminders' subcollection,
+    carry a deliveryChannel array, and use mode='reminder' (single voice message, no follow-ups).
+
+    Args:
+        uid: The user's document ID (ownerPhone).
+        device_id: The device MAC address that should deliver the reminder.
+        resolved_dt: Timezone-aware absolute datetime for the reminder.
+        label: Short human-readable name (e.g. "drink water").
+        context: Full reason/purpose used to customise the reminder conversation.
+        tz_str: IANA timezone string (e.g. "America/Los_Angeles").
+        delivery_channels: List of delivery channels. Defaults to ["plushie"].
+    """
+    client = client or _build_client()
+    reminder_id = str(uuid.uuid4())
+
+    resolved_local = resolved_dt.astimezone(ZoneInfo(tz_str))
+    time_local = resolved_local.strftime("%H:%M")
+    date_local = resolved_local.strftime("%Y-%m-%d")
+
+    now_utc = datetime.now(timezone.utc)
+    doc = {
+        "label": label,
+        "context": context,
+        "schedule": {
+            "repeat": "once",
+            "timeLocal": time_local,
+            "days": [date_local],
+        },
+        "nextOccurrenceUTC": _format_datetime(resolved_dt),
+        "status": models.AlarmStatus.ON.value,
+        "targets": [{"deviceId": device_id, "mode": "reminder"}],
+        "uid": uid,
+        "source": "voice",
+        "deliveryChannel": delivery_channels if delivery_channels is not None else ["plushie"],
+        "createdAt": _format_datetime(now_utc),
+        "updatedAt": _format_datetime(now_utc),
+    }
+
+    client.collection("users").document(uid).collection("reminders").document(reminder_id).set(doc)
+    logger.bind(tag=TAG).info(
+        f"Created reminder {reminder_id} for user {uid} device {device_id} "
+        f"at {_format_datetime(resolved_dt)} (local {time_local} {tz_str}): '{label}'"
+    )
+    return reminder_id
+
+
+def fetch_due_reminders(
+    now: datetime,
+    lookahead: timedelta,
+    client: Optional[firestore.Client] = None,
+) -> List[models.AlarmDoc]:
+    """Fetch due reminder docs from the 'reminders' collection group.
+
+    Only returns reminders that include "plushie" in their deliveryChannel array,
+    so app-only reminders are never sent to the plushie.
+    """
+    client = client or _build_client()
+    user_cache: Dict[str, Dict[str, Any]] = {}
+    upper_bound = now + lookahead
+    upper_bound_str = _format_datetime(upper_bound)
+    logger.bind(tag=TAG).debug(
+        "Scanning reminders where status='on', nextOccurrenceUTC <= "
+        f"{upper_bound_str}, deliveryChannel array_contains 'plushie'"
+    )
+
+    query = client.collection_group("reminders")
+    query = query.where(filter=FieldFilter("status", "==", "on"))
+    query = query.where(filter=FieldFilter("nextOccurrenceUTC", "<=", upper_bound_str))
+    query = query.where(filter=FieldFilter("deliveryChannel", "array_contains", "plushie"))
+
+    docs: List[models.AlarmDoc] = []
+    for doc in query.stream():
+        user_id = _resolve_user_id(doc)
+        data = doc.to_dict() or {}
+        user_meta = _get_user_metadata(doc, user_cache)
+        if user_meta:
+            data = dict(data)
+            data["user"] = user_meta
+
+        schedule_payload = data.get("schedule")
+        if not isinstance(schedule_payload, dict):
+            logger.bind(tag=TAG).warning(
+                f"Skipping reminder {doc.reference.path} (user={user_id}): "
+                f"missing or invalid schedule payload ({schedule_payload})"
+            )
+            continue
+        try:
+            repeat = _parse_repeat(schedule_payload["repeat"])
+            schedule = models.AlarmSchedule(
+                repeat=repeat,
+                time_local=schedule_payload["timeLocal"],
+                days=schedule_payload.get("days") or [],
+            )
+        except (KeyError, ValueError) as exc:
+            logger.bind(tag=TAG).warning(
+                f"Skipping reminder {doc.reference.path} (user={user_id}): "
+                f"invalid schedule payload ({schedule_payload}) ({exc})"
+            )
+            continue
+
+        targets_payload = data.get("targets")
+        if not isinstance(targets_payload, list) or not targets_payload:
+            logger.bind(tag=TAG).warning(
+                f"Skipping reminder {doc.reference.path} (user={user_id}): "
+                f"targets payload missing or empty ({targets_payload})"
+            )
+            continue
+        try:
+            targets = [
+                models.AlarmTarget(
+                    device_id=_normalize_device_id(t["deviceId"]),
+                    mode=t["mode"],
+                )
+                for t in targets_payload
+            ]
+        except (KeyError, ValueError) as exc:
+            logger.bind(tag=TAG).warning(
+                f"Skipping reminder {doc.reference.path} (user={user_id}) "
+                f"due to malformed target payload: {targets_payload} ({exc})"
+            )
+            continue
+
+        docs.append(_build_alarm_doc(doc, data, schedule, targets))
+
+    logger.bind(tag=TAG).info(f"Fetched {len(docs)} due reminders")
+    return docs
+
+
 def mark_one_time_alarm_complete(
     alarm: models.AlarmDoc,
     *,
