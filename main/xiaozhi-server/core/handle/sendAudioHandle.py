@@ -18,6 +18,10 @@ async def sendAudioMessage(conn, sentenceType, audios, text):
         # 标记当前正在播放TTS，便于VAD检测到用户说话时触发打断
         conn.client_is_speaking = True
         await send_tts_message(conn, "sentence_start", text)
+        # Reset flow control so each segment starts with fresh timing,
+        # preventing stale expected_time from a previous sentence causing sleeps
+        if hasattr(conn, "audio_flow_control"):
+            del conn.audio_flow_control
 
     await sendAudio(conn, audios)
     # 发送句子开始消息

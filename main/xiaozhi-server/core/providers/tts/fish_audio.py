@@ -64,6 +64,8 @@ class TTSProvider(TTSProviderBase):
                     self.tts_text_buff = []
                     self.tts_audio_first_sentence = True
                     self.before_stop_play_files.clear()
+                    self.processed_chars = 0
+                    self.is_first_sentence = True
 
                 elif self.conn.client_abort:
                     continue
@@ -71,6 +73,14 @@ class TTSProvider(TTSProviderBase):
                 elif ContentType.TEXT == message.content_type:
                     if message.content_detail:
                         self.tts_text_buff.append(message.content_detail)
+                        segment_text = self._get_segment_text()
+                        if segment_text and not self.conn.client_abort:
+                            try:
+                                asyncio.run(self.text_to_speak(segment_text, is_last_segment=False))
+                            except Exception as e:
+                                logger.bind(tag=TAG).error(
+                                    f"Fish Audio TTS failed: {e}\n{traceback.format_exc()}"
+                                )
 
                 elif ContentType.FILE == message.content_type:
                     if message.content_file:
@@ -84,10 +94,12 @@ class TTSProvider(TTSProviderBase):
 
                 if message.sentence_type == SentenceType.LAST:
                     full_text = "".join(self.tts_text_buff)
-                    full_text = textUtils.get_string_no_punctuation_or_emoji(full_text)
-                    if full_text and not self.conn.client_abort:
+                    remaining = textUtils.get_string_no_punctuation_or_emoji(
+                        full_text[self.processed_chars:]
+                    )
+                    if remaining and not self.conn.client_abort:
                         try:
-                            asyncio.run(self.text_to_speak(full_text))
+                            asyncio.run(self.text_to_speak(remaining))
                         except Exception as e:
                             logger.bind(tag=TAG).error(
                                 f"Fish Audio TTS failed: {e}\n{traceback.format_exc()}"
@@ -103,7 +115,7 @@ class TTSProvider(TTSProviderBase):
                     f"TTS text thread error: {e}\n{traceback.format_exc()}"
                 )
 
-    async def text_to_speak(self, text, _output_file=None):
+    async def text_to_speak(self, text, _output_file=None, is_last_segment=True):
         reference_id = self._resolve_reference_id()
         if not reference_id:
             raise Exception(
@@ -177,7 +189,8 @@ class TTSProvider(TTSProviderBase):
         )
 
         logger.bind(tag=TAG).info(f"Fish Audio TTS success: {text[:60]}")
-        self._process_before_stop_play_files()
+        if is_last_segment:
+            self._process_before_stop_play_files()
 
     async def close(self):
         if hasattr(self, "opus_encoder"):
