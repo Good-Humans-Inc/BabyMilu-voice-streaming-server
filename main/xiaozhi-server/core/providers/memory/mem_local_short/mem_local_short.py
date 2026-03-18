@@ -209,6 +209,10 @@ class MemoryProvider(MemoryProviderBase):
                 all_memory = yaml.safe_load(f) or {}
         if self.role_id in all_memory:
             self.short_memory = all_memory[self.role_id]
+        else:
+            # Critical: reset memory when switching to a new role/device.
+            # Without this, the previous role's memory leaks to the next one.
+            self.short_memory = ""
 
     def save_memory_to_file(self):
         all_memory = {}

@@ -1,3 +1,4 @@
+import time
 import httpx
 import json
 import openai
@@ -8,6 +9,29 @@ from core.providers.llm.base import LLMProviderBase
 
 TAG = __name__
 logger = setup_logging()
+
+# Transient error substrings that warrant a retry
+_RETRYABLE_MESSAGES = [
+    "conversation lock",
+    "rate limit",
+    "too many requests",
+    "server error",
+    "overloaded",
+    "timeout",
+]
+
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 0.5  # seconds; doubles each attempt
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Return True if the exception looks transient and worth retrying."""
+    msg = str(exc).lower()
+    # HTTP 429 / 5xx are always retryable
+    if isinstance(exc, openai.APIStatusError):
+        if exc.status_code in (429, 500, 502, 503, 504):
+            return True
+    return any(token in msg for token in _RETRYABLE_MESSAGES)
 
 
 class LLMProvider(LLMProviderBase):
@@ -79,6 +103,14 @@ class LLMProvider(LLMProviderBase):
                 f"Adopted conversation {conversation_id} for session {session_id}"
             )
 
+    def release_conversation(self, session_id: str):
+        """Drop local session->conversation mapping to avoid unbounded growth."""
+        if session_id in self._conversations:
+            try:
+                del self._conversations[session_id]
+            except Exception:
+                pass
+
     def ensure_conversation_with_system(self, session_id, system_text: str):
         """Create conversation and seed a system message as the first item."""
         state = self._conversations.get(session_id)
@@ -106,183 +138,215 @@ class LLMProvider(LLMProviderBase):
             return self.ensure_conversation(session_id)
 
     def response(self, session_id, dialogue, **kwargs):
-        try:
-            is_active = True
-            force_stateless = kwargs.get("stateless", self.stateless_default)
-            conv_id = None if force_stateless else self.ensure_conversation(session_id)
-            instructions = kwargs.get("instructions")
-            extra_inputs = kwargs.get("extra_inputs", [])
-            
-            final_input = list(dialogue) + list(extra_inputs) if extra_inputs else dialogue
-            
-            with self.client.responses.stream(
-                model=self.model_name,
-                input=final_input,
-                instructions=instructions,
-                conversation=conv_id,
-                store=bool(conv_id),
-            ) as stream:
-                for event in stream:
-                    if event.type == "response.output_text.delta":
-                        delta = event.delta or ""
-                        if not delta:
-                            continue
-                        
-                        if is_active:
-                            if "<think>" in delta:
-                                idx = delta.find("<think>")
-                                head = delta[:idx]
-                                if head:
-                                    yield head
-                                is_active = False
+        last_exc = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                is_active = True
+                force_stateless = kwargs.get("stateless", self.stateless_default)
+                conv_id = None if force_stateless else self.ensure_conversation(session_id)
+                instructions = kwargs.get("instructions")
+                extra_inputs = kwargs.get("extra_inputs", [])
+                
+                final_input = list(dialogue) + list(extra_inputs) if extra_inputs else dialogue
+                
+                with self.client.responses.stream(
+                    model=self.model_name,
+                    input=final_input,
+                    instructions=instructions,
+                    conversation=conv_id,
+                    store=bool(conv_id),
+                ) as stream:
+                    for event in stream:
+                        if event.type == "response.output_text.delta":
+                            delta = event.delta or ""
+                            if not delta:
+                                continue
+                            
+                            if is_active:
+                                if "<think>" in delta:
+                                    idx = delta.find("<think>")
+                                    head = delta[:idx]
+                                    if head:
+                                        yield head
+                                    is_active = False
+                                else:
+                                    yield delta
                             else:
-                                yield delta
-                        else:
-                            if "</think>" in delta:
-                                idx = delta.rfind("</think>")
-                                tail = delta[idx + len("</think>"):]
-                                is_active = True
-                                if tail:
-                                    yield tail
-                    elif event.type == "response.completed":
-                        break
+                                if "</think>" in delta:
+                                    idx = delta.rfind("</think>")
+                                    tail = delta[idx + len("</think>"):]
+                                    is_active = True
+                                    if tail:
+                                        yield tail
+                        elif event.type == "response.completed":
+                            break
+                return  # success — exit retry loop
 
-        except Exception as e:
-            logger.bind(tag=TAG).error(f"Error in response generation: {e}")
+            except Exception as e:
+                last_exc = e
+                if _is_retryable(e) and attempt < _MAX_RETRIES - 1:
+                    delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                    logger.bind(tag=TAG).warning(
+                        f"Retryable error (attempt {attempt + 1}/{_MAX_RETRIES}): {e} — retrying in {delay:.1f}s"
+                    )
+                    time.sleep(delay)
+                    continue
+                logger.bind(tag=TAG).error(f"Error in response generation: {e}")
 
     def response_with_functions(self, session_id, dialogue, functions=None, **kwargs):
-        yield from self._do_response_with_functions(session_id, dialogue, functions, **kwargs)
+        # Convert Chat Completions function schema to Responses tool schema
+        tools = []
+        if functions:
+            for f in functions:
+                if f.get("type") == "function" and isinstance(f.get("function"), dict):
+                    fn = f["function"]
+                    tools.append({
+                        "type": "function",
+                        "name": fn["name"],
+                        "description": fn.get("description", ""),
+                        "parameters": fn.get("parameters", {}),
+                    })
+                elif f.get("type") == "function" and "name" in f:
+                    tools.append(f)
 
-    def _do_response_with_functions(self, session_id, dialogue, functions=None, **kwargs):
-        try:
-            # Convert Chat Completions function schema to Responses tool schema
-            tools = []
-            if functions:
-                for f in functions:
-                    if f.get("type") == "function" and isinstance(f.get("function"), dict):
-                        fn = f["function"]
-                        tools.append({
-                            "type": "function",
-                            "name": fn["name"],
-                            "description": fn.get("description", ""),
-                            "parameters": fn.get("parameters", {}),
-                        })
-                    elif f.get("type") == "function" and "name" in f:
-                        tools.append(f)
+        def make_tool_delta(call_id, name, arguments):
+            return [SimpleNamespace(
+                id=call_id,
+                function=SimpleNamespace(name=name, arguments=arguments)
+            )]
 
-            def make_tool_delta(call_id, name, arguments):
-                return [SimpleNamespace(
-                    id=call_id,
-                    function=SimpleNamespace(name=name, arguments=arguments)
-                )]
-
-            is_active = True
-            force_stateless = kwargs.get("stateless", self.stateless_default)
-            conv_id = None if force_stateless else self.ensure_conversation(session_id)
-            instructions = kwargs.get("instructions")
-            extra_inputs = kwargs.get("extra_inputs", [])
-            
-            final_input = list(dialogue) + list(extra_inputs) if extra_inputs else dialogue
-            
-            with self.client.responses.stream(
-                model=self.model_name,
-                input=final_input,
-                tools=tools if tools else None,
-                instructions=instructions,
-                conversation=conv_id,
-                store=bool(conv_id),
-            ) as stream:
-                function_call = {"id": None, "name": None, "arguments": ""}
+        last_exc = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                is_active = True
+                force_stateless = kwargs.get("stateless", self.stateless_default)
+                conv_id = None if force_stateless else self.ensure_conversation(session_id)
+                instructions = kwargs.get("instructions")
+                extra_inputs = kwargs.get("extra_inputs", [])
                 
-                for event in stream:
-                    event_type = event.type
+                final_input = list(dialogue) + list(extra_inputs) if extra_inputs else dialogue
+                
+                with self.client.responses.stream(
+                    model=self.model_name,
+                    input=final_input,
+                    tools=tools if tools else None,
+                    instructions=instructions,
+                    conversation=conv_id,
+                    store=bool(conv_id),
+                ) as stream:
+                    function_call = {"id": None, "name": None, "arguments": ""}
                     
-                    if event_type == "response.output_text.delta":
-                        # Skip text deltas if we're collecting function call data
-                        if function_call["id"]:
-                            continue
+                    for event in stream:
+                        event_type = event.type
                         
-                        delta = event.delta or ""
-                        if not delta:
-                            continue
-                        
-                        if is_active:
-                            if "<think>" in delta:
-                                idx = delta.find("<think>")
-                                head = delta[:idx]
-                                if head:
-                                    yield head, None
-                                is_active = False
+                        if event_type == "response.output_text.delta":
+                            # Skip text deltas if we're collecting function call data
+                            if function_call["id"]:
+                                continue
+                            
+                            delta = event.delta or ""
+                            if not delta:
+                                continue
+                            
+                            if is_active:
+                                if "<think>" in delta:
+                                    idx = delta.find("<think>")
+                                    head = delta[:idx]
+                                    if head:
+                                        yield head, None
+                                    is_active = False
+                                else:
+                                    yield delta, None
                             else:
-                                yield delta, None
-                        else:
-                            if "</think>" in delta:
-                                idx = delta.rfind("</think>")
-                                tail = delta[idx + len("</think>"):]
-                                is_active = True
-                                if tail:
-                                    yield tail, None
-                    
-                    elif event_type == "response.output_item.added":
-                        # Detect function call initiation
-                        if event.item.type == "function_call":
-                            function_call["id"] = event.item.call_id
-                            function_call["name"] = event.item.name
+                                if "</think>" in delta:
+                                    idx = delta.rfind("</think>")
+                                    tail = delta[idx + len("</think>"):]
+                                    is_active = True
+                                    if tail:
+                                        yield tail, None
+                        
+                        elif event_type == "response.output_item.added":
+                            # Detect function call initiation
+                            if event.item.type == "function_call":
+                                function_call["id"] = event.item.call_id
+                                function_call["name"] = event.item.name
+                                logger.bind(tag=TAG).info(
+                                    f"Function call started: {function_call['name']} "
+                                    f"(id={function_call['id']})"
+                                )
+                        
+                        elif event_type == "response.function_call_arguments.delta":
+                            # Accumulate function arguments
+                            if event.delta:
+                                function_call["arguments"] += event.delta
+                        
+                        elif event_type == "response.function_call_arguments.done":
+                            # Function arguments complete
                             logger.bind(tag=TAG).info(
-                                f"Function call started: {function_call['name']} "
-                                f"(id={function_call['id']})"
+                                f"Function call arguments complete: {len(function_call['arguments'])} chars"
                             )
-                    
-                    elif event_type == "response.function_call_arguments.delta":
-                        # Accumulate function arguments
-                        if event.delta:
-                            function_call["arguments"] += event.delta
-                    
-                    elif event_type == "response.function_call_arguments.done":
-                        # Function arguments complete
-                        logger.bind(tag=TAG).info(
-                            f"Function call arguments complete: {len(function_call['arguments'])} chars"
-                        )
-                    
-                    elif event_type == "response.output_item.done":
-                        # Output item completed - could be function call or text
-                        pass
-                    
-                    elif event_type == "response.completed":
-                        break
+                        
+                        elif event_type == "response.output_item.done":
+                            # Output item completed - could be function call or text
+                            pass
+                        
+                        elif event_type == "response.completed":
+                            break
 
-                # Emit consolidated function call if we collected one
-                if function_call["id"] and function_call["name"]:
-                    args = function_call["arguments"].strip()
-                    if args:
-                        try:
-                            # Validate JSON
-                            json.loads(args)
-                            logger.bind(tag=TAG).info(
-                                f"Emitting function call: {function_call['name']} "
-                                f"with {len(args)} char args"
-                            )
-                            yield "", make_tool_delta(
-                                function_call["id"],
-                                function_call["name"],
-                                args
-                            )
-                        except json.JSONDecodeError:
-                            logger.bind(tag=TAG).warning(
-                                f"Invalid JSON in function arguments: {args[:100]}"
-                            )
+                    # Emit consolidated function call if we collected one
+                    if function_call["id"] and function_call["name"]:
+                        args = function_call["arguments"].strip()
+                        if args:
+                            try:
+                                # Validate JSON
+                                json.loads(args)
+                                logger.bind(tag=TAG).info(
+                                    f"Emitting function call: {function_call['name']} "
+                                    f"with {len(args)} char args"
+                                )
+                                yield "", make_tool_delta(
+                                    function_call["id"],
+                                    function_call["name"],
+                                    args
+                                )
+                            except json.JSONDecodeError:
+                                logger.bind(tag=TAG).warning(
+                                    f"Invalid JSON in function arguments: {args[:100]}"
+                                )
+                return  # success — exit retry loop
 
+            except Exception as e:
+                last_exc = e
+                if _is_retryable(e) and attempt < _MAX_RETRIES - 1:
+                    delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                    logger.bind(tag=TAG).warning(
+                        f"Retryable error (attempt {attempt + 1}/{_MAX_RETRIES}): {e} — retrying in {delay:.1f}s"
+                    )
+                    time.sleep(delay)
+                    continue
+                # If a function call was aborted mid-stream, OpenAI can leave a
+                # dangling server-side tool call that causes next-turn 400 errors.
+                if "No tool output found for function call" in str(e):
+                    logger.bind(tag=TAG).warning(
+                        f"Dangling tool call detected for session {session_id} "
+                        f"(aborted mid-function-call). Resetting conversation."
+                    )
+                    self._conversations.pop(session_id, None)
+                else:
+                    logger.bind(tag=TAG).error(f"Error in function call streaming: {e}")
+
+    def response_with_structured_output(self, dialogue, structured_output, **kwargs):
+        try:
+            completion = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=dialogue,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                response_format=structured_output
+            )
+            
+            response_text = completion.choices[0].message.content
+            return response_text
         except Exception as e:
-            # When a function call is interrupted by an abort, OpenAI stores the
-            # pending tool call server-side. The next turn then fails with 400
-            # because no tool output was provided. Reset the conversation so the
-            # next user message rebuilds full history from the local dialogue.
-            if "No tool output found for function call" in str(e):
-                logger.bind(tag=TAG).warning(
-                    f"Dangling tool call detected for session {session_id} "
-                    f"(aborted mid-function-call). Resetting conversation — "
-                    f"please repeat your message."
-                )
-                self._conversations.pop(session_id, None)
-            else:
-                logger.bind(tag=TAG).error(f"Error in function call streaming: {e}")
+            logger.bind(tag=TAG).error(f"Error in structured output streaming: {e}")
+            return f"【OpenAI服务响应异常: {e}】"

@@ -37,17 +37,59 @@ def get_gcp_credentials_path() -> str:
     """Return the path to GCP credentials if set via env/config.
 
     Precedence:
-      1) GOOGLE_APPLICATION_CREDENTIALS env var
-      2) data/.gcp/sa.json (if present and mounted)
+      1) GOOGLE_APPLICATION_CREDENTIALS env var (if it's a file)
+      2) If env var points to a directory, look for sa.json inside it
+      3) /opt/secrets/gcp/ directory (Docker secret mount, look for JSON file)
+      4) data/.gcp/sa.json (if present and mounted)
+      5) data/.gcp/ directory (if present, look for any JSON file inside)
     """
     # 1) Environment variable (preferred)
     path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-    if path and os.path.exists(path):
-        return path
+    if path:
+        if os.path.isfile(path):
+            return path
+        elif os.path.isdir(path):
+            # Try to find sa.json inside the directory
+            sa_file = os.path.join(path, "sa.json")
+            if os.path.isfile(sa_file):
+                return sa_file
+            # Look for any JSON file in the directory
+            try:
+                json_files = [f for f in os.listdir(path) if f.endswith('.json')]
+                if json_files:
+                    found_file = os.path.join(path, json_files[0])
+                    if os.path.isfile(found_file):
+                        return found_file
+            except Exception:
+                pass
 
-    # 2) Default convention under data folder (optional)
+    # 2) Check Docker secret mount directory first (before data/.gcp)
+    docker_secret_dir = "/opt/secrets/gcp"
+    if os.path.isdir(docker_secret_dir):
+        try:
+            json_files = [f for f in os.listdir(docker_secret_dir) if f.endswith('.json')]
+            if json_files:
+                found_file = os.path.join(docker_secret_dir, json_files[0])
+                if os.path.isfile(found_file):
+                    return found_file
+        except Exception:
+            pass
+
+    # 3) Default convention under data folder (optional)
     default_path = os.path.join(get_project_dir(), "data/.gcp/sa.json")
-    if os.path.exists(default_path):
+    if os.path.isfile(default_path):
         return default_path
+    
+    # 4) If data/.gcp is a directory, look for JSON files inside
+    default_dir = os.path.join(get_project_dir(), "data/.gcp")
+    if os.path.isdir(default_dir):
+        try:
+            json_files = [f for f in os.listdir(default_dir) if f.endswith('.json')]
+            if json_files:
+                found_file = os.path.join(default_dir, json_files[0])
+                if os.path.isfile(found_file):
+                    return found_file
+        except Exception:
+            pass
 
     return ""

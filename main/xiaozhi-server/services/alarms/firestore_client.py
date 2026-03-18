@@ -16,13 +16,31 @@ from services.alarms import models
 TAG = __name__
 logger = setup_logging()
 
+_REPEAT_ALIASES = {
+    "weekly": models.AlarmRepeat.WEEKLY,
+    "none": models.AlarmRepeat.NONE,
+    "once": models.AlarmRepeat.NONE,
+    "one_time": models.AlarmRepeat.NONE,
+    "one-time": models.AlarmRepeat.NONE,
+    "no_repeat": models.AlarmRepeat.NONE,
+}
+
 
 def _build_client() -> firestore.Client:
     creds_path = get_gcp_credentials_path()
     if creds_path:
         import os
-
-        os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", creds_path)
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
+    else:
+        # If no valid credentials found, clear the env var if it points to a directory
+        # to prevent "Is a directory" errors from Firestore
+        import os
+        env_creds = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        if env_creds and os.path.isdir(env_creds):
+            # Directory detected but no JSON file found inside - clear it to avoid errors
+            if "GOOGLE_APPLICATION_CREDENTIALS" in os.environ:
+                del os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
+    
     return firestore.Client()
 
 
@@ -65,13 +83,30 @@ def fetch_due_alarms(
                 f"label={data.get('label')} targets={len(data.get('targets', []))}"
             )
         )
-        schedule_payload = data["schedule"]
-        repeat = models.AlarmRepeat(str(schedule_payload["repeat"]).lower())
-        schedule = models.AlarmSchedule(
-            repeat=repeat,
-            time_local=schedule_payload["timeLocal"],
-            days=schedule_payload.get("days") or [],
-        )
+        schedule_payload = data.get("schedule")
+        if not isinstance(schedule_payload, dict):
+            logger.bind(tag=TAG).warning(
+                (
+                    f"Skipping alarm {doc.reference.path} (user={user_id}): "
+                    f"missing or invalid schedule payload ({schedule_payload})"
+                )
+            )
+            continue
+        try:
+            repeat = _parse_repeat(schedule_payload["repeat"])
+            schedule = models.AlarmSchedule(
+                repeat=repeat,
+                time_local=schedule_payload["timeLocal"],
+                days=schedule_payload.get("days") or [],
+            )
+        except (KeyError, ValueError) as exc:
+            logger.bind(tag=TAG).warning(
+                (
+                    f"Skipping alarm {doc.reference.path} (user={user_id}): "
+                    f"invalid schedule payload ({schedule_payload}) ({exc})"
+                )
+            )
+            continue
 
         targets_payload = data.get("targets")
         if not isinstance(targets_payload, list) or not targets_payload:
@@ -184,6 +219,13 @@ def _normalize_device_id(value) -> str:
     return normalize_mac(value)
 
 
+def _parse_repeat(raw_repeat) -> models.AlarmRepeat:
+    key = str(raw_repeat).strip().lower()
+    if key in _REPEAT_ALIASES:
+        return _REPEAT_ALIASES[key]
+    raise ValueError(f"Unsupported repeat value: {raw_repeat}")
+
+
 def mark_alarm_processed(
     alarm: models.AlarmDoc,
     *,
@@ -245,7 +287,9 @@ def create_alarm(
         "label": label,
         "context": context,
         "schedule": {
-            "repeat": models.AlarmRepeat.NONE.value,
+            # Keep "once" for backward compatibility with currently deployed
+            # cloud scheduler revisions that may not recognize "none".
+            "repeat": "once",
             "timeLocal": time_local,
             "days": [date_local],  # ISO date string for one-time alarms
         },

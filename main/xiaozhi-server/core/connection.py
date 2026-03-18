@@ -39,6 +39,7 @@ from config.manage_api_client import DeviceNotFoundException, DeviceBindExceptio
 from core.utils.prompt_manager import PromptManager
 from core.utils.voiceprint_provider import VoiceprintProvider
 from core.utils import textUtils
+from .chat_store import ChatStore
 from core.utils.util import filter_sensitive_info, check_vad_update, check_asr_update
 from core.utils.firestore_client import (
     get_active_character_for_device,
@@ -49,13 +50,13 @@ from core.utils.firestore_client import (
     extract_user_profile_fields,
     get_conversation_state_for_device,
     update_conversation_state_for_device,
-    get_most_recent_character_via_user_for_device,
+    get_most_recent_character_via_user_for_device
 )
-
 from services.session_context import store as session_context_store
 from services.alarms.config import MODE_CONFIG
+from services import log_context
 
-
+from core.utils.api_client import query_task, get_assigned_tasks_for_user, process_user_action
 TAG = __name__
 
 auto_import_modules("plugins_func.functions")
@@ -116,6 +117,7 @@ class ConnectionHandler:
         _asr,
         _llm,
         _memory,
+        _task,
         _intent,
         server=None,
     ):
@@ -140,6 +142,8 @@ class ConnectionHandler:
         self.chat_history_conf = 0
         self.audio_format = "opus"
 
+        self.matched_user = None
+
         # 客户端状态
         self.client_abort = False
         self.client_is_speaking = False
@@ -152,6 +156,8 @@ class ConnectionHandler:
         self.followup_exit_after = 120  # seconds since last speech before exit
         self.last_tts_stop_ms = 0
         self.last_stt_activity_ms = 0
+        self.tts_stop_watchdog_task = None
+        self.tts_stop_watchdog_seq = 0
 
         # 线程/任务
         self.loop = asyncio.get_event_loop()
@@ -165,14 +171,29 @@ class ConnectionHandler:
         self.report_tts_enable = self.read_config_from_api
 
         # 组件
+        # VAD and ASR are stateless processors — safe to share across connections.
+        # LLM is keyed by unique session_id — sharing is a P1 memory-leak but not
+        # a correctness issue.
+        # Memory, Task, and Intent carry per-device mutable state (role_id,
+        # short_memory, cached prompts).  Storing the server-level references here
+        # ONLY as fallback templates; _ensure_per_connection_providers() replaces
+        # them with fresh per-connection instances before any device-specific
+        # mutation happens.
         self.vad = None
         self.asr = None
         self.tts = None
         self._asr = _asr
         self._vad = _vad
         self.llm = _llm
-        self.memory = _memory
-        self.intent = _intent
+        # IMPORTANT: Set to None so no code can accidentally mutate the shared
+        # server-level provider before _ensure_per_connection_providers() runs.
+        # The shared references are kept as _server_* for config introspection only.
+        self._server_memory = _memory
+        self._server_task = _task
+        self._server_intent = _intent
+        self.memory = None
+        self.task = None
+        self.intent = None
 
         # 声纹识别
         self.voiceprint_provider = None
@@ -195,6 +216,11 @@ class ConnectionHandler:
         self.device_conversation_ttl = self._derive_conversation_ttl()
         self.current_conversation_id: Optional[str] = None
         self.use_mode_conversation = False
+        self.current_character_id: Optional[str] = None
+        self._profile_refresh_lock = threading.RLock()
+        self._last_profile_refresh_ms = 0
+        self._profile_refresh_interval_ms = 3000
+        self._llm_conversation_released = False
 
         # 组件初始化事件
         self.components_initialized = asyncio.Event()
@@ -231,6 +257,11 @@ class ConnectionHandler:
         self.prompt_manager = PromptManager(config, self.logger)
         # 新建会话时，首轮下发mode instructions
         self._seed_instructions_once = False
+        # related to storing logs into database
+        self.chat_store = ChatStore()
+        self._session_created = False
+        self._session_closed = False
+        self.turn_index = 0
 
     # ------------------------------------------------------------------
     # Mode runtime accessors
@@ -320,9 +351,158 @@ class ConnectionHandler:
         if value is not None:
             self._followup_state.max = int(value)
 
-    # ------------------------------------------------------------------
+    def _refresh_character_binding_if_needed(self, force: bool = False):
+        """Refresh character-bound runtime fields (voice/prompt) on active connections.
+
+        Users can switch characters while a websocket is still connected.
+        Without this refresh, conn.voice_id and prompt remain bound to the
+        previous character until reconnect.
+        """
+        if not self.device_id:
+            return
+
+        now_ms = int(time.time() * 1000)
+        if (
+            not force
+            and self._last_profile_refresh_ms > 0
+            and (now_ms - self._last_profile_refresh_ms) < self._profile_refresh_interval_ms
+        ):
+            return
+
+        with self._profile_refresh_lock:
+            now_ms = int(time.time() * 1000)
+            if (
+                not force
+                and self._last_profile_refresh_ms > 0
+                and (now_ms - self._last_profile_refresh_ms)
+                < self._profile_refresh_interval_ms
+            ):
+                return
+
+            char_id = get_active_character_for_device(self.device_id)
+            if not char_id:
+                char_id = get_most_recent_character_via_user_for_device(self.device_id)
+            if not char_id:
+                self._last_profile_refresh_ms = now_ms
+                return
+
+            if not force and self.current_character_id == char_id:
+                self._last_profile_refresh_ms = now_ms
+                return
+
+            # Character changed (or forced refresh): update voice + prompt and invalidate cache
+            old_char = self.current_character_id
+            old_voice = self.voice_id
+            self.current_character_id = char_id
+
+            fields = {}
+            try:
+                char_doc = get_character_profile(char_id)
+                fields = extract_character_profile_fields(char_doc or {})
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(
+                    f"Failed to refresh character profile for {self.device_id}: {e}"
+                )
+
+            if fields.get("voice"):
+                self.voice_id = str(fields.get("voice"))
+
+            # Invalidate prompt cache for this device then rebuild prompt with latest character.
+            try:
+                invalidated = self.prompt_manager.invalidate_device_prompt_cache(
+                    self.device_id
+                )
+                self.logger.bind(tag=TAG).info(
+                    f"Prompt cache invalidated for {self.device_id}: {invalidated} entries"
+                )
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(
+                    f"Failed to invalidate prompt cache for {self.device_id}: {e}"
+                )
+
+            base_prompt = self.common_config.get("prompt", self.config.get("prompt", ""))
+            refreshed_prompt = base_prompt
+
+            profile_parts = []
+            for label, key in (
+                ("Your Name", "name"),
+                ("Your Age", "age"),
+                ("Your Pronouns", "pronouns"),
+                ("Your Relationship with the user", "relationship"),
+                ("You like calling the user", "callMe"),
+            ):
+                val = fields.get(key)
+                if val:
+                    profile_parts.append(f"{label}: {val}")
+            if profile_parts:
+                refreshed_prompt += "\n# About you:\n" + "\n- ".join(profile_parts)
+            if fields.get("bio"):
+                refreshed_prompt += f"\nUser's description of you: {fields['bio']}"
+
+            # Re-append user profile/task context, same as initial handshake behavior.
+            try:
+                owner_phone = get_owner_phone_for_device(self.device_id)
+                if owner_phone:
+                    user_doc = get_user_profile_by_phone(owner_phone)
+                    user_fields = extract_user_profile_fields(user_doc or {})
+                    user_parts = []
+                    for label, key in (
+                        ("User's name", "name"),
+                        ("User's Birthday", "birthday"),
+                        ("User's Pronouns", "pronouns"),
+                    ):
+                        val = user_fields.get(key)
+                        if val:
+                            user_parts.append(f"{label}: {val}")
+                    if user_parts:
+                        refreshed_prompt += "\nUser profile:\n" + "\n- ".join(user_parts)
+
+                    task_str = query_task(
+                        owner_phone,
+                        fields.get("name") if isinstance(fields, dict) else None,
+                        user_fields.get("name")
+                        if isinstance(user_fields, dict)
+                        else None,
+                    )
+                    if task_str:
+                        display_name = user_fields.get("name") or "User"
+                        refreshed_prompt += (
+                            f"\n{display_name} might be trying to accomplish these tasks:\n {task_str}"
+                        )
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(
+                    f"Failed to rebuild user profile context after character switch: {e}"
+                )
+
+            self.config["prompt"] = refreshed_prompt
+            try:
+                quick = self.prompt_manager.get_quick_prompt(
+                    refreshed_prompt, device_id=self.device_id
+                )
+                self.change_system_prompt(quick, prompt_label="quick_character_switch")
+                enhanced = self.prompt_manager.build_enhanced_prompt(
+                    refreshed_prompt, self.device_id, self.client_ip
+                )
+                if enhanced:
+                    self.change_system_prompt(
+                        enhanced, prompt_label="enhanced_character_switch"
+                    )
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(
+                    f"Failed to rebuild prompt after character switch: {e}"
+                )
+
+            self.logger.bind(tag=TAG).info(
+                f"Character binding refreshed for {self.device_id}: "
+                f"char {old_char} -> {self.current_character_id}, "
+                f"voice {old_voice} -> {self.voice_id}"
+            )
+            self._last_profile_refresh_ms = now_ms
+
+
 
     async def handle_connection(self, ws):
+        device_token = None
         try:
             # 获取并验证headers
             self.headers = dict(ws.request.headers)
@@ -367,11 +547,19 @@ class ConnectionHandler:
             # Normalize device-id to lower-case so it matches sessionContexts doc IDs
             raw_device_id = self.headers.get("device-id")
             self.device_id = raw_device_id.lower() if isinstance(raw_device_id, str) else raw_device_id
-            self.logger.bind(tag=TAG).info(f"device_id: {self.device_id}")
 
-            # Hydrate any scheduled mode session (e.g. alarm)
-            self._hydrate_mode_session()
+            # Attach device-id to *all* logs emitted within this connection.
+            # - Bind it onto the per-connection logger (covers executor threads too)
+            # - Store it in async context (covers any global logger usage in async code)
+            device_token = log_context.set_device_id(self.device_id)
+            self.logger = self.logger.bind(device_id=self.device_id)
 
+            # Enforce single active WebSocket per device_id.
+            # If another connection for this device already exists, supersede it.
+            if self.server and self.device_id:
+                await self.server.claim_device(self.device_id, self)
+
+            # NOTE: Do not hardcode device_id in staging/production.
             # 检查是否来自MQTT连接
             request_path = ws.request.path
             self.conn_from_mqtt_gateway = request_path.endswith("?from=mqtt_gateway")
@@ -380,33 +568,61 @@ class ConnectionHandler:
 
             # 初始化活动时间戳
             self.last_activity_time = time.time() * 1000
+            # ---- SAFE DEFAULTS ----
+            user_id = f"device:{self.device_id}"
+            user_name = "Unknown User"
+            new_prompt = self.config.get("prompt", "")
+
+            cached_enhanced_prompt = self.prompt_manager.get_cached_enhanced_prompt(
+                self.device_id, prompt_text=self.config.get("prompt")
+            )
+            if cached_enhanced_prompt:
+                # Important: prompt caching must NOT skip Firestore fetches that
+                # resolve per-user settings (e.g., voice_id). Otherwise we fall back
+                # to provider defaults (often "Caleb" on ElevenLabs).
+                self.logger.bind(tag=TAG).info(
+                    f"Enhanced prompt cache hit for device {self.device_id} (prompt cached); "
+                    "still fetching Firestore profile for voice/user binding"
+                )
 
             # 从云端获取角色配置（voice, bio 等），并应用到本次会话
+            fields = {}
             try:
                 char_id = None
                 if self.device_id:
+                    self.logger.bind(tag=TAG).info(
+                        f"🔍 Looking up device: {self.device_id}"
+                    )
                     char_id = get_active_character_for_device(self.device_id)
                     if not char_id:
-                        fallback_id = get_most_recent_character_via_user_for_device(self.device_id)
+                        fallback_id = (
+                            get_most_recent_character_via_user_for_device(
+                                self.device_id
+                            )
+                        )
                         if fallback_id:
-                            self.logger.bind(tag=TAG, device_id=self.device_id).warning(
-                                f"activeCharacterId missing; falling back to most recent user character: {fallback_id}"
+                            self.logger.bind(
+                                tag=TAG, device_id=self.device_id
+                            ).warning(
+                                f"activeCharacterId missing; falling back to {fallback_id}"
                             )
                             char_id = fallback_id
+
                 if char_id:
+                    self.current_character_id = char_id
                     self.logger.info(f"char_id={char_id!r}")
                     char_doc = get_character_profile(char_id)
-                    self.logger.info(f"char_doc_keys={list((char_doc or {}).keys())}")
                     fields = extract_character_profile_fields(char_doc or {})
-                    self.logger.info(
-                        f"resolved voice={fields.get('voice')}, bio_present={bool(fields.get('bio'))}"
-                    )
 
-                    # 优先保留客户端传入的 voice-id；否则使用云端的
                     if not self.voice_id and fields.get("voice"):
                         self.voice_id = str(fields.get("voice"))
 
-                    # 组装角色提示并更新系统提示词
+                    if not self.voice_id:
+                        # This is the key condition that will trigger TTS provider default voice.
+                        self.logger.bind(tag=TAG, device_id=self.device_id).warning(
+                            "No voice resolved from Firestore character profile; TTS may fall back to default_voice_id"
+                        )
+
                     profile_parts = []
                     for label, key in (
                         ("Your Name", "name"),
@@ -418,65 +634,118 @@ class ConnectionHandler:
                         val = fields.get(key)
                         if val:
                             profile_parts.append(f"{label}: {val}")
-                    profile_line = "\n- ".join(profile_parts)
-                    bio_text = fields.get("bio")
 
-                    new_prompt = self.config.get("prompt", "")
-                    if profile_line:
-                        new_prompt = new_prompt + f"\n# About you:\n{profile_line}"
-                    if bio_text:
-                        new_prompt = new_prompt + f"\nUser's description of you: {bio_text}"
+                    if profile_parts:
+                        new_prompt += "\n# About you:\n" + "\n- ".join(
+                            profile_parts
+                        )
 
-                    # Append user profile from Firestore users/{ownerPhone}
-                    owner_phone = get_owner_phone_for_device(self.device_id)
-                    if owner_phone:
-                        user_doc = get_user_profile_by_phone(owner_phone)
-                        user_fields = extract_user_profile_fields(user_doc or {})
-                        user_parts = []
-                        for label, key in (
-                            ("User's name", "name"),
-                            ("User's Birthday", "birthday"),
-                            ("User's Pronouns", "pronouns"),
-                        ):
-                            val = user_fields.get(key)
-                            if val:
-                                user_parts.append(f"{label}: {val}")
-                        if user_parts:
-                            user_profile = "\n- ".join(user_parts)
-                            new_prompt = new_prompt + f"\nUser profile:\n {user_profile}"
-
-                    if new_prompt != self.config.get("prompt", ""):
-                        self.config["prompt"] = new_prompt
-                        self.change_system_prompt(new_prompt)
-                        self.logger.bind(tag=TAG).info(
-                            f"Applied character profile from Firestore, prompt={self.config.get('prompt')}"
+                    if fields.get("bio"):
+                        new_prompt += (
+                            f"\nUser's description of you: {fields['bio']}"
                         )
                 else:
-                    self.logger.bind(tag=TAG, device_id=self.device_id).error(
-                        "🚨 MISSING activeCharacterId for device; using defaults 🚨"
+                    self.logger.bind(tag=TAG, device_id=self.device_id).warning(
+                        "MISSING activeCharacterId; using defaults"
                     )
-                    if not self.voice_id:
-                        default_voice = (
-                            self.config.get("TTS", {})
-                            .get("CustomTTS", {})
-                            .get("default_voice_id")
-                            or self.config.get("TTS", {})
-                            .get("CustomTTS", {})
-                            .get("voice_id")
-                        )
-                        if default_voice:
-                            self.logger.bind(tag=TAG).warning(
-                                "No character voice_id; using default voice from config"
-                            )
-                            self.voice_id = str(default_voice)
-                        else:
-                            self.logger.bind(tag=TAG).error(
-                                "No character voice_id and no default voice configured"
-                            )
-            except Exception as e:
-                self.logger.bind(tag=TAG).warning(
-                    f"Failed to fetch/apply character profile: {e}"
+
+                self.logger.bind(tag=TAG).info(
+                    f"🔍 Getting owner phone for device: {self.device_id}"
                 )
+                owner_phone = get_owner_phone_for_device(self.device_id)
+                self.logger.bind(tag=TAG).info(
+                    f"📞 Owner phone result: {owner_phone}"
+                )
+
+                if owner_phone:
+                    user_id = owner_phone
+                    self.logger.bind(tag=TAG).info(
+                        f"✅ Updated user_id to: {user_id}"
+                    )
+                    user_doc = get_user_profile_by_phone(owner_phone)
+                    user_fields = extract_user_profile_fields(user_doc or {})
+                    user_name = user_fields.get("name") or owner_phone
+                    self.logger.bind(tag=TAG).info(f"👤 User name: {user_name}")
+
+                    user_parts = []
+                    for label, key in (
+                        ("User's name", "name"),
+                        ("User's Birthday", "birthday"),
+                        ("User's Pronouns", "pronouns"),
+                    ):
+                        val = user_fields.get(key)
+                        if val:
+                            user_parts.append(f"{label}: {val}")
+                    if user_parts:
+                        new_prompt += "\nUser profile:\n" + "\n- ".join(
+                            user_parts
+                        )
+
+                    # 使用未完成任务的记忆
+                    try:
+                        task_str = query_task(
+                            owner_phone,
+                            fields.get("name")
+                            if isinstance(fields, dict)
+                            else None,
+                            user_fields.get("name")
+                            if isinstance(user_fields, dict)
+                            else None,
+                        )
+                        if task_str:
+                            display_name = user_fields.get("name") or "User"
+                            new_prompt += (
+                                f"\n{display_name} might be trying to accomplish these tasks:\n {task_str}"
+                            )
+                    except Exception as task_err:
+                        self.logger.bind(tag=TAG).warning(
+                            f"Failed to query tasks for prompt injection: {task_err}"
+                        )
+                else:
+                    self.logger.bind(tag=TAG).warning(
+                        f"❌ No owner phone found for device {self.device_id}, using fallback user_id: {user_id}"
+                    )
+
+            except Exception as e:
+                self.logger.bind(tag=TAG).error(
+                    f"❌ Failed to fetch/apply character profile: {e}"
+                )
+                import traceback
+
+                self.logger.bind(tag=TAG).error(
+                    f"Traceback: {traceback.format_exc()}"
+                )
+
+            # ---- SESSION CREATION (UNCONDITIONAL) ----
+            if not getattr(self, "_session_created", False):
+                self.user_id = user_id
+                self.user_name = user_name
+
+                self.chat_store.get_or_create_user(
+                    user_id=self.user_id,
+                    name=self.user_name
+                )
+
+                self.chat_store.create_session(
+                    session_id=self.session_id,
+                    user_id=self.user_id,
+                    user_name=self.user_name,
+                    device_id=self.device_id
+                )
+
+
+                self._session_created = True
+                self.logger.bind(tag=TAG).info(
+                    f"✅ Session created: {self.session_id} user={self.user_id}"
+                )
+
+            # ---- PROMPT UPDATE (SAFE) ----
+            if new_prompt != self.config.get("prompt", ""):
+                self.config["prompt"] = new_prompt
+                self.change_system_prompt(new_prompt, prompt_label="base")
+
+
+
 
             # 启动超时检查任务
             self.timeout_task = asyncio.create_task(self._check_timeout())
@@ -487,24 +756,38 @@ class ConnectionHandler:
             # 获取差异化配置
             self._initialize_private_config()
 
+            # Hydrate any active server-owned mode session (e.g., alarm) so
+            # hello handling can correctly trigger server-initiated greeting.
+            self._hydrate_mode_session()
+
             # 同步构建首轮系统提示词（包含增强）
             try:
                 base_prompt = self.config.get("prompt")
                 if base_prompt is not None:
-                    quick = self.prompt_manager.get_quick_prompt(base_prompt)
-                    self.change_system_prompt(quick)
+                    quick = self.prompt_manager.get_quick_prompt(base_prompt, device_id=self.device_id)
+                    self.change_system_prompt(quick, prompt_label="quick")
                     self.prompt_manager.update_context_info(self, self.client_ip)
                     enhanced = self.prompt_manager.build_enhanced_prompt(
                         self.config["prompt"], self.device_id, self.client_ip
                     )
                     if enhanced:
-                        self.change_system_prompt(enhanced)
+                        self.change_system_prompt(enhanced, prompt_label="enhanced")
                         self.logger.bind(tag=TAG).info("同步构建增强系统提示词完成")
             except Exception as e:
                 self.logger.bind(tag=TAG).warning(f"同步构建系统提示词失败: {e}")
 
             # 初始化会话绑定（mode-scoped 或 device-scoped）
             self._initialize_conversation_binding()
+
+            if self.current_conversation_id:
+                self.chat_store.update_session_conversation_id(
+                    session_id=self.session_id,
+                    conversation_id=self.current_conversation_id,
+                )
+                self.logger.bind(tag=TAG).info(
+                    f"🧠 Session {self.session_id} bound to conversation {self.current_conversation_id}"
+                )
+
 
             # 异步初始化本地组件
             self.executor.submit(self._initialize_components)
@@ -535,10 +818,477 @@ class ConnectionHandler:
                     self.logger.bind(tag=TAG).error(
                         f"强制关闭连接时出错: {close_error}"
                     )
+            finally:
+                # Release device claim so the next connection can proceed
+                if self.server and self.device_id:
+                    try:
+                        await self.server.release_device(self.device_id, self)
+                    except Exception:
+                        pass
+                if device_token is not None:
+                    try:
+                        log_context.reset_device_id(device_token)
+                    except Exception:
+                        pass
+
+    def get_current_conversation(self):
+        """
+        获取当前websocket连接中的对话历史
+        
+        Returns:
+            list: 对话历史列表，包含所有消息
+                 返回格式: [{"role": "user/assistant/system", "content": "..."}, ...]
+            None: 如果对话为空或出错
+        """
+        try:
+            if self.dialogue:
+                # 获取完整的对话历史
+                conversation = self.dialogue.get_llm_dialogue()
+                self.logger.bind(tag=TAG).debug(
+                    f"获取当前对话历史，共 {len(conversation)} 条消息"
+                )
+                return conversation
+            else:
+                self.logger.bind(tag=TAG).warning("对话对象不存在")
+                return None
+        except Exception as e:
+            self.logger.bind(tag=TAG).error(f"获取对话历史失败: {e}")
+            return None
+    
+    def generate_ai_conversation_summary(self):
+        """
+        使用LLM生成对话内容的AI摘要
+        
+        Returns:
+            str: AI生成的对话摘要文本，如果失败则返回None
+        """
+        try:
+            if not self.llm:
+                self.logger.bind(tag=TAG).warning("LLM未初始化，无法生成AI摘要")
+                return None
+            
+            conversation = self.get_current_conversation()
+            if not conversation or len(conversation) == 0:
+                self.logger.bind(tag=TAG).debug("对话为空，跳过AI摘要生成")
+                return None
+            
+            # 过滤掉system消息，只保留用户和助手的对话
+            filtered_conv = [msg for msg in conversation if msg.get("role") in ["user", "assistant"]]
+            
+            if len(filtered_conv) == 0:
+                self.logger.bind(tag=TAG).debug("没有用户对话内容，跳过AI摘要生成")
+                return None
+            
+            # 构建对话历史文本
+            conv_text = ""
+            for msg in filtered_conv:
+                role = "User" if msg.get("role") == "user" else "Assistant"
+                content = msg.get("content", "")
+                conv_text += f"{role}: {content}\n"
+            
+            # 构建摘要请求
+            summary_prompt = [
+                {
+                    "role": "user",
+                    "content": f"Please provide a concise summary of the following conversation, focusing on key information and themes. Keep the summary under 100 words.\n\nConversation:\n{conv_text}\n\nProvide summary:"
+                }
+            ]
+            
+            # 调用LLM生成摘要
+            summary_parts = []
+            llm_responses = self.llm.response(
+                f"{self.session_id}_summary",
+                summary_prompt,
+                stateless=True  # 使用无状态模式，不保存这次摘要对话
+            )
+            
+            for response in llm_responses:
+                if response:
+                    summary_parts.append(response)
+            
+            summary = "".join(summary_parts).strip()
+            
+            if summary:
+                self.logger.bind(tag=TAG).info(f"AI对话摘要生成成功: {summary[:50]}...")
+                return summary
+            else:
+                self.logger.bind(tag=TAG).warning("AI摘要生成为空")
+                return None
+                
+        except Exception as e:
+            self.logger.bind(tag=TAG).error(f"生成AI对话摘要失败: {e}")
+            return None
+    
+    def check_conversation_against_tasks(self, user_id: str):
+        """
+        检查当前对话内容是否匹配用户的已分配任务
+        
+        Args:
+            user_id: 用户ID，用于获取分配的任务列表
+            
+        Returns:
+            list: 匹配的任务列表，每个任务包含任务信息和匹配原因
+                 格式: [{"task_id": "...", "task_title": "...", "match_reason": "..."}, ...]
+        """
+        try:
+            if not self.llm:
+                self.logger.bind(tag=TAG).warning("LLM未初始化，无法检查任务匹配")
+                return []
+            
+            # 获取用户分配的任务
+            tasks = get_assigned_tasks_for_user(user_id)
+            if not tasks or len(tasks) == 0:
+                self.logger.bind(tag=TAG).debug(f"用户 {user_id} 没有分配的任务")
+                return []
+            
+            # 获取当前对话
+            conversation = self.get_current_conversation()
+            if not conversation or len(conversation) == 0:
+                self.logger.bind(tag=TAG).debug("对话为空，跳过任务匹配")
+                return []
+            
+            # 过滤对话，只保留用户和助手的消息
+            filtered_conv = [msg for msg in conversation if msg.get("role") in ["user", "assistant"]]
+            if len(filtered_conv) == 0:
+                self.logger.bind(tag=TAG).debug("没有用户对话内容，跳过任务匹配")
+                return []
+            
+            # 构建对话历史文本
+            conv_text = ""
+            for msg in filtered_conv:
+                role = "User" if msg.get("role") == "user" else "Assistant"
+                content = msg.get("content", "")
+                conv_text += f"{role}: {content}\n"
+            
+            # 构建任务列表文本
+            tasks_text = ""
+            for idx, task in enumerate(tasks, 1):
+                task_id = task.get("id", "unknown")
+                task_title = task.get("title", "No title")
+                action_config = task.get("actionConfig", {})
+                action = action_config.get("action", "N/A")
+                tasks_text += f"{idx}. ID: {task_id}\n   Title: {task_title}\n   Action: {action}\n\n"
+            
+            # 构建LLM提示词
+            matching_prompt = [
+                {
+                    "role": "user",
+                    "content": f"""Analyze the following conversation and determine if the content is related to any of the user's assigned tasks.
+
+Conversation:
+{conv_text}
+
+User's assigned tasks:
+{tasks_text}
+
+Carefully analyze the conversation content to determine if any of the above tasks were discussed, mentioned, or completed.
+If there are matching tasks, return a JSON array with the following format:
+[
+  {{"task_id": "task ID", "task_action": "action from actionConfig", "match_reason": "brief explanation of why the conversation relates to this task"}}
+]
+
+If no tasks match, return an empty array: []
+
+Return ONLY the JSON array, no other explanation."""
+                }
+            ]
+            
+            # 调用LLM进行任务匹配
+            response_parts = []
+            llm_responses = self.llm.response(
+                f"{self.session_id}_task_match",
+                matching_prompt,
+                stateless=True
+            )
+            
+            for response in llm_responses:
+                if response:
+                    response_parts.append(response)
+            
+            response_text = "".join(response_parts).strip()
+            
+            # 解析JSON响应
+            import json
+            try:
+                # 尝试提取JSON数组
+                if "[" in response_text and "]" in response_text:
+                    start_idx = response_text.find("[")
+                    end_idx = response_text.rfind("]") + 1
+                    json_str = response_text[start_idx:end_idx]
+                    matched_tasks = json.loads(json_str)
+                    
+                    if matched_tasks and len(matched_tasks) > 0:
+                        self.logger.bind(tag=TAG).info(
+                            f"Detected {len(matched_tasks)} matching tasks: {[t.get('task_action') for t in matched_tasks]}"
+                        )
+                        return matched_tasks
+                    else:
+                        self.logger.bind(tag=TAG).debug("No tasks matched in the conversation")
+                        return []
+                else:
+                    self.logger.bind(tag=TAG).debug("LLM响应中未找到JSON格式")
+                    # TODO try again
+                    return []
+            except json.JSONDecodeError as e:
+                self.logger.bind(tag=TAG).warning(f"解析任务匹配JSON失败: {e}, 响应内容: {response_text[:200]}")
+                return []
+                
+        except Exception as e:
+            self.logger.bind(tag=TAG).error(f"检查对话任务匹配失败: {e}")
+            return []
+
+    def get_current_conversation(self):
+        """
+        获取当前websocket连接中的对话历史
+        
+        Returns:
+            list: 对话历史列表，包含所有消息
+                 返回格式: [{"role": "user/assistant/system", "content": "..."}, ...]
+            None: 如果对话为空或出错
+        """
+        try:
+            if self.dialogue:
+                # 获取完整的对话历史
+                conversation = self.dialogue.get_llm_dialogue()
+                self.logger.bind(tag=TAG).debug(
+                    f"获取当前对话历史，共 {len(conversation)} 条消息"
+                )
+                return conversation
+            else:
+                self.logger.bind(tag=TAG).warning("对话对象不存在")
+                return None
+        except Exception as e:
+            self.logger.bind(tag=TAG).error(f"获取对话历史失败: {e}")
+            return None
+    
+    def generate_ai_conversation_summary(self):
+        """
+        使用LLM生成对话内容的AI摘要
+        
+        Returns:
+            str: AI生成的对话摘要文本，如果失败则返回None
+        """
+        try:
+            if not self.llm:
+                self.logger.bind(tag=TAG).warning("LLM未初始化，无法生成AI摘要")
+                return None
+            
+            conversation = self.get_current_conversation()
+            if not conversation or len(conversation) == 0:
+                self.logger.bind(tag=TAG).debug("对话为空，跳过AI摘要生成")
+                return None
+            
+            # 过滤掉system消息，只保留用户和助手的对话
+            filtered_conv = [msg for msg in conversation if msg.get("role") in ["user", "assistant"]]
+            
+            if len(filtered_conv) == 0:
+                self.logger.bind(tag=TAG).debug("没有用户对话内容，跳过AI摘要生成")
+                return None
+            
+            # 构建对话历史文本
+            conv_text = ""
+            for msg in filtered_conv:
+                role = "User" if msg.get("role") == "user" else "Assistant"
+                content = msg.get("content", "")
+                conv_text += f"{role}: {content}\n"
+            
+            # 构建摘要请求
+            summary_prompt = [
+                {
+                    "role": "user",
+                    "content": f"Please provide a concise summary of the following conversation, focusing on key information and themes. Keep the summary under 100 words.\n\nConversation:\n{conv_text}\n\nProvide summary:"
+                }
+            ]
+            
+            # 调用LLM生成摘要
+            summary_parts = []
+            llm_responses = self.llm.response(
+                f"{self.session_id}_summary",
+                summary_prompt,
+                stateless=True  # 使用无状态模式，不保存这次摘要对话
+            )
+            
+            for response in llm_responses:
+                if response:
+                    summary_parts.append(response)
+            
+            summary = "".join(summary_parts).strip()
+            
+            if summary:
+                self.logger.bind(tag=TAG).info(f"AI对话摘要生成成功: {summary[:50]}...")
+                return summary
+            else:
+                self.logger.bind(tag=TAG).warning("AI摘要生成为空")
+                return None
+                
+        except Exception as e:
+            self.logger.bind(tag=TAG).error(f"生成AI对话摘要失败: {e}")
+            return None
+    
+    def check_conversation_against_tasks(self, user_id: str):
+        """
+        检查当前对话内容是否匹配用户的已分配任务
+        
+        Args:
+            user_id: 用户ID，用于获取分配的任务列表
+            
+        Returns:
+            list: 匹配的任务列表，每个任务包含任务信息和匹配原因
+                 格式: [{"task_id": "...", "task_title": "...", "match_reason": "..."}, ...]
+        """
+        try:
+            if not self.llm:
+                self.logger.bind(tag=TAG).warning("LLM未初始化，无法检查任务匹配")
+                return []
+            
+            # 获取用户分配的任务
+            tasks = get_assigned_tasks_for_user(user_id)
+            if not tasks or len(tasks) == 0:
+                self.logger.bind(tag=TAG).debug(f"用户 {user_id} 没有分配的任务")
+                return []
+            
+            # 获取当前对话
+            conversation = self.get_current_conversation()
+            if not conversation or len(conversation) == 0:
+                self.logger.bind(tag=TAG).debug("对话为空，跳过任务匹配")
+                return []
+            
+            # 过滤对话，只保留用户和助手的消息
+            filtered_conv = [msg for msg in conversation if msg.get("role") in ["user", "assistant"]]
+            if len(filtered_conv) == 0:
+                self.logger.bind(tag=TAG).debug("没有用户对话内容，跳过任务匹配")
+                return []
+            
+            # 构建对话历史文本
+            conv_text = ""
+            for msg in filtered_conv:
+                role = "User" if msg.get("role") == "user" else "Assistant"
+                content = msg.get("content", "")
+                conv_text += f"{role}: {content}\n"
+            
+            # 构建任务列表文本
+            tasks_text = ""
+            for idx, task in enumerate(tasks, 1):
+                task_id = task.get("id", "unknown")
+                task_title = task.get("title", "No title")
+                action_config = task.get("actionConfig", {})
+                action = action_config.get("action", "N/A")
+                tasks_text += f"{idx}. ID: {task_id}\n   Title: {task_title}\n   Action: {action}\n\n"
+            
+            # 构建LLM提示词
+            matching_prompt = [
+                {
+                    "role": "user",
+                    "content": f"""Analyze the following conversation and determine if the content is related to any of the user's assigned tasks.
+
+Conversation:
+{conv_text}
+
+User's assigned tasks:
+{tasks_text}
+
+Carefully analyze the conversation content to determine if any of the above tasks were discussed, mentioned, or completed.
+If there are matching tasks, return a JSON array with the following format:
+[
+  {{"task_id": "task ID", "task_action": "action from actionConfig", "match_reason": "brief explanation of why the conversation relates to this task"}}
+]
+
+If no tasks match, return an empty array: []
+
+Return ONLY the JSON array, no other explanation."""
+                }
+            ]
+            
+            # 调用LLM进行任务匹配
+            response_parts = []
+            llm_responses = self.llm.response(
+                f"{self.session_id}_task_match",
+                matching_prompt,
+                stateless=True
+            )
+            
+            for response in llm_responses:
+                if response:
+                    response_parts.append(response)
+            
+            response_text = "".join(response_parts).strip()
+            
+            # 解析JSON响应
+            import json
+            try:
+                # 尝试提取JSON数组
+                if "[" in response_text and "]" in response_text:
+                    start_idx = response_text.find("[")
+                    end_idx = response_text.rfind("]") + 1
+                    json_str = response_text[start_idx:end_idx]
+                    matched_tasks = json.loads(json_str)
+                    
+                    if matched_tasks and len(matched_tasks) > 0:
+                        self.logger.bind(tag=TAG).info(
+                            f"Detected {len(matched_tasks)} matching tasks: {[t.get('task_action') for t in matched_tasks]}"
+                        )
+                        return matched_tasks
+                    else:
+                        self.logger.bind(tag=TAG).debug("No tasks matched in the conversation")
+                        return []
+                else:
+                    self.logger.bind(tag=TAG).debug("LLM响应中未找到JSON格式")
+                    # TODO try again
+                    return []
+            except json.JSONDecodeError as e:
+                self.logger.bind(tag=TAG).warning(f"解析任务匹配JSON失败: {e}, 响应内容: {response_text[:200]}")
+                return []
+                
+        except Exception as e:
+            self.logger.bind(tag=TAG).error(f"检查对话任务匹配失败: {e}")
+            return []
 
     async def _save_and_close(self, ws):
         """保存记忆并关闭连接"""
         try:
+            # 获取并记录对话摘要（包含AI生成的摘要和任务匹配）
+            if self.dialogue:
+                # 使用线程池异步完成task
+                def complete_task_task():
+                    try:
+                        conversation = self.dialogue.get_llm_dialogue()
+                        if conversation:
+                            user_msgs = sum(1 for msg in conversation if msg.get("role") == "user")
+                            assistant_msgs = sum(1 for msg in conversation if msg.get("role") == "assistant")
+                            
+                            # 生成AI摘要
+                            ai_summary = self.generate_ai_conversation_summary()
+                            
+                            # 检查任务匹配
+                            matched_tasks = []
+                            try:
+                                # 获取用户ID (使用owner_phone作为user_id)
+                                if self.device_id:
+                                    owner_phone = get_owner_phone_for_device(self.device_id)
+                                    if owner_phone:
+                                        matched_tasks = self.check_conversation_against_tasks(owner_phone)
+                                        process_user_action(owner_phone, matched_tasks)
+                            except Exception as task_err:
+                                self.logger.bind(tag=TAG).warning(f"检查任务匹配失败: {task_err}")
+                            
+                            # 记录对话信息
+                            log_msg = (
+                                f"会话结束 - Session: {self.session_id}, Device: {self.device_id}, "
+                                f"总消息: {len(conversation)}, 用户: {user_msgs}, 助手: {assistant_msgs}"
+                            )
+                            
+                            if ai_summary:
+                                log_msg += f"\nAI摘要: {ai_summary}"
+                            
+                            if matched_tasks and len(matched_tasks) > 0:
+                                log_msg += f"\nMatched tasks ({len(matched_tasks)}):"
+                                for task in matched_tasks:
+                                    log_msg += f"\n  - Action: {task.get('task_action')} (ID: {task.get('task_id')}): {task.get('match_reason')}"
+                            
+                            self.logger.bind(tag=TAG).info(log_msg)
+                    except Exception as e:
+                        self.logger.bind(tag=TAG).warning(f"获取对话摘要失败: {e}")
+                threading.Thread(target=complete_task_task, daemon=True).start()
             try:
                 self._persist_conversation_state_before_close()
             except Exception as conv_err:
@@ -547,21 +1297,55 @@ class ConnectionHandler:
                 )
             if self.memory:
                 def save_memory_task():
+                    loop = None
                     try:
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
-                        loop.run_until_complete(
-                            self.memory.save_memory(self.dialogue.dialogue)
-                        )
+                        owner_phone = get_owner_phone_for_device(self.device_id)
+                        
+                        # Build list of coroutines to run
+                        coroutines = [self.memory.save_memory(self.dialogue.dialogue)]
+                        char_id = None
+                        if self.device_id:
+                            char_id = get_active_character_for_device(self.device_id)
+                            if not char_id:
+                                fallback_id = get_most_recent_character_via_user_for_device(self.device_id)
+                                if fallback_id:
+                                    self.logger.bind(tag=TAG, device_id=self.device_id).warning(
+                                        f"activeCharacterId missing; falling back to most recent user character: {fallback_id}"
+                                    )
+                                    char_id = fallback_id
+                        if char_id:
+                            self.logger.info(f"char_id={char_id!r}")
+                            char_doc = get_character_profile(char_id)
+                            self.logger.info(f"char_doc_keys={list((char_doc or {}).keys())}")
+                            fields = extract_character_profile_fields(char_doc or {})
+                            character_name = fields.get("name")
+                        # Only add task detection if task provider has the method
+                        if self.task and hasattr(self.task, 'detect_task'):
+                            coroutines.append(
+                                self.task.detect_task(self.dialogue.dialogue, user_id=owner_phone)
+                            )
+                        
+                        # Run all coroutines concurrently
+                        loop.run_until_complete(asyncio.gather(*coroutines))
                     except Exception as e:
                         self.logger.bind(tag=TAG).error(f"保存记忆失败: {e}")
                     finally:
                         try:
-                            loop.close()
+                            if loop:
+                                loop.close()
                         except Exception:
                             pass
 
                 threading.Thread(target=save_memory_task, daemon=True).start()
+
+            # Ensure session is ended even if memory saving is disabled or fails
+            if getattr(self, "_session_created", False) and not getattr(self, "_session_closed", False):
+                try:
+                    self.chat_store.end_session(self.session_id)
+                finally:
+                    self._session_closed = True
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"保存记忆失败: {e}")
         finally:
@@ -681,14 +1465,16 @@ class ConnectionHandler:
             self.selected_module_str = build_module_string(
                 self.config.get("selected_module", {})
             )
-            self.logger = create_connection_logger(self.selected_module_str)
+            self.logger = create_connection_logger(
+                self.selected_module_str, device_id=self.device_id
+            )
 
             if self.config.get("prompt") is not None:
                 user_prompt = self.config["prompt"]
-                prompt = self.prompt_manager.get_quick_prompt(user_prompt)
-                self.change_system_prompt(prompt)
+                prompt = self.prompt_manager.get_quick_prompt(user_prompt, device_id=self.device_id)
+                self.change_system_prompt(prompt, prompt_label="quick_init")
                 self.logger.bind(tag=TAG).info(
-                    f"快速初始化组件: prompt成功: {prompt}..."
+                    "快速初始化组件: prompt渲染完成"
                 )
 
             if self.vad is None:
@@ -706,6 +1492,9 @@ class ConnectionHandler:
             asyncio.run_coroutine_threadsafe(
                 self.tts.open_audio_channels(self), self.loop
             )
+
+            # Create per-connection Memory/Task/Intent to avoid shared mutable state
+            self._ensure_per_connection_providers()
 
             self._initialize_memory()
             self._initialize_intent()
@@ -728,10 +1517,8 @@ class ConnectionHandler:
             self.config["prompt"], self.device_id, self.client_ip
         )
         if enhanced_prompt:
-            self.change_system_prompt(enhanced_prompt)
-            self.logger.bind(tag=TAG).info(
-                f"系统提示词已增强更新: {enhanced_prompt}"
-            )
+            self.change_system_prompt(enhanced_prompt, prompt_label="enhanced_refresh")
+            self.logger.bind(tag=TAG).info("系统提示词已增强更新")
 
     def _init_report_threads(self):
         if not self.read_config_from_api or self.need_bind:
@@ -805,7 +1592,13 @@ class ConnectionHandler:
             self.logger.bind(tag=TAG).error(f"获取差异化配置失败: {e}")
             private_config = {}
 
-        init_llm = init_tts = init_memory = init_intent = False
+        init_llm, init_tts, init_memory, init_intent, init_task = (
+            False,
+            False,
+            False,
+            False,
+            False,
+        )
         init_vad = check_vad_update(self.common_config, private_config)
         init_asr = check_asr_update(self.common_config, private_config)
 
@@ -833,8 +1626,15 @@ class ConnectionHandler:
         if private_config.get("Memory") is not None:
             init_memory = True
             self.config["Memory"] = private_config["Memory"]
-            self.config["selected_module"]["Memory"] = private_config["selected_module"]["Memory"]
-
+            self.config["selected_module"]["Memory"] = private_config[
+                "selected_module"
+            ]["Memory"]
+        if private_config.get("Task", None) is not None:
+            init_task = True
+            self.config["Task"] = private_config["Task"]
+            self.config["selected_module"]["Task"] = private_config["selected_module"][
+                "Task"
+            ]
         if private_config.get("Intent") is not None:
             init_intent = True
             self.config["Intent"] = private_config["Intent"]
@@ -872,6 +1672,7 @@ class ConnectionHandler:
                 init_tts,
                 init_memory,
                 init_intent,
+                init_task,
             )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"初始化组件失败: {e}")
@@ -890,6 +1691,96 @@ class ConnectionHandler:
         if modules.get("memory") is not None:
             self.memory = modules["memory"]
 
+    def _ensure_per_connection_providers(self):
+        """Create fresh Memory/Task/Intent instances so connections don't share mutable state.
+
+        WebSocketServer creates one global instance of each provider.  Those instances
+        carry per-device mutable fields (role_id, short_memory, cached prompts, etc.).
+        Sharing them across concurrent connections causes cross-user memory/voice/intent
+        leakage.  This method creates fresh per-connection instances from config.
+
+        If per-connection creation fails for any provider and the server-level fallback
+        exists, we use copy.deepcopy() on it as a last resort (still isolated from other
+        connections).
+        """
+        try:
+            from core.utils import memory as memory_factory
+            from core.utils import task as task_factory
+            from core.utils import intent as intent_factory
+
+            selected = self.config.get("selected_module", {})
+
+            # ---- Fresh memory instance ----
+            mem_name = selected.get("Memory")
+            if mem_name and self.config.get("Memory", {}).get(mem_name):
+                mem_cfg = self.config["Memory"][mem_name]
+                mem_type = mem_cfg.get("type", mem_name)
+                try:
+                    self.memory = memory_factory.create_instance(
+                        mem_type, mem_cfg, self.config.get("summaryMemory")
+                    )
+                    self.logger.bind(tag=TAG).debug(
+                        f"Created per-connection memory provider: {mem_type}"
+                    )
+                except Exception as e:
+                    self.logger.bind(tag=TAG).warning(
+                        f"Failed to create per-connection memory: {e}; "
+                        f"falling back to deepcopy of server instance"
+                    )
+                    if self._server_memory is not None:
+                        self.memory = copy.deepcopy(self._server_memory)
+            elif self._server_memory is not None:
+                # Config doesn't have memory module info (e.g. simplified install)
+                # but server created one at startup — deepcopy it
+                self.memory = copy.deepcopy(self._server_memory)
+
+            # ---- Fresh task instance ----
+            task_name = selected.get("Task")
+            if task_name and self.config.get("Task", {}).get(task_name):
+                task_cfg = self.config["Task"][task_name]
+                task_type = task_cfg.get("type", task_name)
+                try:
+                    self.task = task_factory.create_instance(task_type, task_cfg)
+                    self.logger.bind(tag=TAG).debug(
+                        f"Created per-connection task provider: {task_type}"
+                    )
+                except Exception as e:
+                    self.logger.bind(tag=TAG).warning(
+                        f"Failed to create per-connection task: {e}; "
+                        f"falling back to deepcopy of server instance"
+                    )
+                    if self._server_task is not None:
+                        self.task = copy.deepcopy(self._server_task)
+            elif self._server_task is not None:
+                self.task = copy.deepcopy(self._server_task)
+
+            # ---- Fresh intent instance (caches function-list prompt per connection) ----
+            intent_name = selected.get("Intent")
+            if intent_name and self.config.get("Intent", {}).get(intent_name):
+                intent_cfg = self.config["Intent"][intent_name]
+                intent_type = intent_cfg.get("type", intent_name)
+                try:
+                    self.intent = intent_factory.create_instance(
+                        intent_type, intent_cfg
+                    )
+                    self.logger.bind(tag=TAG).debug(
+                        f"Created per-connection intent provider: {intent_type}"
+                    )
+                except Exception as e:
+                    self.logger.bind(tag=TAG).warning(
+                        f"Failed to create per-connection intent: {e}; "
+                        f"falling back to deepcopy of server instance"
+                    )
+                    if self._server_intent is not None:
+                        self.intent = copy.deepcopy(self._server_intent)
+            elif self._server_intent is not None:
+                self.intent = copy.deepcopy(self._server_intent)
+
+        except Exception as e:
+            self.logger.bind(tag=TAG).error(
+                f"Per-connection provider creation failed: {e}"
+            )
+
     def _initialize_memory(self):
         if self.memory is None:
             return
@@ -899,7 +1790,13 @@ class ConnectionHandler:
             summary_memory=self.config.get("summaryMemory", None),
             save_to_file=not self.read_config_from_api,
         )
-
+        # Initialize task module (guard: Task provider may not be configured)
+        if self.task:
+            self.task.init_task(
+                role_id=self.device_id,
+                llm=self.llm,
+            )
+        # 获取记忆总结配置
         memory_config = self.config["Memory"]
         memory_type = memory_config[self.config["selected_module"]["Memory"]]["type"]
 
@@ -920,8 +1817,14 @@ class ConnectionHandler:
                 self.logger.bind(tag=TAG).info(
                     f"为记忆总结创建了专用LLM: {memory_llm_name}, 类型: {memory_llm_type}"
                 )
+                # 设置任务模块的LLM
+                if self.task:
+                    self.task.set_llm(memory_llm)
                 self.memory.set_llm(memory_llm)
             else:
+                # 否则使用主LLM
+                if self.task:
+                    self.task.set_llm(self.llm)
                 self.memory.set_llm(self.llm)
                 self.logger.bind(tag=TAG).info("使用主LLM作为意图识别模型")
 
@@ -966,12 +1869,11 @@ class ConnectionHandler:
                 self.func_handler._initialize(), self.loop
             )
 
-    def change_system_prompt(self, prompt):
+    def change_system_prompt(self, prompt, prompt_label: Optional[str] = None):
         self.prompt = prompt
         self.dialogue.update_system_message(self.prompt)
-        self.logger.bind(tag=TAG).info(
-            f"Ran change_system_prompt (new prompt length {len(prompt)}） with prompt:\n\n{prompt}\n"
-        )
+        label = prompt_label or "system"
+        self.logger.bind(tag=TAG).info(f"{label} prompt rendered")
 
     # ------------------------------------------------------------------
     # Mode session + conversation/sessionContext integration
@@ -1035,6 +1937,21 @@ class ConnectionHandler:
                     f"Failed to load mode instructions from {instructions_file}: {exc}"
                 )
 
+        reminder_context = session_config.get("context")
+        if isinstance(reminder_context, str):
+            reminder_context = reminder_context.strip()
+        else:
+            reminder_context = ""
+        if reminder_context:
+            # Make reminder purpose explicit in first-turn prompt guidance so
+            # server-initiated alarm speech consistently mentions the reason.
+            context_block = (
+                "\n\nReminder context:\n"
+                f"- The user asked to be reminded about: \"{reminder_context}\".\n"
+                "- Mention this reason explicitly in your very first sentence."
+            )
+            instructions = (instructions or "") + context_block
+
         self.mode_specific_instructions = instructions
         self.server_initiate_chat = config.get("server_initiate_chat", False)
         self.followup_enabled = config.get("followup_enabled", False)
@@ -1084,12 +2001,19 @@ class ConnectionHandler:
         )
 
         if conv_id and hasattr(self.llm, "adopt_conversation_id_for_session"):
-            self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
-            self.logger.bind(tag=TAG).info(
-                f"Loaded mode-scoped conversation {conv_id} for device {self.device_id}"
-            )
-            self.current_conversation_id = conv_id
-            return
+            try:
+                self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
+                self.logger.bind(tag=TAG).info(
+                    f"Loaded mode-scoped conversation {conv_id} for device {self.device_id}"
+                )
+                self.current_conversation_id = conv_id
+                return
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(
+                    f"Mode-scoped conversation {conv_id} not found on LLM backend "
+                    f"({type(e).__name__}); recreating."
+                )
+                self._update_mode_session_conversation({})
 
         new_conv_id = self._create_llm_conversation()
         if not new_conv_id:
@@ -1116,12 +2040,26 @@ class ConnectionHandler:
             conv_id = None
 
         if conv_id and hasattr(self.llm, "adopt_conversation_id_for_session"):
-            self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
-            self.logger.bind(tag=TAG).info(
-                f"Loaded conversationId for device: {conv_id}"
-            )
-            self.current_conversation_id = conv_id
-            return
+            try:
+                self.llm.adopt_conversation_id_for_session(self.session_id, conv_id)
+                self.logger.bind(tag=TAG).info(
+                    f"Loaded conversationId for device: {conv_id}"
+                )
+                self.current_conversation_id = conv_id
+                return
+            except Exception as e:
+                # [TESTING] Conversation doesn't exist on LLM backend; fall through to create new one
+                self.logger.bind(tag=TAG).warning(
+                    f"Stored conversation {conv_id} not found on LLM backend ({type(e).__name__}). "
+                    f"Creating a new conversation instead."
+                )
+                # Clear the stale conversation ID to prevent future attempts
+                update_conversation_state_for_device(
+                    self.device_id,
+                    conversation_id=None,
+                    last_used=None,
+                )
+                conv_id = None
 
         new_conv_id = self._create_llm_conversation()
         if not new_conv_id:
@@ -1312,6 +2250,16 @@ class ConnectionHandler:
         self.logger.bind(tag=TAG).info(f"大模型收到用户消息: {query}")
         self.llm_finish_task = False
 
+        # For active websocket sessions, re-check character binding on user turns.
+        # This ensures voice_id/prompt switch quickly after app-side character changes.
+        if depth == 0 and is_user_input:
+            try:
+                self._refresh_character_binding_if_needed(force=False)
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(
+                    f"Runtime character refresh failed (non-fatal): {e}"
+                )
+
         # Genuine user input cancels any pending follow-up
         if query and is_user_input:
             self.followup_user_has_responded = True
@@ -1322,6 +2270,18 @@ class ConnectionHandler:
         if depth == 0:
             self.sentence_id = str(uuid.uuid4().hex)
             self.dialogue.put(Message(role="user", content=query))
+
+            # ✅ DB: user turn
+            if self._session_created:
+                self.turn_index += 1
+                self.chat_store.insert_turn(
+                    session_id=self.session_id,
+                    turn_index=self.turn_index,
+                    speaker="user",
+                    text=query
+                )
+
+
             self.tts.tts_text_queue.put(
                 TTSMessageDTO(
                     sentence_id=self.sentence_id,
@@ -1499,6 +2459,33 @@ class ConnectionHandler:
                     text_buff = "".join(response_message)
                     self.tts_MessageText = text_buff
                     self.dialogue.put(Message(role="assistant", content=text_buff))
+
+                    # ✅ DB: assistant final response
+                    if self._session_created and text_buff.strip():
+                        self.turn_index += 1
+                        self.chat_store.insert_turn(
+                            session_id=self.session_id,
+                            turn_index=self.turn_index,
+                            speaker="assistant",
+                            text=text_buff
+                        )
+                    
+                    # ✅ Send LLM response to frontend websocket for display
+                    if self.websocket and text_buff.strip():
+                        try:
+                            llm_message = {
+                                "type": "llm",
+                                "text": text_buff,
+                                "session_id": self.session_id
+                            }
+                            asyncio.run_coroutine_threadsafe(
+                                self.websocket.send(json.dumps(llm_message, ensure_ascii=False)),
+                                self.loop
+                            )
+                            self.logger.bind(tag=TAG).debug(f"Sent LLM response to frontend: {text_buff[:100]}")
+                        except Exception as e:
+                            self.logger.bind(tag=TAG).warning(f"Failed to send LLM response to frontend: {e}")
+
                 response_message.clear()
                 try:
                     self.logger.bind(tag=TAG).info(
@@ -1526,14 +2513,42 @@ class ConnectionHandler:
             text_buff = "".join(response_message)
             self.tts_MessageText = text_buff
             self.dialogue.put(Message(role="assistant", content=text_buff))
-        if depth == 0:
-            self.tts.tts_text_queue.put(
-                TTSMessageDTO(
-                    sentence_id=self.sentence_id,
-                    sentence_type=SentenceType.LAST,
-                    content_type=ContentType.ACTION,
+            # ✅ DB: assistant final response (non-tool path)
+            if self._session_created and text_buff.strip():
+                self.turn_index += 1
+                self.chat_store.insert_turn(
+                    session_id=self.session_id,
+                    turn_index=self.turn_index,
+                    speaker="assistant",
+                    text=text_buff
                 )
-            )
+            # Always enqueue LAST marker for a completed assistant response.
+            # Function-call follow-up responses run at depth>0; gating on depth==0
+            # can skip LAST and leave firmware waiting without a tts:stop signal.
+            if text_buff.strip():
+                self.tts.tts_text_queue.put(
+                    TTSMessageDTO(
+                        sentence_id=self.sentence_id,
+                        sentence_type=SentenceType.LAST,
+                        content_type=ContentType.ACTION,
+                    )
+                )
+            
+            # ✅ Send LLM response to frontend websocket for display
+            if self.websocket and text_buff.strip():
+                try:
+                    llm_message = {
+                        "type": "llm",
+                        "text": text_buff,
+                        "session_id": self.session_id
+                    }
+                    asyncio.run_coroutine_threadsafe(
+                        self.websocket.send(json.dumps(llm_message, ensure_ascii=False)),
+                        self.loop
+                    )
+                    self.logger.bind(tag=TAG).debug(f"Sent LLM response to frontend: {text_buff[:100]}")
+                except Exception as e:
+                    self.logger.bind(tag=TAG).warning(f"Failed to send LLM response to frontend: {e}")
         self.llm_finish_task = True
 
         # Do not schedule here; follow-ups are driven by TTS 'stop' in alarm mode
@@ -1675,6 +2690,20 @@ class ConnectionHandler:
 
     async def close(self, ws=None):
         try:
+            if (
+                not self._llm_conversation_released
+                and self.llm is not None
+                and hasattr(self.llm, "release_conversation")
+            ):
+                try:
+                    self.llm.release_conversation(self.session_id)
+                except Exception as llm_release_error:
+                    self.logger.bind(tag=TAG).warning(
+                        f"Failed to release LLM conversation mapping: {llm_release_error}"
+                    )
+                finally:
+                    self._llm_conversation_released = True
+
             if hasattr(self, "audio_buffer"):
                 self.audio_buffer.clear()
 
@@ -1685,6 +2714,10 @@ class ConnectionHandler:
                 except asyncio.CancelledError:
                     pass
                 self.timeout_task = None
+
+            if self.tts_stop_watchdog_task and not self.tts_stop_watchdog_task.done():
+                self.tts_stop_watchdog_task.cancel()
+                self.tts_stop_watchdog_task = None
 
             if hasattr(self, "func_handler") and self.func_handler:
                 try:

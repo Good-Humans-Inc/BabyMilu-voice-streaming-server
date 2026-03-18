@@ -9,6 +9,7 @@ from services.logging import setup_logging
 from services.alarms import scheduler, tasks
 from services.messaging.mqtt import publish_ws_start
 from services.alarms.config import ALARM_TIMING
+from core.utils.mac import normalize_mac
 
 TAG = __name__
 logger = setup_logging()
@@ -23,9 +24,43 @@ def scan_due_alarms(request) -> Dict[str, Any]:
     triggered = 0
     results: List[Dict[str, Any]] = []
     for wake_request in wake_requests:
+        if not _is_device_allowed(wake_request.target.device_id):
+            logger.bind(tag=TAG).info(
+                f"Skipping wake for filtered device {wake_request.target.device_id}"
+            )
+            try:
+                scheduler.rollback_wake_request(wake_request)
+            except Exception as exc:
+                logger.bind(tag=TAG).warning(
+                    f"Failed to rollback filtered wake request for {wake_request.target.device_id}: {exc}"
+                )
+            results.append(
+                {
+                    "alarmId": wake_request.alarm.alarm_id,
+                    "label": wake_request.alarm.label,
+                    "deviceId": wake_request.target.device_id,
+                    "mode": wake_request.target.mode,
+                    "fired": False,
+                    "skipped": "device_filter",
+                }
+            )
+            continue
         fired = _wake_device(wake_request)
         if fired:
             triggered += 1
+            try:
+                scheduler.finalize_wake_request(wake_request, now=now)
+            except Exception as exc:
+                logger.bind(tag=TAG).warning(
+                    f"Failed to finalize alarm {wake_request.alarm.alarm_id}: {exc}"
+                )
+        else:
+            try:
+                scheduler.rollback_wake_request(wake_request)
+            except Exception as exc:
+                logger.bind(tag=TAG).warning(
+                    f"Failed to rollback wake request for {wake_request.target.device_id}: {exc}"
+                )
         results.append(
             {
                 "alarmId": wake_request.alarm.alarm_id,
@@ -71,4 +106,31 @@ def _resolve_ws_url() -> str:
 
 def _resolve_broker_url() -> str:
     return os.environ.get("ALARM_MQTT_URL") or os.environ.get("MQTT_URL", "")
+
+
+def _is_device_allowed(device_id: str) -> bool:
+    allowed = _parse_device_set(os.environ.get("ALARM_DEVICE_ALLOWLIST", ""))
+    denied = _parse_device_set(os.environ.get("ALARM_DEVICE_DENYLIST", ""))
+    try:
+        normalized = normalize_mac(device_id)
+    except Exception:
+        normalized = (device_id or "").lower()
+    if normalized in denied:
+        return False
+    if not allowed:
+        return True
+    return normalized in allowed
+
+
+def _parse_device_set(raw: str) -> set[str]:
+    tokens = set()
+    for token in (raw or "").split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            tokens.add(normalize_mac(token))
+        except Exception:
+            tokens.add(token.lower())
+    return tokens
 

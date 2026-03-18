@@ -441,7 +441,6 @@ Configured in `application-dev.yml`:
 
 **Built-in Plugins**:
 - `get_weather`: Weather information
-- `get_news_from_newsnow`: News fetching
 - `play_music`: Local music playback
 - `handle_exit_intent`: Exit command handling
 - `hass_*`: Home Assistant integration

@@ -13,6 +13,7 @@ TAG = __name__
 logger = setup_logging()
 SESSION_TYPE = "alarm"
 SESSION_TTL = ALARM_TIMING["session_ttl"]
+ONE_TIME_SESSION_TTL = ALARM_TIMING["one_time_session_ttl"]
 
 _DAY_TO_INDEX = {name: idx for idx, name in enumerate(models.DAY_NAMES)}
 
@@ -38,7 +39,6 @@ def prepare_wake_requests(
                 f"{alarm.last_processed_utc.isoformat()}; skipping"
             )
             continue
-        alarm_triggered = False
         if not alarm.targets:
             logger.bind(tag=TAG).warning(
                 f"Alarm {alarm.alarm_id} has no targets; skipping"
@@ -63,43 +63,47 @@ def prepare_wake_requests(
                 "label": alarm.label,
                 "context": alarm.context,  # reason/purpose for the alarm conversation
             }
+            ttl = (
+                ONE_TIME_SESSION_TTL
+                if alarm.schedule.repeat == models.AlarmRepeat.NONE
+                else SESSION_TTL
+            )
             new_session = session_context_store.create_session(
                 device_id=target.device_id,
                 session_type=SESSION_TYPE,
-                ttl=SESSION_TTL,
+                ttl=ttl,
                 triggered_at=now,
                 session_config=session_config,
             )
             wake_requests.append(
                 tasks.WakeRequest(alarm=alarm, target=target, session=new_session)
             )
-            alarm_triggered = True
-        if alarm_triggered:
-            if alarm.schedule.repeat == models.AlarmRepeat.NONE:
-                # One-time alarm: turn it off after firing
-                try:
-                    firestore_client.mark_one_time_alarm_complete(
-                        alarm,
-                        last_processed=alarm.next_occurrence_utc,
-                    )
-                except Exception as exc:
-                    logger.bind(tag=TAG).warning(
-                        f"Failed to complete one-time alarm {alarm.alarm_id}: {exc}"
-                    )
-            else:
-                try:
-                    next_occurrence = compute_next_occurrence(alarm, now=now)
-                    firestore_client.mark_alarm_processed(
-                        alarm,
-                        last_processed=alarm.next_occurrence_utc,
-                        next_occurrence=next_occurrence,
-                    )
-                except Exception as exc:
-                    logger.bind(tag=TAG).warning(
-                        f"Failed to advance alarm {alarm.alarm_id}: {exc}"
-                    )
     logger.bind(tag=TAG).info(f"Prepared {len(wake_requests)} wake requests")
     return wake_requests
+
+
+def finalize_wake_request(
+    wake_request: tasks.WakeRequest, *, now: Optional[datetime] = None
+) -> None:
+    """Advance/complete alarm only after wake publish succeeds."""
+    alarm = wake_request.alarm
+    if alarm.schedule.repeat == models.AlarmRepeat.NONE:
+        firestore_client.mark_one_time_alarm_complete(
+            alarm,
+            last_processed=alarm.next_occurrence_utc,
+        )
+        return
+    next_occurrence = compute_next_occurrence(alarm, now=now)
+    firestore_client.mark_alarm_processed(
+        alarm,
+        last_processed=alarm.next_occurrence_utc,
+        next_occurrence=next_occurrence,
+    )
+
+
+def rollback_wake_request(wake_request: tasks.WakeRequest) -> None:
+    """Drop newly-created session when wake publish fails to allow retry."""
+    session_context_store.delete_session(wake_request.target.device_id)
 
 
 def compute_next_occurrence(

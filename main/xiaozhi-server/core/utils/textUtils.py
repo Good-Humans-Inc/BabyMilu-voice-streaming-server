@@ -1,29 +1,6 @@
 import json
 
 TAG = __name__
-EMOJI_MAP = {
-    "😂": "laughing",
-    "😭": "crying",
-    "😠": "angry",
-    "😔": "sad",
-    "😍": "loving",
-    "😲": "surprised",
-    "😱": "shocked",
-    "🤔": "thinking",
-    "😌": "relaxed",
-    "😴": "sleepy",
-    "😜": "silly",
-    "🙄": "confused",
-    "😶": "neutral",
-    "🙂": "happy",
-    "😆": "laughing",
-    "😳": "embarrassed",
-    "😉": "winking",
-    "😎": "cool",
-    "🤤": "delicious",
-    "😘": "kissy",
-    "😏": "confident",
-}
 EMOJI_RANGES = [
     (0x1F600, 0x1F64F),
     (0x1F300, 0x1F5FF),
@@ -33,6 +10,45 @@ EMOJI_RANGES = [
     (0x2600, 0x26FF),
     (0x2700, 0x27BF),
 ]
+EMOJI_JOINERS = {"\u200d", "\ufe0f", "\ufe0e"}
+
+# Canonical mapping source (in-code, no file read).
+CANONICAL_EMOTION_MAP = {
+    "smirk": ["😏", "🤨", "😐", "😑", "😶", "😬", "😒", "🙄", "🤔"],
+    "heart": ["🥰", "😍", "😘", "🤗", "😍", "😘", "😚", "😙", "🥰", "❤️"],
+    "blush": ["😳", "😳", "😊"],
+    "sad": ["🙁", "☹️", "😕", "☹️", "😕", "😟", "😨", "😦", "😞", "😧", "🤕", "😮‍💨", "❤️‍🩹"],
+    "laugh": ["😄", "😁", "😄", "😁", "😆", "🤣", "😂", "😋", "😛"],
+    "sleep": ["😴", "😪", "😪", "😴", "🥱"],
+    "starry": ["🤩", "🤩", "🤠", "🥳", "🤯", "😮", "😯", "😲", "❤️‍🔥"],
+    "cry": ["😭", "😥", "😢", "😭", "😫", "😩", "😖", "😖", "😣", "💔"],
+    "angry": ["😡", "😤", "😠", "😤", "😡", "😠", "🤬", "😒"],
+}
+
+EMOJI_MAP = {
+    emoji: emotion
+    for emotion, emojis in CANONICAL_EMOTION_MAP.items()
+    for emoji in emojis
+}
+_DEFAULT_EMOTION = "normal"
+_DEFAULT_EMOJI = "😄"
+
+
+def _is_skin_tone_modifier(char: str) -> bool:
+    cp = ord(char)
+    return 0x1F3FB <= cp <= 0x1F3FF
+
+
+def get_allowed_emoji_list_string() -> str:
+    """Return space-separated allowed emoji list from canonical mapping."""
+    ordered = []
+    seen = set()
+    for emojis in CANONICAL_EMOTION_MAP.values():
+        for emoji in emojis:
+            if emoji not in seen:
+                ordered.append(emoji)
+                seen.add(emoji)
+    return " ".join(ordered)
 
 
 def get_string_no_punctuation_or_emoji(s):
@@ -74,18 +90,34 @@ def is_punctuation_or_emoji(char):
     }
     if char.isspace() or char in punctuation_set:
         return True
-    return is_emoji(char)
+    return is_emoji(char) or char in EMOJI_JOINERS or _is_skin_tone_modifier(char)
 
 
 async def get_emotion(conn, text):
     """获取文本内的情绪消息"""
-    emoji = "🙂"
-    emotion = "happy"
-    for char in text:
-        if char in EMOJI_MAP:
-            emoji = char
-            emotion = EMOJI_MAP[char]
+    emoji = _DEFAULT_EMOJI
+    emotion = _DEFAULT_EMOTION
+    stripped_text = text.lstrip()
+    if stripped_text and is_emoji(stripped_text[0]):
+        leading_token = stripped_text[0]
+        i = 1
+        max_scan = min(len(stripped_text), 8)
+        while i < max_scan:
+            nxt = stripped_text[i]
+            if nxt == "\u200d" and i + 1 < max_scan:
+                leading_token += nxt + stripped_text[i + 1]
+                i += 2
+                continue
+            if nxt in EMOJI_JOINERS or _is_skin_tone_modifier(nxt):
+                leading_token += nxt
+                i += 1
+                continue
             break
+
+        mapped_emotion = EMOJI_MAP.get(leading_token, _DEFAULT_EMOTION)
+        if leading_token in EMOJI_MAP:
+            emoji = leading_token
+        emotion = mapped_emotion
     try:
         await conn.websocket.send(
             json.dumps(
