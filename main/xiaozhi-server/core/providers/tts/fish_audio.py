@@ -147,7 +147,7 @@ class TTSProvider(TTSProviderBase):
 
                 self.tts_audio_queue.put((SentenceType.FIRST, [], text))
 
-                async for chunk in resp.content.iter_any():
+                async for chunk in resp.content.iter_chunked(4096):
                     if self.conn and self.conn.client_abort:
                         logger.bind(tag=TAG).info("TTS interrupted by client")
                         return
