@@ -2,6 +2,7 @@ import os
 import sys
 import copy
 import json
+import re
 import uuid
 import time
 import queue
@@ -60,6 +61,34 @@ from core.utils.api_client import query_task, get_assigned_tasks_for_user, proce
 TAG = __name__
 
 auto_import_modules("plugins_func.functions")
+
+
+def _strip_character_identity_from_prompt(prompt: str) -> str:
+    """
+    Remove previously injected character identity blocks so character switching
+    replaces identity instead of appending to an old persona.
+    """
+    if not prompt:
+        return prompt
+
+    bio_label_old = "User's description of you:"
+    bio_label_new = "My self-description:"
+
+    # Strip the character's injected "About you" block.
+    prompt = re.sub(
+        rf"\n# About you:\n.*?(?=\n(?:{re.escape(bio_label_old)}|{re.escape(bio_label_new)})|\nUser profile:|\Z)",
+        "",
+        prompt,
+        flags=re.S,
+    )
+    # Strip the character's injected bio line (old + new label formats).
+    prompt = re.sub(
+        rf"\n(?:{re.escape(bio_label_old)}|{re.escape(bio_label_new)}).*?(?=\nUser profile:|\Z)",
+        "",
+        prompt,
+        flags=re.S,
+    )
+    return prompt
 
 
 class TTSException(RuntimeError):
@@ -421,7 +450,7 @@ class ConnectionHandler:
                 )
 
             base_prompt = self.common_config.get("prompt", self.config.get("prompt", ""))
-            refreshed_prompt = base_prompt
+            refreshed_prompt = _strip_character_identity_from_prompt(base_prompt)
 
             profile_parts = []
             for label, key in (
@@ -437,7 +466,7 @@ class ConnectionHandler:
             if profile_parts:
                 refreshed_prompt += "\n# About you:\n" + "\n- ".join(profile_parts)
             if fields.get("bio"):
-                refreshed_prompt += f"\nUser's description of you: {fields['bio']}"
+                refreshed_prompt += f"\nMy self-description: {fields['bio']}"
 
             # Re-append user profile/task context, same as initial handshake behavior.
             try:
@@ -571,7 +600,9 @@ class ConnectionHandler:
             # ---- SAFE DEFAULTS ----
             user_id = f"device:{self.device_id}"
             user_name = "Unknown User"
-            new_prompt = self.config.get("prompt", "")
+            new_prompt = _strip_character_identity_from_prompt(
+                self.config.get("prompt", "")
+            )
 
             cached_enhanced_prompt = self.prompt_manager.get_cached_enhanced_prompt(
                 self.device_id, prompt_text=self.config.get("prompt")
@@ -642,7 +673,7 @@ class ConnectionHandler:
 
                     if fields.get("bio"):
                         new_prompt += (
-                            f"\nUser's description of you: {fields['bio']}"
+                            f"\nMy self-description: {fields['bio']}"
                         )
                 else:
                     self.logger.bind(tag=TAG, device_id=self.device_id).warning(
