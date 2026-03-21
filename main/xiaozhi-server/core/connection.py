@@ -71,19 +71,24 @@ def _strip_character_identity_from_prompt(prompt: str) -> str:
     if not prompt:
         return prompt
 
-    bio_label_old = "User's description of you:"
-    bio_label_new = "My self-description:"
+    # Labels used over time for the character bio line; strip all when rebuilding.
+    _bio_labels = (
+        "User's description of you:",
+        "My self-description:",
+        "Your Description:",
+    )
+    _bio_alt = "|".join(re.escape(lab) for lab in _bio_labels)
 
     # Strip the character's injected "About you" block.
     prompt = re.sub(
-        rf"\n# About you:\n.*?(?=\n(?:{re.escape(bio_label_old)}|{re.escape(bio_label_new)})|\nUser profile:|\Z)",
+        rf"\n# About you:\n.*?(?=\n(?:{_bio_alt})|\nUser profile:|\Z)",
         "",
         prompt,
         flags=re.S,
     )
-    # Strip the character's injected bio line (old + new label formats).
+    # Strip the character's injected bio line (any known label).
     prompt = re.sub(
-        rf"\n(?:{re.escape(bio_label_old)}|{re.escape(bio_label_new)}).*?(?=\nUser profile:|\Z)",
+        rf"\n(?:{_bio_alt}).*?(?=\nUser profile:|\Z)",
         "",
         prompt,
         flags=re.S,
@@ -466,7 +471,7 @@ class ConnectionHandler:
             if profile_parts:
                 refreshed_prompt += "\n# About you:\n" + "\n- ".join(profile_parts)
             if fields.get("bio"):
-                refreshed_prompt += f"\nMy self-description: {fields['bio']}"
+                refreshed_prompt += f"\nYour Description: {fields['bio']}"
 
             # Re-append user profile/task context, same as initial handshake behavior.
             try:
@@ -672,9 +677,7 @@ class ConnectionHandler:
                         )
 
                     if fields.get("bio"):
-                        new_prompt += (
-                            f"\nMy self-description: {fields['bio']}"
-                        )
+                        new_prompt += f"\nYour Description: {fields['bio']}"
                 else:
                     self.logger.bind(tag=TAG, device_id=self.device_id).warning(
                         "MISSING activeCharacterId; using defaults"
