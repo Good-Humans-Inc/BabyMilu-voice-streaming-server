@@ -2,6 +2,7 @@ import os
 import sys
 import copy
 import json
+import re
 import uuid
 import time
 import queue
@@ -60,6 +61,89 @@ from core.utils.api_client import query_task, get_assigned_tasks_for_user, proce
 TAG = __name__
 
 auto_import_modules("plugins_func.functions")
+
+
+def _character_identity_suffix(fields: Dict[str, Any]) -> str:
+    """
+    Text to append from Firestore character fields. No 'About you' heading.
+    Inserts a blank line before Your Description when profile lines precede it.
+    """
+    profile_parts: list[str] = []
+    for label, key in (
+        ("Your Name", "name"),
+        ("Your Age", "age"),
+        ("Your Pronouns", "pronouns"),
+        ("Your Relationship with the user", "relationship"),
+        ("You like calling the user", "callMe"),
+    ):
+        val = fields.get(key)
+        if val is not None and str(val).strip():
+            profile_parts.append(f"{label}: {str(val).strip()}")
+
+    bio_raw = fields.get("bio")
+    bio_s = str(bio_raw).strip() if bio_raw is not None else ""
+
+    chunks: list[str] = []
+    if profile_parts:
+        chunks.append("\n".join(profile_parts))
+    if bio_s:
+        chunks.append(f"Your Description: {bio_s}")
+    if not chunks:
+        return ""
+
+    out = "\n" + chunks[0]
+    if len(chunks) > 1:
+        out += "\n\n" + chunks[1]
+    return out
+
+
+def _strip_character_identity_from_prompt(prompt: str) -> str:
+    """
+    Remove previously injected character identity blocks so character switching
+    replaces identity instead of appending to an old persona.
+    """
+    if not prompt:
+        return prompt
+
+    # Labels used over time for the character bio line; strip all when rebuilding.
+    _bio_labels = (
+        "User's description of you:",
+        "My self-description:",
+        "Your Description:",
+    )
+    _bio_alt = "|".join(re.escape(lab) for lab in _bio_labels)
+
+    # Strip markdown "About you" section (any case, any # count; older / remote prompts).
+    prompt = re.sub(
+        rf"(?i)\n#+\s*about you\s*:?\s*\n.*?(?=\n+(?:{_bio_alt})|\nUser profile:|\Z)",
+        "",
+        prompt,
+        flags=re.S,
+    )
+    # Strip a plain "About you:" heading line when it sits right before profile fields.
+    _profile_first = (
+        r"(?:Your Name:|Your Age:|Your Pronouns:|Your Relationship with the user:"
+        r"|You like calling the user:)"
+    )
+    prompt = re.sub(
+        rf"(?i)\n#?\s*about you\s*:?\s*\n(?={_profile_first})",
+        "\n",
+        prompt,
+    )
+    # Strip injected profile lines (same labels as _character_identity_suffix).
+    _profile_line = (
+        r"(?:Your Name:.*|Your Age:.*|Your Pronouns:.*|"
+        r"Your Relationship with the user:.*|You like calling the user:.*)"
+    )
+    prompt = re.sub(rf"(?:\n{_profile_line})+", "", prompt)
+    # Strip bio line(s); allow extra newlines before the label (e.g. blank line before Your Description).
+    prompt = re.sub(
+        rf"\n+(?:{_bio_alt}).*?(?=\nUser profile:|\Z)",
+        "",
+        prompt,
+        flags=re.S,
+    )
+    return prompt
 
 
 class TTSException(RuntimeError):
@@ -421,23 +505,11 @@ class ConnectionHandler:
                 )
 
             base_prompt = self.common_config.get("prompt", self.config.get("prompt", ""))
-            refreshed_prompt = base_prompt
+            refreshed_prompt = _strip_character_identity_from_prompt(base_prompt)
 
-            profile_parts = []
-            for label, key in (
-                ("Your Name", "name"),
-                ("Your Age", "age"),
-                ("Your Pronouns", "pronouns"),
-                ("Your Relationship with the user", "relationship"),
-                ("You like calling the user", "callMe"),
-            ):
-                val = fields.get(key)
-                if val:
-                    profile_parts.append(f"{label}: {val}")
-            if profile_parts:
-                refreshed_prompt += "\n# About you:\n" + "\n- ".join(profile_parts)
-            if fields.get("bio"):
-                refreshed_prompt += f"\nUser's description of you: {fields['bio']}"
+            _cid = _character_identity_suffix(fields)
+            if _cid:
+                refreshed_prompt += _cid
 
             # Re-append user profile/task context, same as initial handshake behavior.
             try:
@@ -571,7 +643,9 @@ class ConnectionHandler:
             # ---- SAFE DEFAULTS ----
             user_id = f"device:{self.device_id}"
             user_name = "Unknown User"
-            new_prompt = self.config.get("prompt", "")
+            new_prompt = _strip_character_identity_from_prompt(
+                self.config.get("prompt", "")
+            )
 
             cached_enhanced_prompt = self.prompt_manager.get_cached_enhanced_prompt(
                 self.device_id, prompt_text=self.config.get("prompt")
@@ -623,27 +697,9 @@ class ConnectionHandler:
                             "No voice resolved from Firestore character profile; TTS may fall back to default_voice_id"
                         )
 
-                    profile_parts = []
-                    for label, key in (
-                        ("Your Name", "name"),
-                        ("Your Age", "age"),
-                        ("Your Pronouns", "pronouns"),
-                        ("Your Relationship with the user", "relationship"),
-                        ("You like calling the user", "callMe"),
-                    ):
-                        val = fields.get(key)
-                        if val:
-                            profile_parts.append(f"{label}: {val}")
-
-                    if profile_parts:
-                        new_prompt += "\n# About you:\n" + "\n- ".join(
-                            profile_parts
-                        )
-
-                    if fields.get("bio"):
-                        new_prompt += (
-                            f"\nUser's description of you: {fields['bio']}"
-                        )
+                    _cid = _character_identity_suffix(fields)
+                    if _cid:
+                        new_prompt += _cid
                 else:
                     self.logger.bind(tag=TAG, device_id=self.device_id).warning(
                         "MISSING activeCharacterId; using defaults"
