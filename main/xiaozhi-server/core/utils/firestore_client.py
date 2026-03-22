@@ -143,7 +143,7 @@ def get_user_profile_by_phone(owner_phone: str, timeout: float = 3.0) -> Optiona
 
 
 def extract_user_profile_fields(user_doc: Dict[str, Any]) -> Dict[str, Optional[str]]:
-    wanted = ("name", "birthday", "pronouns", "phoneNumber", "timezone")
+    wanted = ("uid", "name", "birthday", "pronouns", "phoneNumber", "timezone")
     result: Dict[str, Optional[str]] = {k: None for k in wanted}
     if not user_doc:
         return result

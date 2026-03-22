@@ -31,6 +31,14 @@ services:
       MQTT_URL: mqtt://mqtt:1883
       SERVER_EXTERNAL_IP: 136.111.52.199
       OTA_MANIFEST_URL: https://storage.googleapis.com/milu-public/OTA_MIAO/ota_manifest.json
+      CHAT_STORE_BACKEND: ${CHAT_STORE_BACKEND:-auto}
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
+      SUPABASE_TIMEOUT_SECONDS: ${SUPABASE_TIMEOUT_SECONDS:-10}
+      SUPABASE_USERS_TABLE: ${SUPABASE_USERS_TABLE:-users}
+      SUPABASE_SESSIONS_TABLE: ${SUPABASE_SESSIONS_TABLE:-sessions}
+      SUPABASE_TURNS_TABLE: ${SUPABASE_TURNS_TABLE:-turns}
+      SUPABASE_MEMORY_READ_MODEL_TABLE: ${SUPABASE_MEMORY_READ_MODEL_TABLE:-memory_read_model}
       PYTHONUNBUFFERED: "1"
       TZ: America/Los_Angeles
 
@@ -66,4 +74,3 @@ services:
 networks:
   default:
     name: current_default
-
