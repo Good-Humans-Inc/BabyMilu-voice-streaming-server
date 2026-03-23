@@ -97,10 +97,23 @@ def build_url(base_url: str, path: str, **params: Any) -> str:
     return f"{base_url.rstrip('/')}{path}{'?' + encoded if encoded else ''}"
 
 
-def paginate_items(base_url: str, path: str, page_size: int) -> Iterable[dict[str, Any]]:
+def paginate_items(
+    base_url: str,
+    path: str,
+    page_size: int,
+    **extra_params: Any,
+) -> Iterable[dict[str, Any]]:
     offset = 0
     while True:
-        payload = fetch_json(build_url(base_url, path, limit=page_size, offset=offset))
+        payload = fetch_json(
+            build_url(
+                base_url,
+                path,
+                limit=page_size,
+                offset=offset,
+                **extra_params,
+            )
+        )
         items = payload.get("items") if isinstance(payload, dict) else None
         if not items:
             break
@@ -423,7 +436,14 @@ def main() -> int:
     if not args.database_url and not args.dry_run:
         raise SystemExit("DATABASE_URL is required unless running with --dry-run")
 
-    session_summaries = list(paginate_items(args.api_base_url, "/api/intel/sessions", args.page_size))
+    session_summaries = list(
+        paginate_items(
+            args.api_base_url,
+            "/api/intel/sessions",
+            args.page_size,
+            lite="false",
+        )
+    )
     session_summaries.sort(key=lambda item: coalesce(item.get("start_time"), item.get("end_time")) or "")
     if args.limit_sessions > 0:
         session_summaries = session_summaries[: args.limit_sessions]
@@ -462,8 +482,7 @@ def main() -> int:
                 skipped += 1
                 continue
 
-            detail = fetch_json(build_url(args.api_base_url, f"/api/intel/sessions/{session_tag}"))
-            payload, turns = build_session_payload(summary, detail, user_aliases)
+            payload, turns = build_session_payload(summary, summary, user_aliases)
             if not turns:
                 skipped += 1
                 continue
