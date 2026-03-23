@@ -296,7 +296,11 @@ def main() -> int:
         print(f"SQLite DB not found: {sqlite_path}", file=sys.stderr)
         return 2
 
-    with psycopg.connect(args.database_url, row_factory=dict_row) as pg_conn:
+    with psycopg.connect(
+        args.database_url,
+        row_factory=dict_row,
+        prepare_threshold=None,
+    ) as pg_conn:
         if not args.skip_bootstrap:
             ensure_schema(pg_conn)
             print("Supabase schema ensured.")
