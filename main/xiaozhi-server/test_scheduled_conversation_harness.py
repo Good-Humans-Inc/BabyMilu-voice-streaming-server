@@ -451,11 +451,14 @@ def run_phase1(client: openai.OpenAI, model: str) -> dict | None:
             # Execute the tool — triggers _fake_create_scheduled_conversation
             result = run_sc_tool(fake_conn, **tool_call["arguments"])
 
+            # result.result is set on success; result.response is set on failure
+            tool_content = result.result or result.response or "ERROR: tool returned no content"
+
             # Feed result back and get confirmation text
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call["id"],
-                "content": result.result or "",
+                "content": tool_content,
             })
             confirm_text, _ = llm_turn(client, model, messages, system=PHASE1_SYSTEM)
             print(f"\nAssistant: {confirm_text}\n")

@@ -31,8 +31,10 @@ SCHEDULE_CONVERSATION_FUNCTION_DESC = {
                     "type": "string",
                     "description": (
                         "The time the user wants the check-in, as they expressed it "
-                        "(e.g. 'in 5 minutes', 'tomorrow at 7am', 'Friday at 9pm'). "
-                        "Do NOT convert — pass the raw expression."
+                        "(e.g. 'in 5 minutes', 'tomorrow at 7am', 'Friday at 9pm', '8pm'). "
+                        "Do NOT convert — pass the raw expression. "
+                        "Do NOT include recurrence words like 'daily' or 'every day' here — "
+                        "those belong in the recurrence field."
                     ),
                 },
                 "content": {
