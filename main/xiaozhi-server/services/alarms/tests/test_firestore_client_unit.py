@@ -35,6 +35,91 @@ class _FakeDoc:
         return dict(self._data)
 
 
+class _FakeWriteRef:
+    """Captures the doc dict passed to .set()."""
+    def __init__(self):
+        self.written = None
+
+    def set(self, doc):
+        self.written = doc
+
+
+class _FakeWriteClient:
+    """Minimal fake that supports collection().document().collection().document().set()."""
+    def __init__(self):
+        self._ref = _FakeWriteRef()
+
+    def collection(self, name):
+        return self
+
+    def document(self, name):
+        return self
+
+    def set(self, doc):
+        self._ref.set(doc)
+
+    @property
+    def written(self):
+        return self._ref.written
+
+
+def test_create_scheduled_conversation_writes_correct_mode_and_fields():
+    now = datetime(2026, 3, 24, 9, 0, tzinfo=timezone.utc)
+    fake_client = _FakeWriteClient()
+
+    alarm_id = firestore_client.create_scheduled_conversation(
+        uid="15551234567",
+        device_id="aa:bb:cc:dd:ee:ff",
+        resolved_dt=now,
+        label="take vitamins",
+        context="take vitamins",
+        tz_str="UTC",
+        content="take vitamins",
+        type_hint="habit",
+        priority="medium",
+        conversation_outline="1. Open gently.",
+        character_reminder="Be warm.",
+        emotional_context="User was tired.",
+        completion_signal="Done: user confirms.",
+        delivery_preference="be gentle",
+        client=fake_client,
+    )
+
+    assert isinstance(alarm_id, str) and len(alarm_id) == 36  # UUID
+    doc = fake_client.written
+    assert doc is not None
+    assert doc["targets"] == [{"deviceId": "aa:bb:cc:dd:ee:ff", "mode": "scheduled_conversation"}]
+    assert doc["content"] == "take vitamins"
+    assert doc["typeHint"] == "habit"
+    assert doc["priority"] == "medium"
+    assert doc["conversationOutline"] == "1. Open gently."
+    assert doc["characterReminder"] == "Be warm."
+    assert doc["emotionalContext"] == "User was tired."
+    assert doc["completionSignal"] == "Done: user confirms."
+    assert doc["deliveryPreference"] == "be gentle"
+    assert doc["status"] == "on"
+    assert doc["label"] == "take vitamins"
+
+
+def test_create_scheduled_conversation_content_defaults_to_label():
+    """When content is None, it should fall back to label."""
+    now = datetime(2026, 3, 24, 9, 0, tzinfo=timezone.utc)
+    fake_client = _FakeWriteClient()
+
+    firestore_client.create_scheduled_conversation(
+        uid="15551234567",
+        device_id="aa:bb:cc:dd:ee:ff",
+        resolved_dt=now,
+        label="check in",
+        context="check in",
+        tz_str="UTC",
+        content=None,
+        client=fake_client,
+    )
+
+    assert fake_client.written["content"] == "check in"
+
+
 def test_fetch_due_alarms_skips_docs_without_targets(monkeypatch):
     now = datetime.now(timezone.utc)
     data = {
@@ -103,6 +188,75 @@ def test_fetch_due_alarms_supports_none_repeat(monkeypatch):
 
     assert len(results) == 1
     assert results[0].schedule.repeat == firestore_client.models.AlarmRepeat.NONE
+
+
+def test_fetch_due_alarms_reads_scheduled_conversation_fields(monkeypatch):
+    """AlarmDoc is populated with V0 fields when present in the Firestore doc."""
+    now = datetime.now(timezone.utc)
+    data = {
+        "status": "on",
+        "nextOccurrenceUTC": now.isoformat(),
+        "schedule": {"repeat": "once", "timeLocal": "09:00", "days": ["2026-03-24"]},
+        "targets": [{"deviceId": "90:e5:b1:a8:e4:38", "mode": "scheduled_conversation"}],
+        "content": "take vitamins",
+        "typeHint": "habit",
+        "priority": "medium",
+        "conversationOutline": "1. Open gently.",
+        "characterReminder": "Be warm.",
+        "emotionalContext": "User was tired.",
+        "completionSignal": "Done: user confirms.",
+        "deliveryPreference": "be gentle",
+    }
+    docs = [_FakeDoc("users/user-1/alarms/alarm-1", data)]
+    client = _FakeClient(docs)
+
+    monkeypatch.setattr(
+        firestore_client, "FieldFilter", lambda field_path, op, value: (field_path, op, value)
+    )
+    monkeypatch.setattr(firestore_client, "_get_user_metadata", lambda doc, cache: {})
+
+    results = firestore_client.fetch_due_alarms(
+        now, lookahead=timedelta(minutes=1), client=client
+    )
+
+    assert len(results) == 1
+    alarm = results[0]
+    assert alarm.content == "take vitamins"
+    assert alarm.type_hint == "habit"
+    assert alarm.priority == "medium"
+    assert alarm.conversation_outline == "1. Open gently."
+    assert alarm.character_reminder == "Be warm."
+    assert alarm.emotional_context == "User was tired."
+    assert alarm.completion_signal == "Done: user confirms."
+    assert alarm.delivery_preference == "be gentle"
+
+
+def test_fetch_due_alarms_v0_fields_are_none_when_absent(monkeypatch):
+    """Legacy morning_alarm docs without V0 fields produce None on AlarmDoc."""
+    now = datetime.now(timezone.utc)
+    data = {
+        "status": "on",
+        "nextOccurrenceUTC": now.isoformat(),
+        "schedule": {"repeat": "weekly", "timeLocal": "07:00", "days": ["Mon"]},
+        "targets": [{"deviceId": "90:e5:b1:a8:e4:38", "mode": "morning_alarm"}],
+    }
+    docs = [_FakeDoc("users/user-1/alarms/alarm-1", data)]
+    client = _FakeClient(docs)
+
+    monkeypatch.setattr(
+        firestore_client, "FieldFilter", lambda field_path, op, value: (field_path, op, value)
+    )
+    monkeypatch.setattr(firestore_client, "_get_user_metadata", lambda doc, cache: {})
+
+    results = firestore_client.fetch_due_alarms(
+        now, lookahead=timedelta(minutes=1), client=client
+    )
+
+    assert len(results) == 1
+    alarm = results[0]
+    assert alarm.content is None
+    assert alarm.type_hint is None
+    assert alarm.conversation_outline is None
 
 
 def test_fetch_due_alarms_supports_once_repeat_alias(monkeypatch):

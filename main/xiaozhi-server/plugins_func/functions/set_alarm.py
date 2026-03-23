@@ -15,11 +15,11 @@ SET_ALARM_FUNCTION_DESC = {
     "function": {
         "name": "set_alarm",
         "description": (
-            "Set a reminder or alarm for the user. "
-            "Trigger when the user wants to be reminded of something at a specific time. "
-            "You MUST have both a time expression and a reason before calling — ask the user if either is missing. "
-            "Pass the time exactly as the user said it (e.g. 'in 5 minutes', 'tomorrow morning', 'Friday at 9pm'). "
-            "The server will resolve it to an absolute time."
+            "[DEPRECATED — use schedule_conversation instead] "
+            "Set a basic alarm for the user. "
+            "For any new reminder, habit, check-in, or emotional support request, "
+            "use schedule_conversation — it supports richer context and better delivery. "
+            "Only use set_alarm if schedule_conversation is unavailable."
         ),
         "parameters": {
             "type": "object",

@@ -101,13 +101,21 @@ def test_prepare_wake_requests_creates_session(monkeypatch):
     request = wake_requests[0]
     assert request.target.device_id == "DEV123"
     assert request.session is fake_store.sessions["DEV123"]
-    assert fake_store.sessions["DEV123"].session_config == {
-        "mode": "morning_alarm",
-        "alarmId": "alarm-123",
-        "userId": "user-xyz",
-        "label": "Morning Wake",
-        "context": None,
-    }
+    cfg = fake_store.sessions["DEV123"].session_config
+    assert cfg["mode"] == "morning_alarm"
+    assert cfg["alarmId"] == "alarm-123"
+    assert cfg["userId"] == "user-xyz"
+    assert cfg["label"] == "Morning Wake"
+    assert cfg["context"] is None
+    # V0 fields are None for morning_alarm docs that don't have them
+    assert cfg["content"] is None
+    assert cfg["typeHint"] is None
+    assert cfg["priority"] is None
+    assert cfg["conversationOutline"] is None
+    assert cfg["characterReminder"] is None
+    assert cfg["emotionalContext"] is None
+    assert cfg["completionSignal"] is None
+    assert cfg["deliveryPreference"] is None
 
 
 def test_prepare_wake_requests_skips_existing_session(monkeypatch):

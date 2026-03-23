@@ -21,5 +21,14 @@ MODE_CONFIG: Dict[str, Dict[str, Any]] = {
         "followup_max": 1,  # cap nudges to reduce accidental repetitive prompts
         "use_separate_conversation": True,
     },
+    "scheduled_conversation": {
+        # No instructions_file — instructions assembled dynamically from session_config fields
+        # (conversation_outline, character_reminder, emotional_context, completion_signal)
+        "server_initiate_chat": True,
+        "followup_enabled": True,
+        "followup_delay": 10,  # seconds between follow-ups
+        "followup_max": 1,  # cap nudges; V1 will drive this from priority
+        "use_separate_conversation": True,
+    },
 }
 

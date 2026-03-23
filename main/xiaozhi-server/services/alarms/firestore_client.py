@@ -156,6 +156,14 @@ def _build_alarm_doc(
         raw=data,
         doc_path=doc.reference.path,
         last_processed_utc=_parse_datetime(data.get("lastProcessedUTC")),
+        content=data.get("content"),
+        type_hint=data.get("typeHint"),
+        priority=data.get("priority"),
+        conversation_outline=data.get("conversationOutline"),
+        character_reminder=data.get("characterReminder"),
+        emotional_context=data.get("emotionalContext"),
+        completion_signal=data.get("completionSignal"),
+        delivery_preference=data.get("deliveryPreference"),
     )
 
 
@@ -305,6 +313,74 @@ def create_alarm(
     client.collection("users").document(uid).collection("alarms").document(alarm_id).set(doc)
     logger.bind(tag=TAG).info(
         f"Created one-time alarm {alarm_id} for user {uid} device {device_id} "
+        f"at {_format_datetime(resolved_dt)} (local {time_local} {tz_str}): '{label}'"
+    )
+    return alarm_id
+
+
+def create_scheduled_conversation(
+    uid: str,
+    device_id: str,
+    resolved_dt: datetime,
+    label: str,
+    context: str,
+    tz_str: str,
+    *,
+    content: Optional[str] = None,
+    type_hint: Optional[str] = None,
+    priority: Optional[str] = None,
+    conversation_outline: Optional[str] = None,
+    character_reminder: Optional[str] = None,
+    emotional_context: Optional[str] = None,
+    completion_signal: Optional[str] = None,
+    delivery_preference: Optional[str] = None,
+    client: Optional[firestore.Client] = None,
+) -> str:
+    """Write a scheduled-conversation alarm doc to /users/{uid}/alarms/{alarm_id}.
+
+    Like create_alarm() but uses mode='scheduled_conversation' and stores the
+    LLM-generated intake fields (outline, character reminder, emotional context, etc.)
+    that are assembled into dynamic instructions at delivery time.
+
+    Returns the alarm_id UUID string.
+    """
+    client = client or _build_client()
+    alarm_id = str(uuid.uuid4())
+
+    resolved_local = resolved_dt.astimezone(ZoneInfo(tz_str))
+    time_local = resolved_local.strftime("%H:%M")
+    date_local = resolved_local.strftime("%Y-%m-%d")
+
+    now_utc = datetime.now(timezone.utc)
+    doc = {
+        "label": label,
+        "context": context,
+        "schedule": {
+            "repeat": "once",
+            "timeLocal": time_local,
+            "days": [date_local],
+        },
+        "nextOccurrenceUTC": _format_datetime(resolved_dt),
+        "status": models.AlarmStatus.ON.value,
+        "targets": [{"deviceId": device_id, "mode": "scheduled_conversation"}],
+        "uid": uid,
+        "source": "voice",
+        "createdAt": _format_datetime(now_utc),
+        "updatedAt": _format_datetime(now_utc),
+        # V0 scheduled_conversation fields
+        "content": content or label,
+        "typeHint": type_hint,
+        "priority": priority,
+        "conversationOutline": conversation_outline,
+        "characterReminder": character_reminder,
+        "emotionalContext": emotional_context,
+        "completionSignal": completion_signal,
+        "deliveryPreference": delivery_preference,
+    }
+
+    client.collection("users").document(uid).collection("alarms").document(alarm_id).set(doc)
+    logger.bind(tag=TAG).info(
+        f"Created scheduled conversation {alarm_id} for user {uid} device {device_id} "
         f"at {_format_datetime(resolved_dt)} (local {time_local} {tz_str}): '{label}'"
     )
     return alarm_id
