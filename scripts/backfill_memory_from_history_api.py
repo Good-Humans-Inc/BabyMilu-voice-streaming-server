@@ -487,16 +487,21 @@ def main() -> int:
                 skipped += 1
                 continue
 
-            upsert_user(
-                pg_conn,
-                user_id=payload["user_id"],
-                name=payload["user_name"],
-                device_ids=payload["device_ids"],
-            )
-            insert_session(pg_conn, payload)
-            turn_ids = insert_turns(pg_conn, payload["session_id"], turns)
-            update_session_turn_refs(pg_conn, payload["session_id"], turn_ids)
-            pg_conn.commit()
+            try:
+                upsert_user(
+                    pg_conn,
+                    user_id=payload["user_id"],
+                    name=payload["user_name"],
+                    device_ids=payload["device_ids"],
+                )
+                insert_session(pg_conn, payload)
+                turn_ids = insert_turns(pg_conn, payload["session_id"], turns)
+                update_session_turn_refs(pg_conn, payload["session_id"], turn_ids)
+                pg_conn.commit()
+            except psycopg.errors.UniqueViolation:
+                pg_conn.rollback()
+                skipped += 1
+                continue
 
             imported += 1
             if args.verbose:
