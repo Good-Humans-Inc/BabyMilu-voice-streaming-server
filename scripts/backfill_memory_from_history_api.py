@@ -133,6 +133,11 @@ def session_exists(pg_conn: psycopg.Connection, session_id: str) -> bool:
     return row is not None
 
 
+def load_existing_session_ids(pg_conn: psycopg.Connection) -> set[str]:
+    rows = pg_conn.execute("select session_id from public.sessions").fetchall()
+    return {str(row["session_id"]) for row in rows if row.get("session_id")}
+
+
 def get_existing_device_ids(pg_conn: psycopg.Connection, user_id: str) -> str:
     row = pg_conn.execute(
         "select device_ids from public.users where user_id = %s",
@@ -210,10 +215,9 @@ def insert_session(pg_conn: psycopg.Connection, payload: dict[str, Any]) -> None
 
 def insert_turns(
     pg_conn: psycopg.Connection, session_id: str, turns: list[dict[str, Any]]
-) -> list[int]:
-    inserted_ids: list[int] = []
-    for turn in turns:
-        row = pg_conn.execute(
+) -> None:
+    with pg_conn.cursor() as cur:
+        cur.executemany(
             """
             insert into public.turns (
               session_id,
@@ -224,32 +228,19 @@ def insert_turns(
               "timestamp"
             )
             values (%s, %s, %s, %s, %s, %s)
-            returning id
             """,
-            (
-                session_id,
-                turn["turn_index"],
-                turn["speaker"],
-                turn["text"],
-                turn["timestamp"],
-                turn["timestamp"],
-            ),
-        ).fetchone()
-        inserted_ids.append(int(row["id"]))
-    return inserted_ids
-
-
-def update_session_turn_refs(
-    pg_conn: psycopg.Connection, session_id: str, turn_ids: list[int]
-) -> None:
-    pg_conn.execute(
-        """
-        update public.sessions
-        set turns = %s::jsonb
-        where session_id = %s
-        """,
-        (json.dumps([str(turn_id) for turn_id in turn_ids]), session_id),
-    )
+            [
+                (
+                    session_id,
+                    turn["turn_index"],
+                    turn["speaker"],
+                    turn["text"],
+                    turn["timestamp"],
+                    turn["timestamp"],
+                )
+                for turn in turns
+            ],
+        )
 
 
 def make_firestore_client(project_id: str):
@@ -317,6 +308,31 @@ def resolve_user_records(
                 aliases[alias] = record
 
     return aliases, fallback_count
+
+
+def build_unique_user_records(
+    user_aliases: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    users: dict[str, dict[str, Any]] = {}
+    for record in user_aliases.values():
+        user_id = str(record.get("user_id") or "").strip()
+        if not user_id:
+            continue
+        merged = users.setdefault(
+            user_id,
+            {
+                "user_id": user_id,
+                "user_name": str(record.get("user_name") or user_id).strip(),
+                "device_ids": [],
+            },
+        )
+        if not merged["user_name"] and record.get("user_name"):
+            merged["user_name"] = str(record["user_name"]).strip()
+        for device_id in record.get("device_ids") or []:
+            device_id = str(device_id or "").strip()
+            if device_id and device_id not in merged["device_ids"]:
+                merged["device_ids"].append(device_id)
+    return list(users.values())
 
 
 def summarize_analysis(detail: dict[str, Any]) -> dict[str, Any]:
@@ -442,9 +458,10 @@ def main() -> int:
             "/api/intel/sessions",
             args.page_size,
             lite="false",
+            sort="start_time",
+            order="asc",
         )
     )
-    session_summaries.sort(key=lambda item: coalesce(item.get("start_time"), item.get("end_time")) or "")
     if args.limit_sessions > 0:
         session_summaries = session_summaries[: args.limit_sessions]
 
@@ -470,15 +487,26 @@ def main() -> int:
         if not args.skip_bootstrap:
             ensure_schema(pg_conn)
 
+        for user_record in build_unique_user_records(user_aliases):
+            upsert_user(
+                pg_conn,
+                user_id=user_record["user_id"],
+                name=user_record["user_name"],
+                device_ids=user_record["device_ids"],
+            )
+        pg_conn.commit()
+
+        existing_session_ids = load_existing_session_ids(pg_conn)
         imported = 0
         skipped = 0
+        dirty = False
         for summary in session_summaries:
             session_tag = summary.get("session_tag")
             session_id = summary.get("session_id")
             if not session_tag or not session_id:
                 skipped += 1
                 continue
-            if session_exists(pg_conn, str(session_id)):
+            if str(session_id) in existing_session_ids:
                 skipped += 1
                 continue
 
@@ -488,26 +516,34 @@ def main() -> int:
                 continue
 
             try:
-                upsert_user(
-                    pg_conn,
-                    user_id=payload["user_id"],
-                    name=payload["user_name"],
-                    device_ids=payload["device_ids"],
-                )
                 insert_session(pg_conn, payload)
-                turn_ids = insert_turns(pg_conn, payload["session_id"], turns)
-                update_session_turn_refs(pg_conn, payload["session_id"], turn_ids)
-                pg_conn.commit()
+                insert_turns(pg_conn, payload["session_id"], turns)
+                existing_session_ids.add(payload["session_id"])
+                dirty = True
             except psycopg.errors.UniqueViolation:
                 pg_conn.rollback()
+                existing_session_ids.add(str(session_id))
+                dirty = False
                 skipped += 1
                 continue
 
             imported += 1
+            if imported % 50 == 0:
+                pg_conn.commit()
+                dirty = False
+            if imported % 100 == 0:
+                print(
+                    f"Progress: imported={imported} skipped={skipped} considered={imported + skipped}",
+                    flush=True,
+                )
             if args.verbose:
                 print(
-                    f"Imported session {payload['session_id']} user_id={payload['user_id']} turns={len(turns)}"
+                    f"Imported session {payload['session_id']} user_id={payload['user_id']} turns={len(turns)}",
+                    flush=True,
                 )
+
+        if dirty:
+            pg_conn.commit()
 
         print(
             f"History API backfill complete: imported={imported}, skipped={skipped}, considered={len(session_summaries)}"
