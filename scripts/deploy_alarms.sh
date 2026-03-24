@@ -11,7 +11,8 @@ ENV="$1"
 PROJECT_ROOT="$(pwd)"
 BUILD_DIR="_build_alarms"
 FUNCTION_SOURCE="services/alarms/cloud/functions.py"
-FUNCTION_ENTRYPOINT="scan_due_alarms"
+FUNCTION_ENTRYPOINT="scan_due_scheduled_items"
+FUNCTION_REQUIREMENTS="requirements.alarms.txt"
 RUNTIME="python310"
 REGION="us-central1"
 
@@ -56,7 +57,11 @@ mkdir "$BUILD_DIR"
 
 # 2. Copy dependency files
 echo "📋 Copying configuration and requirements..."
-cp requirements.txt "$BUILD_DIR/"
+if [ ! -f "$FUNCTION_REQUIREMENTS" ]; then
+    echo "❌ Error: $FUNCTION_REQUIREMENTS not found."
+    exit 1
+fi
+cp "$FUNCTION_REQUIREMENTS" "$BUILD_DIR/requirements.txt"
 cp config.yaml "$BUILD_DIR/"
 
 # 3. Copy source modules

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from services.alarms.cloud import functions as cloud_functions
-from services.alarms import scheduler, tasks
+from services.alarms import reminder_push_job, scheduler, tasks
 from services.session_context import models as session_models
 
 
@@ -190,3 +190,59 @@ def test_scan_due_alarms_honors_denylist(monkeypatch):
     assert finalized == ["DEV1"]
     assert rolled_back == ["DEV2"]
 
+
+def test_scan_due_scheduled_items_combines_alarm_and_reminder_results(monkeypatch):
+    monkeypatch.setattr(
+        cloud_functions,
+        "scan_due_alarms",
+        lambda request: {"ok": True, "count": 2, "triggered": 1, "results": []},
+    )
+    captured = {}
+
+    def fake_run_send_reminder_push_job(*, execute=False, now=None, client=None):
+        captured["execute"] = execute
+        captured["now"] = now
+        captured["client"] = client
+        return {
+            "ok": True,
+            "count": 3,
+            "triggered": 2,
+            "skipped": 1,
+            "execute": execute,
+            "results": [],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(
+        reminder_push_job,
+        "run_send_reminder_push_job",
+        fake_run_send_reminder_push_job,
+    )
+    monkeypatch.setenv("INCLUDE_REMINDERS_IN_UNIFIED_SCAN", "true")
+    monkeypatch.setenv("REMINDER_EXECUTE", "false")
+
+    response = cloud_functions.scan_due_scheduled_items(request={})  # type: ignore[arg-type]
+
+    assert response["ok"] is True
+    assert response["alarms"]["count"] == 2
+    assert response["reminders"]["count"] == 3
+    assert response["totals"]["count"] == 5
+    assert response["totals"]["triggered"] == 3
+    assert captured["execute"] is False
+    assert captured["now"] is not None
+
+
+def test_scan_due_scheduled_items_can_disable_reminders(monkeypatch):
+    monkeypatch.setattr(
+        cloud_functions,
+        "scan_due_alarms",
+        lambda request: {"ok": True, "count": 1, "triggered": 1, "results": []},
+    )
+    monkeypatch.setenv("INCLUDE_REMINDERS_IN_UNIFIED_SCAN", "false")
+
+    response = cloud_functions.scan_due_scheduled_items(request={})  # type: ignore[arg-type]
+
+    assert response["ok"] is True
+    assert response["reminders"]["disabled"] is True
+    assert response["reminders"]["count"] == 0
+    assert response["totals"]["count"] == 1

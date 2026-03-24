@@ -41,3 +41,4 @@ elevenlabs==2.23.0
 paho-mqtt==2.1.0
 pytest==9.0.1
 dateparser==1.2.1
+exponent-server-sdk

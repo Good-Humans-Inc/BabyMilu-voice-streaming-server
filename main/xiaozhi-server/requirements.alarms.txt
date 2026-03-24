@@ -1,0 +1,8 @@
+PyYAML==6.0.2
+google-cloud-firestore==2.17.0
+paho-mqtt==2.1.0
+loguru==0.7.3
+httpx==0.27.2
+exponent-server-sdk
+openai==1.107.0
+firebase-admin>=6.5.0
