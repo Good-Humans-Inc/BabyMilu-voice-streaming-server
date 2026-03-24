@@ -147,16 +147,20 @@ def schedule_conversation(
     tz = ZoneInfo(tz_str)
     now = datetime.now(tz)
 
-    # Parse natural language time expression relative to now
-    resolved = dateparser.parse(
-        time_expression,
-        settings={
-            "PREFER_DATES_FROM": "future",
-            "RELATIVE_BASE": now,
-            "TIMEZONE": tz_str,
-            "RETURN_AS_TIMEZONE_AWARE": True,
-        },
-    )
+    _parse_settings = {
+        "PREFER_DATES_FROM": "future",
+        "RELATIVE_BASE": now,
+        "TIMEZONE": tz_str,
+        "RETURN_AS_TIMEZONE_AWARE": True,
+        "LANGUAGES": ["en"],
+    }
+
+    # Parse natural language time expression relative to now.
+    # Retry with "today at" prefix for bare times like "8 am" or "9pm" that
+    # dateparser cannot resolve without a date anchor.
+    resolved = dateparser.parse(time_expression, settings=_parse_settings)
+    if resolved is None:
+        resolved = dateparser.parse(f"today at {time_expression}", settings=_parse_settings)
 
     if resolved is None:
         logger.bind(tag=TAG).warning(

@@ -53,16 +53,20 @@ def set_alarm(conn, time_expression: str, reason: str) -> ActionResponse:
     tz = ZoneInfo(tz_str)
     now = datetime.now(tz)
 
-    # Parse the natural language time expression relative to "now"
-    resolved = dateparser.parse(
-        time_expression,
-        settings={
-            "PREFER_DATES_FROM": "future",
-            "RELATIVE_BASE": now,
-            "TIMEZONE": tz_str,
-            "RETURN_AS_TIMEZONE_AWARE": True,
-        },
-    )
+    _parse_settings = {
+        "PREFER_DATES_FROM": "future",
+        "RELATIVE_BASE": now,
+        "TIMEZONE": tz_str,
+        "RETURN_AS_TIMEZONE_AWARE": True,
+        "LANGUAGES": ["en"],
+    }
+
+    # Parse the natural language time expression relative to "now".
+    # Retry with "today at" prefix for bare times like "8 am" that dateparser
+    # cannot resolve without a date anchor.
+    resolved = dateparser.parse(time_expression, settings=_parse_settings)
+    if resolved is None:
+        resolved = dateparser.parse(f"today at {time_expression}", settings=_parse_settings)
 
     if resolved is None:
         logger.bind(tag=TAG).warning(
