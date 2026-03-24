@@ -5,3 +5,4 @@ loguru==0.7.3
 httpx==0.27.2
 exponent-server-sdk
 openai==1.107.0
+firebase-admin>=6.5.0

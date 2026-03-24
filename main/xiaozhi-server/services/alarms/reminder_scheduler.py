@@ -3,12 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
-from zoneinfo import ZoneInfo
 
 from google.cloud import firestore
 from google.cloud.firestore_v1 import FieldFilter
 
 from config.settings import get_gcp_credentials_path
+from services.alarms import reminder_advancement
 from services.logging import setup_logging
 
 TAG = __name__
@@ -66,6 +66,12 @@ def _format_datetime(value: datetime) -> str:
     else:
         value = value.astimezone(timezone.utc)
     return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _resolve_user_id(doc) -> str:
@@ -175,6 +181,20 @@ def process_due_reminders(
                 )
                 continue
 
+            # Match sendReminderPush: only fire when occurrence time has arrived
+            # (lookahead widens the query for batching, not early delivery).
+            if due_time > _as_utc(now):
+                skipped += 1
+                results.append(
+                    {
+                        "reminderId": reminder.reminder_id,
+                        "userId": reminder.user_id,
+                        "processed": False,
+                        "skipped": "not_yet_due",
+                    }
+                )
+                continue
+
             if not execute:
                 results.append(
                     {
@@ -219,8 +239,14 @@ def process_due_reminders(
             if reminder.repeat in ONE_TIME_REPEATS:
                 patch["status"] = "off"
             else:
-                next_occurrence = _compute_next_occurrence(reminder, from_time=due_time)
-                if next_occurrence is None:
+                tz_name = reminder.timezone or "UTC"
+                advanced = reminder_advancement.compute_advance_after_firing(
+                    reminder.raw,
+                    tz_name,
+                    due_occurrence_utc=due_time,
+                    now_utc=_as_utc(now),
+                )
+                if advanced is None:
                     skipped += 1
                     results.append(
                         {
@@ -231,7 +257,9 @@ def process_due_reminders(
                         }
                     )
                     continue
+                next_occurrence, next_trigger = advanced
                 patch["nextOccurrenceUTC"] = _format_datetime(next_occurrence)
+                patch["nextTriggerUTC"] = _format_datetime(next_trigger)
             doc_client.document(reminder.doc_path).set(patch, merge=True)
 
             results.append(
@@ -283,81 +311,4 @@ def _resolve_user_timezone(doc, cache: Dict[str, str]) -> str:
     except Exception:
         cache[user_id] = "UTC"
         return "UTC"
-
-
-def _compute_next_occurrence(
-    reminder: ReminderDoc, *, from_time: datetime
-) -> Optional[datetime]:
-    schedule = reminder.raw.get("schedule") or {}
-    repeat = str(schedule.get("repeat", "")).strip().lower()
-    if repeat in ONE_TIME_REPEATS:
-        return None
-
-    time_local = schedule.get("timeLocal")
-    if not isinstance(time_local, str) or ":" not in time_local:
-        return None
-    try:
-        hour_str, minute_str = time_local.split(":", 1)
-        hour, minute = int(hour_str), int(minute_str)
-    except Exception:
-        return None
-    if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        return None
-
-    timezone_name = reminder.timezone or "UTC"
-    try:
-        tzinfo = ZoneInfo(timezone_name)
-    except Exception:
-        tzinfo = ZoneInfo("UTC")
-
-    from_local = from_time.astimezone(tzinfo)
-
-    if repeat == "daily":
-        candidate = datetime(
-            from_local.year,
-            from_local.month,
-            from_local.day,
-            hour,
-            minute,
-            tzinfo=tzinfo,
-        )
-        if candidate <= from_local:
-            candidate += timedelta(days=1)
-        return candidate.astimezone(timezone.utc)
-
-    if repeat == "weekly":
-        days = schedule.get("days") or []
-        if not isinstance(days, list) or not days:
-            return None
-        day_map = {
-            "Mon": 0,
-            "Tue": 1,
-            "Wed": 2,
-            "Thu": 3,
-            "Fri": 4,
-            "Sat": 5,
-            "Sun": 6,
-        }
-        target_weekdays = sorted(
-            day_map[day] for day in days if isinstance(day, str) and day in day_map
-        )
-        if not target_weekdays:
-            return None
-        for day_offset in range(0, 8):
-            candidate_date = from_local.date() + timedelta(days=day_offset)
-            if candidate_date.weekday() not in target_weekdays:
-                continue
-            candidate = datetime(
-                candidate_date.year,
-                candidate_date.month,
-                candidate_date.day,
-                hour,
-                minute,
-                tzinfo=tzinfo,
-            )
-            if candidate > from_local:
-                return candidate.astimezone(timezone.utc)
-        return None
-
-    return None
 
