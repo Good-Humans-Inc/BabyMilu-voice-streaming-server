@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import json
 import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from services.logging import setup_logging
-from services.alarms import scheduler, tasks
+from services.alarms import reminder_push_job, scheduler, tasks
 from services.messaging.mqtt import publish_ws_start
 from services.alarms.config import ALARM_TIMING
 from core.utils.mac import normalize_mac
@@ -134,3 +133,55 @@ def _parse_device_set(raw: str) -> set[str]:
             tokens.add(token.lower())
     return tokens
 
+
+def scan_due_scheduled_items(request) -> Dict[str, Any]:
+    """
+    Unified Cloud Scheduler entrypoint for alarms + reminders.
+
+    Reminders use the same flow as babymilu-backend sendReminderPush (query due
+    by nextOccurrenceUTC <= now, Expo or FCM, sentLogs, then advance / turn off).
+
+    Phase-1 default: REMINDER_EXECUTE=false dry-runs without sends or writes.
+    """
+    now = datetime.now(timezone.utc)
+
+    alarms_result = scan_due_alarms(request)
+
+    include_reminders = _env_bool("INCLUDE_REMINDERS_IN_UNIFIED_SCAN", True)
+    if include_reminders:
+        reminders_execute = _env_bool("REMINDER_EXECUTE", False)
+        reminders_result = reminder_push_job.run_send_reminder_push_job(
+            execute=reminders_execute,
+            now=now,
+        )
+    else:
+        reminders_result = {
+            "ok": True,
+            "count": 0,
+            "triggered": 0,
+            "skipped": 0,
+            "execute": False,
+            "results": [],
+            "errors": [],
+            "disabled": True,
+        }
+
+    return {
+        "ok": bool(alarms_result.get("ok")) and bool(reminders_result.get("ok")),
+        "timestamp": now.isoformat(),
+        "alarms": alarms_result,
+        "reminders": reminders_result,
+        "totals": {
+            "count": int(alarms_result.get("count", 0))
+            + int(reminders_result.get("count", 0)),
+            "triggered": int(alarms_result.get("triggered", 0))
+            + int(reminders_result.get("triggered", 0)),
+        },
+    }
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}

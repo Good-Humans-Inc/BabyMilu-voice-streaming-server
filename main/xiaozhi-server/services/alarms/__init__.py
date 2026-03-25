@@ -17,5 +17,3 @@ __all__ = [
     "scheduler",
     "tool_handlers",
 ]
-
-
