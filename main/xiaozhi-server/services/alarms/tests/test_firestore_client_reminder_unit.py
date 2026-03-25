@@ -205,7 +205,7 @@ def test_create_reminder_sets_status_on_and_source_voice():
     assert data["label"] == "take vitamins"
 
 
-def test_create_reminder_sets_repeat_once():
+def test_create_reminder_sets_repeat_none():
     client = _FakeWriteClient()
     resolved_dt = datetime(2026, 6, 1, 14, 0, tzinfo=ZoneInfo("UTC"))
 
@@ -216,7 +216,8 @@ def test_create_reminder_sets_repeat_once():
     )
 
     _, data = client.get_last_written()
-    assert data["schedule"]["repeat"] == "once"
+    assert data["schedule"]["repeat"] == "none"
+    assert data["schedule"]["dateLocal"] == "2026-06-01"
 
 
 def test_create_reminder_custom_delivery_channels():
@@ -253,12 +254,17 @@ def test_create_reminder_returns_reminder_id():
 # fetch_due_reminders() — collection group and filter assertions
 # ---------------------------------------------------------------------------
 
-def _reminder_data(now: datetime, *, repeat: str = "once") -> dict:
+def _reminder_data(now: datetime, *, repeat: str = "none") -> dict:
     return {
         "status": "on",
         "nextOccurrenceUTC": now.isoformat(),
         "deliveryChannel": ["plushie"],
-        "schedule": {"repeat": repeat, "timeLocal": "14:00", "days": ["2026-06-01"]},
+        "schedule": {
+            "repeat": repeat,
+            "timeLocal": "14:00",
+            "dateLocal": "2026-06-01",
+            "days": ["2026-06-01"],
+        },
         "targets": [{"deviceId": "aa:bb:cc:dd:ee:ff", "mode": "reminder"}],
     }
 

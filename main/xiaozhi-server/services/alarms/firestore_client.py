@@ -350,8 +350,9 @@ def create_reminder(
         "label": label,
         "context": context,
         "schedule": {
-            "repeat": "once",
+            "repeat": "none",
             "timeLocal": time_local,
+            "dateLocal": date_local,
             "days": [date_local],
         },
         "nextOccurrenceUTC": _format_datetime(resolved_dt),
@@ -480,5 +481,4 @@ def mark_one_time_alarm_complete(
     logger.bind(tag=TAG).info(
         f"One-time alarm {alarm.alarm_id} (user={alarm.user_id}) marked complete/off"
     )
-
 

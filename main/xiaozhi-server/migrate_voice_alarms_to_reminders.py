@@ -1,9 +1,17 @@
 """
-One-time migration: move voice-created alarm docs from
-  users/{uid}/alarms/{id}   (where source == "voice")
-to
-  users/{uid}/reminders/{id}
-adding deliveryChannel: ["plushie"] in the process.
+One-time migration: normalize reminder documents and, when explicitly safe,
+move legacy reminder-like voice docs from alarms to reminders.
+
+This script now avoids migrating real wake-up alarms by requiring a legacy
+reminder marker: a one-time voice doc whose label/context exists and whose
+target mode is not already a dedicated reminder mode. It also normalizes
+existing reminders so all of them carry deliveryChannel and the canonical
+one-time schedule shape used by backend reminder docs:
+
+  schedule.repeat   = "none"
+  schedule.dateLocal = "YYYY-MM-DD"
+  targets[].mode    = "reminder"
+  deliveryChannel   = ["plushie"] if missing
 
 Usage:
   # Dry-run (preview only, no writes):
@@ -40,6 +48,49 @@ def build_client() -> firestore.Client:
     return firestore.Client()
 
 
+def _normalize_schedule(data: dict) -> dict:
+    schedule = dict(data.get("schedule") or {})
+    repeat = str(schedule.get("repeat", "")).strip().lower()
+    if repeat in {"once", "none", "one_time", "one-time", "no_repeat"}:
+        schedule["repeat"] = "none"
+        if not schedule.get("dateLocal"):
+            days = schedule.get("days")
+            if isinstance(days, list) and days:
+                schedule["dateLocal"] = days[0]
+    return schedule
+
+
+def _normalize_targets(data: dict) -> list:
+    targets = []
+    for target in data.get("targets") or []:
+        if not isinstance(target, dict):
+            continue
+        normalized = dict(target)
+        normalized["mode"] = "reminder"
+        targets.append(normalized)
+    return targets
+
+
+def _build_normalized_reminder_doc(data: dict) -> dict:
+    normalized = dict(data)
+    normalized["deliveryChannel"] = data.get("deliveryChannel") or ["plushie"]
+    normalized["schedule"] = _normalize_schedule(data)
+    normalized["targets"] = _normalize_targets(data)
+    return normalized
+
+
+def _looks_like_legacy_reminder_alarm(data: dict) -> bool:
+    if (data.get("source") or "").strip().lower() != "voice":
+        return False
+    schedule = _normalize_schedule(data)
+    if schedule.get("repeat") != "none":
+        return False
+    targets = data.get("targets") or []
+    if not isinstance(targets, list) or not targets:
+        return False
+    return True
+
+
 def migrate():
     mode = "DRY RUN" if DRY_RUN else "LIVE"
     print(f"\n{'='*60}")
@@ -48,23 +99,48 @@ def migrate():
 
     client = build_client()
 
-    # Fetch ALL docs from the alarms collection group — no server-side filter on
-    # "source" because that would require a collection-group index that doesn't exist.
-    # We filter client-side below instead.
-    print("Fetching all docs from alarms collection group (client-side filter by source='voice')...")
-    all_docs = list(client.collection_group("alarms").stream())
-    docs = [d for d in all_docs if (d.to_dict() or {}).get("source") == "voice"]
-    print(f"Total alarms docs fetched: {len(all_docs)}  |  voice-created: {len(docs)}\n")
+    print("Fetching reminder docs for normalization...")
+    reminder_docs = list(client.collection_group("reminders").stream())
+    print(f"Existing reminder docs fetched: {len(reminder_docs)}")
 
-    if not docs:
-        print("Nothing to migrate. Exiting.")
+    print("Fetching alarm docs to look for legacy reminder-like voice records...")
+    all_alarm_docs = list(client.collection_group("alarms").stream())
+    alarm_docs = [d for d in all_alarm_docs if _looks_like_legacy_reminder_alarm(d.to_dict() or {})]
+    print(f"Alarm docs fetched: {len(all_alarm_docs)}  |  legacy reminder-like alarms: {len(alarm_docs)}\n")
+
+    if not reminder_docs and not alarm_docs:
+        print("Nothing to normalize or migrate. Exiting.")
         return
 
     migrated = 0
     skipped = 0
     errors = 0
 
-    for doc in docs:
+    for doc in reminder_docs:
+        data = doc.to_dict() or {}
+        normalized = _build_normalized_reminder_doc(data)
+        if normalized == data:
+            skipped += 1
+            continue
+
+        print(
+            f"  {'[DRY RUN] ' if DRY_RUN else ''}"
+            f"normalize {doc.reference.path}\n"
+            f"    deliveryChannel={normalized.get('deliveryChannel')}\n"
+            f"    schedule={normalized.get('schedule')}\n"
+        )
+
+        if not DRY_RUN:
+            try:
+                doc.reference.set(normalized, merge=True)
+                migrated += 1
+            except Exception as e:
+                print(f"    ❌ ERROR: {e}\n")
+                errors += 1
+        else:
+            migrated += 1
+
+    for doc in alarm_docs:
         data = doc.to_dict() or {}
         parent = doc.reference.parent.parent
         if parent is None:
@@ -77,11 +153,7 @@ def migrate():
         src_path = doc.reference.path
         dest_path = f"users/{uid}/reminders/{reminder_id}"
 
-        # Build destination doc: copy everything, ensure deliveryChannel is set
-        new_data = {
-            **data,
-            "deliveryChannel": data.get("deliveryChannel") or ["plushie"],
-        }
+        new_data = _build_normalized_reminder_doc(data)
 
         status = data.get("status", "?")
         label = data.get("label", "(no label)")
