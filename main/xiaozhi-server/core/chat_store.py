@@ -760,90 +760,180 @@ class ChatStore:
         self.logger = logger
         backend = (os.environ.get("CHAT_STORE_BACKEND", "auto") or "auto").strip().lower()
 
-        self.store = None
-        if backend in ("supabase", "auto"):
-            supabase_store = SupabaseChatStore(logger=logger)
-            if supabase_store.is_configured():
-                self.store = supabase_store
+        sqlite_store = SQLiteChatStore(logger=logger)
+        supabase_store = SupabaseChatStore(logger=logger)
+        supabase_ready = supabase_store.is_configured()
+
+        self.primary_store = sqlite_store
+        self.replica_stores = []
+        self.memory_store = None
+
+        if backend == "dual":
+            if supabase_ready:
+                self.primary_store = supabase_store
+                self.replica_stores = [sqlite_store]
+                self.memory_store = supabase_store
+                if self.logger:
+                    self.logger.info("[ChatStore] backend=dual primary=supabase replica=sqlite")
+            else:
+                if self.logger:
+                    self.logger.warning(
+                        "[ChatStore] CHAT_STORE_BACKEND=dual but SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY missing, falling back to sqlite only"
+                    )
+                self.primary_store = sqlite_store
+                self.memory_store = sqlite_store
+        elif backend in ("supabase", "auto"):
+            if supabase_ready:
+                self.primary_store = supabase_store
+                self.memory_store = supabase_store
             else:
                 if self.logger and backend == "supabase":
                     self.logger.warning(
                         "[ChatStore] CHAT_STORE_BACKEND=supabase but SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY missing, falling back to sqlite"
                     )
-
-        if self.store is None:
-            self.store = SQLiteChatStore(logger=logger)
+                self.primary_store = sqlite_store
+                self.memory_store = sqlite_store
+        else:
+            self.primary_store = sqlite_store
+            self.memory_store = sqlite_store
 
     def get_or_create_user(self, user_id: str, name: str, device_id: str = ""):
         try:
-            self.store.get_or_create_user(user_id=user_id, name=name, device_id=device_id)
+            self.primary_store.get_or_create_user(user_id=user_id, name=name, device_id=device_id)
+            for replica_store in self.replica_stores:
+                try:
+                    replica_store.get_or_create_user(
+                        user_id=user_id,
+                        name=name,
+                        device_id=device_id,
+                    )
+                except Exception as replica_error:
+                    if self.logger:
+                        self.logger.warning(
+                            f"[ChatStore] replica get_or_create_user failed: {replica_error}"
+                        )
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ChatStore] get_or_create_user failed: {e}")
 
     def create_session(self, *, session_id, user_id, user_name, device_id):
         try:
-            self.store.create_session(
+            self.primary_store.create_session(
                 session_id=session_id,
                 user_id=user_id,
                 user_name=user_name,
                 device_id=device_id,
             )
+            for replica_store in self.replica_stores:
+                try:
+                    replica_store.create_session(
+                        session_id=session_id,
+                        user_id=user_id,
+                        user_name=user_name,
+                        device_id=device_id,
+                    )
+                except Exception as replica_error:
+                    if self.logger:
+                        self.logger.warning(
+                            f"[ChatStore] replica create_session failed: {replica_error}"
+                        )
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ChatStore] create_session failed: {e}")
 
     def insert_turn(self, session_id, turn_index, speaker, text):
         try:
-            self.store.insert_turn(
+            self.primary_store.insert_turn(
                 session_id=session_id,
                 turn_index=turn_index,
                 speaker=speaker,
                 text=text,
             )
+            for replica_store in self.replica_stores:
+                try:
+                    replica_store.insert_turn(
+                        session_id=session_id,
+                        turn_index=turn_index,
+                        speaker=speaker,
+                        text=text,
+                    )
+                except Exception as replica_error:
+                    if self.logger:
+                        self.logger.warning(
+                            f"[ChatStore] replica insert_turn failed: {replica_error}"
+                        )
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ChatStore] insert_turn failed: {e}")
 
     def end_session(self, session_id):
         try:
-            self.store.end_session(session_id=session_id)
+            self.primary_store.end_session(session_id=session_id)
+            for replica_store in self.replica_stores:
+                try:
+                    replica_store.end_session(session_id=session_id)
+                except Exception as replica_error:
+                    if self.logger:
+                        self.logger.warning(
+                            f"[ChatStore] replica end_session failed: {replica_error}"
+                        )
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ChatStore] end_session failed: {e}")
 
     def delete_session(self, session_id):
         try:
-            self.store.delete_session(session_id=session_id)
+            self.primary_store.delete_session(session_id=session_id)
+            for replica_store in self.replica_stores:
+                try:
+                    replica_store.delete_session(session_id=session_id)
+                except Exception as replica_error:
+                    if self.logger:
+                        self.logger.warning(
+                            f"[ChatStore] replica delete_session failed: {replica_error}"
+                        )
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ChatStore] delete_session failed: {e}")
 
     def update_session_conversation_id(self, session_id: str, conversation_id: str):
         try:
-            self.store.update_session_conversation_id(
+            self.primary_store.update_session_conversation_id(
                 session_id=session_id,
                 conversation_id=conversation_id,
             )
+            for replica_store in self.replica_stores:
+                try:
+                    replica_store.update_session_conversation_id(
+                        session_id=session_id,
+                        conversation_id=conversation_id,
+                    )
+                except Exception as replica_error:
+                    if self.logger:
+                        self.logger.warning(
+                            f"[ChatStore] replica update_session_conversation_id failed: {replica_error}"
+                        )
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ChatStore] update_session_conversation_id failed: {e}")
 
     def ensure_memory_profile_identity(self, user_id: str, device_id: str = ""):
         try:
-            if hasattr(self.store, "ensure_memory_profile_identity"):
-                self.store.ensure_memory_profile_identity(user_id=user_id, device_id=device_id)
+            if hasattr(self.memory_store, "ensure_memory_profile_identity"):
+                self.memory_store.ensure_memory_profile_identity(
+                    user_id=user_id,
+                    device_id=device_id,
+                )
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ChatStore] ensure_memory_profile_identity failed: {e}")
 
     def get_system_memory_block(self, user_id: str) -> str:
         try:
-            if hasattr(self.store, "get_system_memory_block"):
-                result = self.store.get_system_memory_block(user_id=user_id)
+            if hasattr(self.memory_store, "get_system_memory_block"):
+                result = self.memory_store.get_system_memory_block(user_id=user_id)
                 return result if isinstance(result, str) else ""
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ChatStore] get_system_memory_block failed: {e}")
         return ""
-
