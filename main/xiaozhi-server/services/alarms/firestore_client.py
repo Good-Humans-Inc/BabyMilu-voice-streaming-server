@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -17,6 +18,7 @@ TAG = __name__
 logger = setup_logging()
 
 _REPEAT_ALIASES = {
+    "daily": models.AlarmRepeat.WEEKLY,
     "weekly": models.AlarmRepeat.WEEKLY,
     "none": models.AlarmRepeat.NONE,
     "once": models.AlarmRepeat.NONE,
@@ -52,9 +54,10 @@ def fetch_due_alarms(
     now: datetime,
     lookahead: timedelta,
     client: Optional[firestore.Client] = None,
-    ) -> List[models.AlarmDoc]:
+) -> List[models.AlarmDoc]:
     client = client or _build_client()
     user_cache: Dict[str, Dict[str, Any]] = {}
+    device_cache: Dict[str, List[str]] = {}
     upper_bound = now + lookahead
     upper_bound_str = _format_datetime(upper_bound)
     window_start = _format_datetime(now)
@@ -93,12 +96,7 @@ def fetch_due_alarms(
             )
             continue
         try:
-            repeat = _parse_repeat(schedule_payload["repeat"])
-            schedule = models.AlarmSchedule(
-                repeat=repeat,
-                time_local=schedule_payload["timeLocal"],
-                days=schedule_payload.get("days") or [],
-            )
+            schedule = _build_schedule(schedule_payload)
         except (KeyError, ValueError) as exc:
             logger.bind(tag=TAG).warning(
                 (
@@ -109,27 +107,27 @@ def fetch_due_alarms(
             continue
 
         targets_payload = data.get("targets")
-        if not isinstance(targets_payload, list) or not targets_payload:
-            logger.bind(tag=TAG).warning(
-                (
-                    f"Skipping alarm {doc.reference.path} (user={user_id}): "
-                    f"targets payload missing or empty ({targets_payload})"
-                )
-            )
-            continue
         try:
-            targets = [
-                models.AlarmTarget(
-                    device_id=_normalize_device_id(target["deviceId"]),
-                    mode=target["mode"],
-                )
-                for target in targets_payload
-            ]
+            targets = _build_alarm_targets(
+                data=data,
+                user_id=user_id,
+                targets_payload=targets_payload,
+                client=client,
+                device_cache=device_cache,
+            )
         except (KeyError, ValueError) as exc:
             logger.bind(tag=TAG).warning(
                 (
                     f"Skipping alarm {doc.reference.path} (user={user_id}) "
                     f"due to malformed target payload: {targets_payload} ({exc})"
+                )
+            )
+            continue
+        if not targets:
+            logger.bind(tag=TAG).warning(
+                (
+                    f"Skipping alarm {doc.reference.path} (user={user_id}): "
+                    f"targets payload missing or empty ({targets_payload})"
                 )
             )
             continue
@@ -216,7 +214,11 @@ def _format_datetime(value: datetime) -> str:
 def _normalize_device_id(value) -> str:
     if not isinstance(value, str):
         raise ValueError("Alarm target deviceId must be a string")
-    return normalize_mac(value)
+    normalized = normalize_mac(value)
+    compact = normalized.replace(":", "")
+    if not re.fullmatch(r"[0-9a-f]{12}", compact):
+        raise ValueError(f"Alarm target deviceId is not a valid MAC address: {value}")
+    return normalized
 
 
 def _parse_repeat(raw_repeat) -> models.AlarmRepeat:
@@ -224,6 +226,71 @@ def _parse_repeat(raw_repeat) -> models.AlarmRepeat:
     if key in _REPEAT_ALIASES:
         return _REPEAT_ALIASES[key]
     raise ValueError(f"Unsupported repeat value: {raw_repeat}")
+
+
+def _build_schedule(schedule_payload: Dict[str, Any]) -> models.AlarmSchedule:
+    repeat_raw = schedule_payload["repeat"]
+    repeat = _parse_repeat(repeat_raw)
+    days = schedule_payload.get("days") or []
+    if str(repeat_raw).strip().lower() == "daily" and not days:
+        days = list(models.DAY_NAMES)
+    return models.AlarmSchedule(
+        repeat=repeat,
+        time_local=schedule_payload["timeLocal"],
+        days=days,
+    )
+
+
+def _build_alarm_targets(
+    *,
+    data: Dict[str, Any],
+    user_id: str,
+    targets_payload: Any,
+    client: firestore.Client,
+    device_cache: Dict[str, List[str]],
+) -> List[models.AlarmTarget]:
+    if isinstance(targets_payload, list) and targets_payload:
+        return [
+            models.AlarmTarget(
+                device_id=_normalize_device_id(target["deviceId"]),
+                mode=target.get("mode") or "morning_alarm",
+            )
+            for target in targets_payload
+        ]
+
+    # Legacy alarm docs under users/{uid}/alarms/morning did not store targets.
+    # Fallback to all devices currently owned by the user so older alarms still fire.
+    legacy_device_ids = _get_user_device_ids(user_id, client=client, cache=device_cache)
+    return [
+        models.AlarmTarget(device_id=device_id, mode="morning_alarm")
+        for device_id in legacy_device_ids
+        if device_id
+    ]
+
+
+def _get_user_device_ids(
+    user_id: str,
+    *,
+    client: firestore.Client,
+    cache: Dict[str, List[str]],
+) -> List[str]:
+    if user_id in cache:
+        return cache[user_id]
+    query = client.collection("devices").where(
+        filter=FieldFilter("ownerPhone", "==", user_id)
+    )
+    device_ids: List[str] = []
+    for snapshot in query.stream():
+        payload = snapshot.to_dict() or {}
+        raw_device_id = payload.get("deviceId") or snapshot.id
+        if not isinstance(raw_device_id, str) or not raw_device_id.strip():
+            continue
+        try:
+            device_ids.append(_normalize_device_id(raw_device_id))
+        except ValueError:
+            continue
+    cache[user_id] = device_ids
+    return device_ids
 
 
 def mark_alarm_processed(
@@ -481,4 +548,3 @@ def mark_one_time_alarm_complete(
     logger.bind(tag=TAG).info(
         f"One-time alarm {alarm.alarm_id} (user={alarm.user_id}) marked complete/off"
     )
-
