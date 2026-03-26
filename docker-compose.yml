@@ -28,8 +28,9 @@ services:
     environment:
       GOOGLE_APPLICATION_CREDENTIALS: /opt/secrets/gcp/sa.json
       GOOGLE_CLOUD_PROJECT: composed-augury-469200-g6
+      MQTT_ENDPOINT: 35.188.112.96
       MQTT_URL: mqtt://mqtt:1883
-      SERVER_EXTERNAL_IP: 136.111.52.199
+      SERVER_EXTERNAL_IP: 35.188.112.96
       OTA_MANIFEST_URL: https://storage.googleapis.com/milu-public/OTA_MIAO/ota_manifest.json
       PYTHONUNBUFFERED: "1"
       TZ: America/Los_Angeles
@@ -66,4 +67,3 @@ services:
 networks:
   default:
     name: current_default
-
