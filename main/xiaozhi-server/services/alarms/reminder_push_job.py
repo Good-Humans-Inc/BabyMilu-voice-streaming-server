@@ -55,7 +55,7 @@ This is a reminder notification that should feel natural, caring, and in-charact
 3. **Reminder Context:** Naturally incorporate the reminder task (`{reminderLabel}`) and acknowledge the time if relevant.
 4. **Style:** Write as a caring text message (10–20 words). Sound natural, not robotic or overly formal.
 5. **Tone:** Be supportive and gentle. This is a helpful reminder, not a command.
-6. **Constraints:** No hashtags, no emojis. Use first-person POV with pronouns `{characterPronouns}`. DON'T mention that this is an AI-generated message. It should feel like it came directly from the character. It should not have exact time in the message, just a natural reminder related to the time (e.g. "Don't forget about your meeting later!" or "It's almost time for your appointment!").
+6. **Constraints:** No hashtags, no emojis. Use first-person POV. DON'T mention that this is an AI-generated message. It should feel like it came directly from the character. It should not have exact time in the message, just a natural reminder related to the time (e.g. "Don't forget about your meeting later!" or "It's almost time for your appointment!").
 **Output Format:**
 Return ONLY the reminder message text as a plain string. No JSON, no markdown code blocks, no introductory text.
 
