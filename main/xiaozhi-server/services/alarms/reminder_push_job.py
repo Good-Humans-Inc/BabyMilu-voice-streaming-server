@@ -45,7 +45,6 @@ This is a reminder notification that should feel natural, caring, and in-charact
 - Character personality: `{characterBio}`
 - Character relationship to user: `{characterRelationship}`
 - User prefers to be called: `{characterCallMe}`
-- Character pronouns: `{characterPronouns}`
 - Reminder task: `{reminderLabel}`
 - Scheduled time: `{reminderTime}`
 
@@ -105,7 +104,6 @@ def _build_reminder_messages(payload: Dict[str, Any]) -> List[Dict[str, str]]:
         or "friend",
         characterCallMe=str(payload.get("characterCallMe", "")).strip()
         or payload.get("characterName", ""),
-        characterPronouns=str(payload.get("characterPronouns", "")).strip() or "they/them",
         reminderLabel=str(payload.get("reminderLabel", "")).strip() or "your reminder",
         reminderTime=reminder_time,
     )
@@ -123,13 +121,10 @@ def get_ai_message(
     """
     payload = {
         "userName": user_name,
-        "characterName": character_data.get("name", "BabyMilu"),
-        "characterBio": character_data.get("bio", ""),
-        "characterRelationship": character_data.get("relationship", "friend"),
-        "characterCallMe": character_data.get(
-            "callMe", character_data.get("name", "BabyMilu")
-        ),
-        "characterPronouns": character_data.get("pronouns", "they/them"),
+        "characterName": character_data.get("profile", {}).get("name", "BabyMilu") or character_data.get("name", "BabyMilu"),
+        "characterBio": character_data.get("profile", {}).get("personality", "") or character_data.get("bio", ""),
+        "characterRelationship": character_data.get("profile", {}).get("characterToUser", "friend") or character_data.get("relationship", "friend"),
+        "characterCallMe": character_data.get("profile", {}).get("nicknameCharacterCallsUser", "") or character_data.get("callMe", "") or character_data.get("name", "BabyMilu"),
         "reminderLabel": reminder_label,
         "reminderTime": reminder_time or "the scheduled time",
     }
@@ -305,7 +300,7 @@ def run_send_reminder_push_job(
                         character_data = char_snap.to_dict() or {}
                         character_cache[active_character_id] = character_data
 
-            character_name = character_data.get("name", "Milu") if character_data else "Milu"
+            character_name = character_data.get("profile", {}).get("name", "Milu") or character_data.get("name", "Milu") if character_data else "Milu"
             label = reminder_data.get("label", "Reminder")
             next_occurrence_str = reminder_data.get("nextOccurrenceUTC")
             user_name = user_data.get("name") or "there"
@@ -332,8 +327,6 @@ def run_send_reminder_push_job(
                     f"AI message failed for reminder {reminder_id}: {ai_error}"
                 )
                 ai_message = f"Hey {user_name}, reminder: {label}"
-                if reminder_time_display:
-                    ai_message += f" at {reminder_time_display}"
 
             if not execute:
                 results.append(
