@@ -67,6 +67,12 @@ def get_storage_client():
     if _STORAGE_CLIENT is not None:
         return _STORAGE_CLIENT
 
+    credential_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    # Some deployments accidentally mount this as a directory; fall back to
+    # metadata-based ADC instead of failing hard on a bad path.
+    if credential_path and os.path.isdir(credential_path):
+        os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+
     try:
         from google.cloud import storage
     except Exception as exc:
