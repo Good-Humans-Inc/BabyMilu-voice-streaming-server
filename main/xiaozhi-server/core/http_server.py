@@ -243,6 +243,7 @@ class SimpleHttpServer:
                     web.post("/marketing/say", self.handle_marketing_say),
                     web.post("/marketing/script", self.handle_marketing_script),
                     web.post("/marketing/animation-device-bin", self.handle_marketing_animation_device_bin),
+                    web.get("/marketing/character-bin-status", self.handle_marketing_character_bin_status),
                     web.get("/marketing/characters", self.handle_marketing_list_characters),
                     web.post("/marketing/characters", self.handle_marketing_save_character),
                     web.post("/marketing/character-bin-upload", self.handle_marketing_upload_character_bin),
@@ -399,6 +400,62 @@ class SimpleHttpServer:
                 os.remove(file_path)
             except Exception:
                 pass
+
+    async def handle_marketing_character_bin_status(self, request: web.Request) -> web.Response:
+        folder_url = (request.query.get("folderUrl") or "").strip()
+        folder = (request.query.get("characterFolder") or "").strip()
+        bucket = (request.query.get("bucket") or DEFAULT_MARKETING_BUCKET).strip()
+        prefix = (request.query.get("prefix") or DEFAULT_MARKETING_PREFIX).strip().strip("/")
+
+        payload = {
+            "folderUrl": folder_url,
+            "characterFolder": folder,
+            "bucket": bucket,
+            "prefix": prefix,
+            "filename": "test.bin",
+        }
+        try:
+            test_bin_url = build_marketing_device_bin_url(payload)
+            normal_gif_url = build_marketing_device_bin_url({**payload, "filename": "normal.gif"})
+        except ValueError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+        test_bin_exists, test_bin_detail = await verify_public_download_url(test_bin_url)
+        normal_gif_exists, normal_gif_detail = await verify_public_download_url(normal_gif_url)
+
+        folder_exists = None
+        folder_error = None
+        clean_folder = ""
+        if folder and not folder_url:
+            try:
+                clean_folder = normalize_folder_name(folder)
+                folder_exists = clean_folder in list_marketing_character_folders(bucket, prefix)
+            except Exception as exc:
+                folder_error = str(exc)
+
+        warning = ""
+        if folder_exists is False:
+            warning = f'No character folder found for "{clean_folder}" in gs://{bucket}/{prefix}/'
+        elif not test_bin_exists:
+            warning = f'No test.bin found for "{folder or clean_folder}". Please upload one first.'
+
+        can_publish = bool(test_bin_exists and (folder_exists is not False))
+        return web.json_response(
+            {
+                "ok": True,
+                "characterFolder": folder or clean_folder,
+                "testBinUrl": test_bin_url,
+                "normalGifUrl": normal_gif_url,
+                "testBinExists": bool(test_bin_exists),
+                "normalGifExists": bool(normal_gif_exists),
+                "testBinDetail": test_bin_detail,
+                "normalGifDetail": normal_gif_detail,
+                "folderExists": folder_exists,
+                "folderError": folder_error,
+                "warning": warning,
+                "canPublish": can_publish,
+            }
+        )
 
     async def handle_marketing_animation_device_bin(self, request: web.Request) -> web.Response:
         """

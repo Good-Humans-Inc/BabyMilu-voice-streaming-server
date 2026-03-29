@@ -260,6 +260,22 @@
       color: var(--muted);
     }
 
+    .preview-shell {
+      border: 1px dashed rgba(148, 163, 184, 0.5);
+      border-radius: 14px;
+      padding: 10px;
+      background: #f8fafc;
+    }
+
+    .preview-img {
+      width: 100%;
+      max-height: 220px;
+      object-fit: contain;
+      border-radius: 10px;
+      background: #fff;
+      border: 1px solid rgba(148, 163, 184, 0.35);
+    }
+
     @media (max-width: 860px) {
       .col-3,
       .col-4,
@@ -340,7 +356,7 @@
       </div>
     </div>
 
-    <div class="card">
+    <div class="card" id="characterRegistryCard">
       <div class="card-head">
         <div>
           <h2>Character Registry</h2>
@@ -377,10 +393,24 @@
         </div>
         <button id="updateAnimationBtn" type="button">Send test.bin to Device</button>
       </div>
+      <div class="row">
+        <div class="col-8">
+          <label for="sourceBinUrl">Source `test.bin` URL (fixed)</label>
+          <input id="sourceBinUrl" readonly>
+        </div>
+        <div class="col-4">
+          <label>Character Look Preview</label>
+          <div class="preview-shell">
+            <img id="characterPreview" class="preview-img" alt="Character normal.gif preview">
+            <div id="previewCaption" class="field-help"></div>
+          </div>
+        </div>
+      </div>
+      <div id="binCheckStatus" class="status info"></div>
       <div id="animationStatus" class="status info"></div>
     </div>
 
-    <div class="card">
+    <div class="card" id="scriptCard">
       <div class="card-head">
         <div>
           <h2>Script Steps</h2>
@@ -512,6 +542,48 @@
       return buildDeviceBinUrl(currentCharacterFolder());
     }
 
+    function computeNormalGifUrl() {
+      const folderUrl = el("deviceBinFolderUrl").value.trim().replace(/\/+$/, "");
+      if (folderUrl) {
+        return `${folderUrl}/normal.gif`;
+      }
+      const folder = String(currentCharacterFolder() || "").trim().replace(/^\/+|\/+$/g, "");
+      if (!folder) return "";
+      const parts = [];
+      if (config.defaultPrefix) {
+        parts.push(...config.defaultPrefix.split("/").filter(Boolean).map(encodeURIComponent));
+      }
+      parts.push(...folder.split("/").filter(Boolean).map(encodeURIComponent));
+      parts.push("normal.gif");
+      return `https://storage.googleapis.com/${encodeURIComponent(config.defaultBucket || "milu-public")}/${parts.join("/")}`;
+    }
+
+    async function refreshCharacterBinStatus() {
+      const folderUrl = el("deviceBinFolderUrl").value.trim();
+      const folder = currentCharacterFolder();
+      const query = new URLSearchParams({
+        characterFolder: folder || "",
+        folderUrl: folderUrl || "",
+      });
+      const response = await fetch(`/marketing/character-bin-status?${query.toString()}`);
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || `HTTP ${response.status}`);
+      }
+      el("sourceBinUrl").value = data.testBinUrl || "";
+      if (data.warning) {
+        showStatus(el("binCheckStatus"), "err", data.warning);
+      } else {
+        showStatus(
+          el("binCheckStatus"),
+          "ok",
+          `test.bin: ${data.testBinDetail || "-"}\nnormal.gif: ${data.normalGifDetail || "-"}`
+        );
+      }
+      el("updateAnimationBtn").disabled = !data.canPublish;
+      return data;
+    }
+
     function syncCharacterFields() {
       const character = currentCharacter();
       const isCustom = !!character && character.value === "custom";
@@ -528,19 +600,24 @@
         el("resolvedVoice").value = currentVoiceId();
       }
 
-      if (!el("deviceBinFolderUrl").value.trim()) {
-        const folder = currentCharacterFolder();
-        if (folder) {
-          const parts = [];
-          if (config.defaultPrefix) parts.push(...config.defaultPrefix.split("/").filter(Boolean).map(encodeURIComponent));
-          parts.push(...folder.split("/").filter(Boolean).map(encodeURIComponent));
-          el("deviceBinFolderUrl").value =
-            `https://storage.googleapis.com/${encodeURIComponent(config.defaultBucket || "milu-public")}/${parts.join("/")}`;
-        }
+      const folder = currentCharacterFolder();
+      if (folder) {
+        const parts = [];
+        if (config.defaultPrefix) parts.push(...config.defaultPrefix.split("/").filter(Boolean).map(encodeURIComponent));
+        parts.push(...folder.split("/").filter(Boolean).map(encodeURIComponent));
+        el("deviceBinFolderUrl").value =
+          `https://storage.googleapis.com/${encodeURIComponent(config.defaultBucket || "milu-public")}/${parts.join("/")}`;
       }
       el("resolvedBinUrl").value = computeResolvedBinUrl();
+      const previewUrl = computeNormalGifUrl();
+      el("characterPreview").src = previewUrl;
+      el("previewCaption").textContent = previewUrl ? `Preview: ${previewUrl}` : "";
       el("manageCharacterFolder").value = currentCharacterFolder();
       el("manageVoiceId").value = currentVoiceId();
+      refreshCharacterBinStatus().catch((error) => {
+        showStatus(el("binCheckStatus"), "err", error.message || String(error));
+        el("updateAnimationBtn").disabled = true;
+      });
     }
 
     function refreshStepTitles() {
@@ -679,9 +756,23 @@
     });
     el("animationFolder").addEventListener("input", () => {
       el("resolvedBinUrl").value = computeResolvedBinUrl();
+      const previewUrl = computeNormalGifUrl();
+      el("characterPreview").src = previewUrl;
+      el("previewCaption").textContent = previewUrl ? `Preview: ${previewUrl}` : "";
+      refreshCharacterBinStatus().catch((error) => {
+        showStatus(el("binCheckStatus"), "err", error.message || String(error));
+        el("updateAnimationBtn").disabled = true;
+      });
     });
     el("deviceBinFolderUrl").addEventListener("input", () => {
       el("resolvedBinUrl").value = computeResolvedBinUrl();
+      const previewUrl = computeNormalGifUrl();
+      el("characterPreview").src = previewUrl;
+      el("previewCaption").textContent = previewUrl ? `Preview: ${previewUrl}` : "";
+      refreshCharacterBinStatus().catch((error) => {
+        showStatus(el("binCheckStatus"), "err", error.message || String(error));
+        el("updateAnimationBtn").disabled = true;
+      });
     });
 
     el("addStepBtn").addEventListener("click", () => addStep({ emotion: "normal", gain: 1.0, durationSec: 0.3 }));
@@ -758,6 +849,10 @@
         el("animationFolder").value = folder;
         el("deviceBinFolderUrl").value = result.url.replace(/\/[^/]+$/, "");
         el("resolvedBinUrl").value = result.url;
+        const previewUrl = computeNormalGifUrl();
+        el("characterPreview").src = previewUrl;
+        el("previewCaption").textContent = previewUrl ? `Preview: ${previewUrl}` : "";
+        await refreshCharacterBinStatus();
         showStatus(el("characterStatus"), "ok", `Uploaded successfully.\n${result.url}`);
       } catch (error) {
         showStatus(el("characterStatus"), "err", error.message || String(error));
@@ -850,6 +945,14 @@
     });
 
     (async () => {
+      const registryCard = el("characterRegistryCard");
+      const scriptCard = el("scriptCard");
+      if (registryCard && scriptCard && scriptCard.parentElement) {
+        scriptCard.parentElement.appendChild(registryCard);
+      }
+      el("characterPreview").addEventListener("error", () => {
+        el("previewCaption").textContent = `No normal.gif preview found for ${currentCharacterFolder() || "this folder"}.`;
+      });
       try {
         await fetchCharactersFromServer();
       } catch (_) {
