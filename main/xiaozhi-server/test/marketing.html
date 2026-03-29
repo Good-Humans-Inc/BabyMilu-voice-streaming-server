@@ -3,272 +3,863 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Marketing Say Tool</title>
+  <title>Marketing Script Tool</title>
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; margin: 24px; color: #222; }
-    h1 { font-size: 20px; margin-bottom: 16px; }
-    .card { max-width: 720px; border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
-    .row { display: flex; gap: 12px; margin-bottom: 12px; }
-    .row > .col { flex: 1; }
-    label { display: block; font-size: 12px; color: #555; margin-bottom: 6px; }
-    input, textarea, select { width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; outline: none; }
-    textarea { min-height: 120px; resize: vertical; }
-    input:focus, textarea:focus, select:focus { border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,0.15); }
-    .actions { display: flex; gap: 12px; align-items: center; }
-    button { background: #6366f1; color: #fff; border: 0; border-radius: 10px; padding: 10px 16px; font-size: 14px; cursor: pointer; }
-    button:disabled { background: #c7c9ff; cursor: not-allowed; }
-    .muted { color: #6b7280; font-size: 12px; }
-    .status { margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-size: 13px; }
-    .status.ok { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
-    .status.err { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
-    .status.info { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
-    .help { margin-top: 16px; font-size: 12px; color: #4b5563; }
-    .small { font-size: 12px; }
+    :root {
+      --page: #f5f7fb;
+      --card: #ffffff;
+      --line: #d8deea;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --primary: #1d4ed8;
+      --primary-soft: rgba(29, 78, 216, 0.12);
+      --success: #059669;
+      --success-soft: rgba(5, 150, 105, 0.12);
+      --danger: #dc2626;
+      --danger-soft: rgba(220, 38, 38, 0.12);
+      --shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Avenir Next", "Segoe UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(29, 78, 216, 0.10), transparent 28%),
+        radial-gradient(circle at top right, rgba(5, 150, 105, 0.10), transparent 24%),
+        linear-gradient(180deg, #fbfcff 0%, var(--page) 100%);
+    }
+
+    .shell {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 28px 20px 40px;
+    }
+
+    h1 {
+      margin: 0 0 6px;
+      font-size: 30px;
+      letter-spacing: -0.02em;
+    }
+
+    .lead {
+      margin: 0 0 22px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 22px;
+      padding: 18px;
+      box-shadow: var(--shadow);
+      margin-bottom: 18px;
+    }
+
+    .card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .card-head h2 {
+      margin: 0;
+      font-size: 18px;
+    }
+
+    .muted {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .col-3 { grid-column: span 3; }
+    .col-4 { grid-column: span 4; }
+    .col-6 { grid-column: span 6; }
+    .col-8 { grid-column: span 8; }
+    .col-12 { grid-column: span 12; }
+
+    label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #425466;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    input,
+    textarea,
+    select {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 11px 13px;
+      font: inherit;
+      color: var(--text);
+      background: #fff;
+      outline: none;
+      transition: border-color 120ms ease, box-shadow 120ms ease, opacity 120ms ease;
+    }
+
+    textarea {
+      min-height: 118px;
+      resize: vertical;
+    }
+
+    input:focus,
+    textarea:focus,
+    select:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 4px var(--primary-soft);
+    }
+
+    input[readonly] {
+      background: #f8fafc;
+      color: #475569;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+
+    button {
+      appearance: none;
+      border: 0;
+      border-radius: 14px;
+      padding: 11px 16px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      color: #fff;
+      background: var(--primary);
+      transition: transform 120ms ease, opacity 120ms ease;
+    }
+
+    button.secondary {
+      color: var(--primary);
+      background: var(--primary-soft);
+    }
+
+    button.success {
+      background: var(--success);
+    }
+
+    button.danger {
+      background: var(--danger-soft);
+      color: var(--danger);
+    }
+
+    button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .status {
+      display: none;
+      white-space: pre-wrap;
+      margin-top: 12px;
+      border-radius: 14px;
+      padding: 12px 14px;
+      font-size: 13px;
+      border: 1px solid transparent;
+    }
+
+    .status.info {
+      color: #1d4ed8;
+      background: #eff6ff;
+      border-color: #bfdbfe;
+    }
+
+    .status.ok {
+      color: #065f46;
+      background: #ecfdf5;
+      border-color: #a7f3d0;
+    }
+
+    .status.err {
+      color: #991b1b;
+      background: #fef2f2;
+      border-color: #fecaca;
+    }
+
+    .pill-note {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 11px;
+      border-radius: 999px;
+      background: #eff6ff;
+      color: var(--primary);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .step-card {
+      border: 1px solid rgba(148, 163, 184, 0.28);
+      border-radius: 18px;
+      padding: 14px;
+      background: linear-gradient(180deg, rgba(248, 250, 252, 0.9), #fff);
+      margin-bottom: 12px;
+    }
+
+    .step-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .step-title {
+      font-size: 16px;
+      font-weight: 700;
+    }
+
+    .checkbox {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      color: #334155;
+    }
+
+    .checkbox input {
+      width: auto;
+      margin: 0;
+      padding: 0;
+      border-radius: 6px;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    .field-help {
+      margin-top: 6px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    @media (max-width: 860px) {
+      .col-3,
+      .col-4,
+      .col-6,
+      .col-8 {
+        grid-column: span 12;
+      }
+
+      .card-head,
+      .step-head {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+    }
   </style>
 </head>
 <body>
-  <h1>Marketing Say Tool</h1>
-  <div class="card">
-    <div class="row">
-      <div class="col">
-        <label>Device MAC (e.g. FC:01:2C:DA:19:30)</label>
-        <input id="deviceId" placeholder="A4_CF_12_34_56_78">
+  <div class="shell">
+    <h1>Marketing Script Tool</h1>
+    <p class="lead">Script mode is now the default. A one-line delivery is just a single step, and animation-only beats can live in the same sequence.</p>
+
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2>Device + Character</h2>
+          <div class="muted">Select the UGC character once and reuse it for both voice playback and animation updates.</div>
+        </div>
+        <div class="pill-note">Script-first workflow</div>
       </div>
-      <div class="col">
-        <label>Emotion (optional)</label>
-        <input id="emotion" placeholder="happy">
+
+      <div class="row">
+        <div class="col-4">
+          <label for="deviceId">Device MAC</label>
+          <input id="deviceId" placeholder="A4_CF_12_34_56_78">
+        </div>
+        <div class="col-4">
+          <label for="character">Character</label>
+          <select id="character"></select>
+        </div>
+        <div class="col-4">
+          <label for="resolvedVoice">Resolved ElevenLabs Voice ID</label>
+          <input id="resolvedVoice" readonly>
+        </div>
       </div>
-      <div class="col">
-        <label>ElevenLabs Voice ID (optional)</label>
-        <input id="voice" placeholder="g6uQR0Q9ieSD9KFclcZB">
+
+      <div id="customVoiceRow" class="row hidden">
+        <div class="col-6">
+          <label for="customVoiceId">Custom ElevenLabs Voice ID</label>
+          <input id="customVoiceId" placeholder="Enter a custom ElevenLabs voice ID">
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="col-4">
+          <label for="broker">MQTT Broker</label>
+          <input id="broker" placeholder="mqtt://&lt;server&gt;:1883">
+        </div>
+        <div class="col-4">
+          <label for="baseUrl">Base URL For TTS Files</label>
+          <input id="baseUrl" placeholder="Defaults to this page origin">
+        </div>
+        <div class="col-4">
+          <label for="animationFolder">Character Bin Folder</label>
+          <input id="animationFolder" placeholder="lads-sylus">
+          <div class="field-help">Use the exact GCS folder name, for example `lads-sylus`.</div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="col-8">
+          <label for="deviceBinFolderUrl">Device Bin Folder URL (editable)</label>
+          <input id="deviceBinFolderUrl" placeholder="https://storage.googleapis.com/milu-public/marketing-say-tool/lads-sylus">
+        </div>
+        <div class="col-4">
+          <label for="resolvedBinUrl">Resolved `test.bin` URL</label>
+          <input id="resolvedBinUrl" readonly>
+        </div>
       </div>
     </div>
-    <div class="row">
-      <div class="col">
-        <label>Gain</label>
-        <input id="gain" type="number" step="0.1" min="0" value="1.0">
+
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2>Character Registry</h2>
+          <div class="muted">Save character folder + ElevenLabs voiceId locally on this server, and upload `test.bin` into that character bucket folder.</div>
+        </div>
       </div>
-      <div class="col">
-        <label>MQTT Broker (optional)</label>
-        <input id="broker" placeholder="mqtt://<server>:1883">
+      <div class="row">
+        <div class="col-4">
+          <label for="manageCharacterFolder">Character Bucket Folder Name</label>
+          <input id="manageCharacterFolder" placeholder="lads-sylus">
+        </div>
+        <div class="col-4">
+          <label for="manageVoiceId">ElevenLabs Voice ID</label>
+          <input id="manageVoiceId" placeholder="g6uQR0Q9ieSD9KFclcZB">
+        </div>
+        <div class="col-4">
+          <label for="uploadBinFile">Upload `test.bin`</label>
+          <input id="uploadBinFile" type="file" accept=".bin,application/octet-stream">
+        </div>
       </div>
-    </div>
-    <div class="row">
-      <div class="col">
-        <label>Base URL (device can HTTP GET; defaults to this server origin)</label>
-        <input id="baseUrl" placeholder="">
+      <div class="actions">
+        <button id="refreshCharactersBtn" type="button" class="secondary">Refresh Character List</button>
+        <button id="saveCharacterBtn" type="button">Save Character</button>
+        <button id="uploadBinBtn" type="button" class="secondary">Upload Bin To Bucket</button>
       </div>
+      <div id="characterStatus" class="status info"></div>
     </div>
-    <div class="row">
-      <div class="col">
-        <label>Text to say</label>
-        <textarea id="text" placeholder="Enter the sentence to speak on device..."></textarea>
+
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2>Animation Device Bin</h2>
+          <div class="muted">Publishes an MQTT `auto_update` command so the device fetches the selected character `test.bin`.</div>
+        </div>
+        <button id="updateAnimationBtn" type="button">Send test.bin to Device</button>
       </div>
+      <div id="animationStatus" class="status info"></div>
     </div>
-    <div class="actions">
-      <button id="sendBtn">Send to Device</button>
-      <span class="muted">This synthesizes TTS, hosts it under /tts, sets emotion, then plays it via MQTT.</span>
-    </div>
-    <div id="status" class="status info" style="display:none;"></div>
-    <div class="help">
-      - Device must be online and subscribed to downlink topic.<br>
-      - If broker is omitted, server uses MQTT_URL env or defaults to localhost:1883.<br>
-      - If baseUrl is empty, we use window.location.origin.
+
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2>Script Steps</h2>
+          <div class="muted">Use voiced and animation-only steps in the same script. Remove any step you do not need.</div>
+        </div>
+      </div>
+
+      <div id="steps"></div>
+
+      <div class="row">
+        <div class="col-12">
+          <label class="checkbox">
+            <input id="combine" type="checkbox" checked>
+            Combine voiced steps into one downloadable audio file
+          </label>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button id="addStepBtn" type="button" class="secondary">Add Step</button>
+        <button id="runScriptBtn" type="button" class="success">Run Script</button>
+        <span class="muted">Animation-only steps use the duration field as the hold time in seconds.</span>
+      </div>
+
+      <div id="scriptStatus" class="status info"></div>
     </div>
   </div>
-  <div class="card" style="margin-top:16px;">
-    <h2 class="small" style="margin:0 0 12px 0;">Script (multi-steps)</h2>
-    <div id="steps"></div>
-    <div class="actions" style="margin-top:8px;">
-      <button id="addStepBtn" type="button">Add Step</button>
-      <button id="runScriptBtn" type="button" style="background:#10b981">Run Script</button>
-      <span class="muted">Each step: Text (required), Emotion (optional), Gain, Pause after (ms).</span>
-    </div>
-    <div class="row" style="align-items:center;margin-top:6px;">
-      <div class="col" style="flex:0 0 auto;">
-        <label class="small" style="display:flex;gap:8px;align-items:center;">
-          <input id="combine" type="checkbox" checked>
-          Combine into single audio
-        </label>
-      </div>
-    </div>
-    <div id="scriptStatus" class="status info" style="display:none;"></div>
-  </div>
+
+  <script src="./marketing.config.js"></script>
   <script>
+    const config = window.MARKETING_CONFIG || { defaultBucket: "milu-public", defaultPrefix: "marketing-say-tool", defaultFilename: "test.bin", emotions: [], characters: [] };
+    const state = {
+      characters: [],
+    };
     const el = id => document.getElementById(id);
-    const statusBox = el('status');
-    function showStatus(kind, msg) {
-      statusBox.className = 'status ' + (kind || 'info');
-      statusBox.textContent = msg;
-      statusBox.style.display = 'block';
+
+    function showStatus(node, kind, message) {
+      node.className = "status " + (kind || "info");
+      node.textContent = message;
+      node.style.display = "block";
     }
+
     async function postJSON(url, body) {
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok) {
-        const err = data && (data.error || data.message);
-        throw new Error(err || ('HTTP ' + resp.status));
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || data.message || ("HTTP " + response.status));
       }
       return data;
     }
-    function row(html) {
-      const wrap = document.createElement('div');
-      wrap.className = 'row';
-      wrap.innerHTML = html;
-      return wrap;
+
+    function escapeHtml(value) {
+      return String(value || "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
     }
-    function addStep(prefill={}) {
-      const steps = document.getElementById('steps');
-      const idx = steps.children.length;
-      const r = row(`
-        <div class="col">
-          <label>Step ${idx+1} - Text</label>
-          <textarea class="step-text" placeholder="Sentence...">${prefill.text||''}</textarea>
-        </div>
-        <div class="col">
-          <label>Emotion</label>
-          <input class="step-emotion" placeholder="happy" value="${prefill.emotion||''}">
-          <label class="small" style="display:flex;gap:8px;align-items:center;margin-top:8px;">
-            <input class="step-emotion-only" type="checkbox" ${prefill.emotionOnly?'checked':''}>
-            Emotion only (no audio)
-          </label>
-          <div class="row" style="gap:8px;margin:8px 0 0 0;">
-            <div class="col">
-              <label class="small">Gain</label>
-              <input class="step-gain" type="number" step="0.1" min="0" value="${prefill.gain!=null?prefill.gain:1.0}">
-            </div>
-            <div class="col">
-              <label class="small">Pause after (ms)</label>
-              <input class="step-pause" type="number" step="100" min="0" value="${prefill.pauseMs||0}">
-            </div>
-          </div>
-          <button type="button" class="small" data-action="remove" style="margin-top:6px;background:#ef4444">Remove</button>
-        </div>
-      `);
-      steps.appendChild(r);
-      r.querySelector('[data-action="remove"]').addEventListener('click', () => {
-        r.remove();
-        // re-label remaining steps
-        [...steps.children].forEach((c, i) => {
-          const lab = c.querySelector('label');
-          if (lab) lab.textContent = `Step ${i+1} - Text`;
-        });
+
+    async function fetchCharactersFromServer() {
+      const result = await fetch("/marketing/characters").then(r => r.json());
+      if (!result.ok) {
+        throw new Error(result.error || "Failed to load character list");
+      }
+      state.characters = result.characters || [];
+      return state.characters;
+    }
+
+    function populateCharacterOptions() {
+      const select = el("character");
+      select.innerHTML = state.characters
+        .map(item => `<option value="${item.value}">${item.label}</option>`)
+        .join("");
+      if (state.characters.length > 0) {
+        select.value = state.characters[0].value;
+      }
+    }
+
+    function emotionOptions(selectedValue) {
+      return config.emotions
+        .map(item => `<option value="${item.value}" ${item.value === selectedValue ? "selected" : ""}>${item.label}</option>`)
+        .join("");
+    }
+
+    function currentCharacter() {
+      return state.characters.find(item => item.value === el("character").value) || null;
+    }
+
+    function currentVoiceId() {
+      const character = currentCharacter();
+      if (!character) return "";
+      if (character.value === "custom") {
+        return el("customVoiceId").value.trim();
+      }
+      return character.voiceId || "";
+    }
+
+    function currentCharacterFolder() {
+      const manualFolder = el("animationFolder").value.trim();
+      if (manualFolder) {
+        return manualFolder;
+      }
+      const character = currentCharacter();
+      return character ? (character.animationFolder || "") : "";
+    }
+
+    function buildDeviceBinUrl(folder) {
+      const cleanFolder = String(folder || "").trim().replace(/^\/+|\/+$/g, "");
+      if (!cleanFolder) return "";
+      const parts = [];
+      if (config.defaultPrefix) {
+        parts.push(...config.defaultPrefix.split("/").filter(Boolean).map(encodeURIComponent));
+      }
+      parts.push(...cleanFolder.split("/").filter(Boolean).map(encodeURIComponent));
+      parts.push(encodeURIComponent(config.defaultFilename || "test.bin"));
+      return `https://storage.googleapis.com/${encodeURIComponent(config.defaultBucket || "milu-public")}/${parts.join("/")}`;
+    }
+
+    function computeResolvedBinUrl() {
+      const folderUrl = el("deviceBinFolderUrl").value.trim().replace(/\/+$/, "");
+      const filename = config.defaultFilename || "test.bin";
+      if (folderUrl) {
+        return `${folderUrl}/${encodeURIComponent(filename)}`;
+      }
+      return buildDeviceBinUrl(currentCharacterFolder());
+    }
+
+    function syncCharacterFields() {
+      const character = currentCharacter();
+      const isCustom = !!character && character.value === "custom";
+      el("customVoiceRow").classList.toggle("hidden", !isCustom);
+
+      if (character && !isCustom) {
+        el("resolvedVoice").value = character.voiceId || "";
+        el("animationFolder").value = character.animationFolder || "";
+      } else {
+        el("resolvedVoice").value = currentVoiceId();
+      }
+
+      if (isCustom) {
+        el("resolvedVoice").value = currentVoiceId();
+      }
+
+      if (!el("deviceBinFolderUrl").value.trim()) {
+        const folder = currentCharacterFolder();
+        if (folder) {
+          const parts = [];
+          if (config.defaultPrefix) parts.push(...config.defaultPrefix.split("/").filter(Boolean).map(encodeURIComponent));
+          parts.push(...folder.split("/").filter(Boolean).map(encodeURIComponent));
+          el("deviceBinFolderUrl").value =
+            `https://storage.googleapis.com/${encodeURIComponent(config.defaultBucket || "milu-public")}/${parts.join("/")}`;
+        }
+      }
+      el("resolvedBinUrl").value = computeResolvedBinUrl();
+      el("manageCharacterFolder").value = currentCharacterFolder();
+      el("manageVoiceId").value = currentVoiceId();
+    }
+
+    function refreshStepTitles() {
+      [...document.querySelectorAll(".step-card")].forEach((node, index) => {
+        const title = node.querySelector(".step-title");
+        if (title) {
+          title.textContent = `Step ${index + 1}`;
+        }
       });
     }
-    function showScriptStatus(kind, msg) {
-      const box = el('scriptStatus');
-      box.className = 'status ' + (kind || 'info');
-      box.textContent = msg;
-      box.style.display = 'block';
-    }
-    el('sendBtn').addEventListener('click', async () => {
-      const deviceId = el('deviceId').value.trim();
-      const text = el('text').value.trim();
-      const emotion = el('emotion').value.trim();
-      const gain = parseFloat(el('gain').value || '1.0');
-      const broker = el('broker').value.trim();
-      const baseUrl = (el('baseUrl').value || window.location.origin).trim();
-      const voice = el('voice').value.trim();
-      if (!deviceId) {
-        showStatus('err', 'Please enter Device MAC (underscored).');
-        return;
-      }
-      if (!text) {
-        showStatus('err', 'Please enter text to say.');
-        return;
-      }
-      el('sendBtn').disabled = true;
-      showStatus('info', 'Sending...');
-      try {
-        const body = { deviceId, text, gain, baseUrl };
-        if (emotion) body.emotion = emotion;
-        if (broker) body.broker = broker;
-        if (voice) body.voice = voice;
-        const res = await postJSON('/marketing/say', body);
-        if (res.ok) {
-          const sent = res.sent || {};
-          const detail = `TTS URL: ${res.ttsUrl || '-'} | Emotion sent: ${!!sent.llm} | Play sent: ${!!sent.play_url}`;
-          showStatus('ok', 'Done. ' + detail);
-        } else {
-          showStatus('err', 'Request failed: ' + JSON.stringify(res));
-        }
-      } catch (e) {
-        showStatus('err', 'Error: ' + (e?.message || e));
-      } finally {
-        el('sendBtn').disabled = false;
-      }
-    });
-    el('addStepBtn').addEventListener('click', () => addStep({}));
-    el('runScriptBtn').addEventListener('click', async () => {
-      const deviceId = el('deviceId').value.trim();
-      const broker = el('broker').value.trim();
-      const baseUrl = (el('baseUrl').value || window.location.origin).trim();
-      const voice = el('voice').value.trim();
-      if (!deviceId) {
-        showScriptStatus('err', 'Please enter Device MAC (underscored).');
-        return;
-      }
-      const stepsWrap = document.getElementById('steps');
-      const stepEls = [...stepsWrap.children];
-      if (stepEls.length === 0) {
-        showScriptStatus('err', 'Add at least one step.');
-        return;
-      }
-      const steps = stepEls.map(elm => {
-        const text = elm.querySelector('.step-text').value.trim();
-        const emotion = elm.querySelector('.step-emotion').value.trim();
-        const emotionOnly = !!elm.querySelector('.step-emotion-only')?.checked;
-        const gain = parseFloat(elm.querySelector('.step-gain').value || '1.0');
-        const pauseMs = parseInt(elm.querySelector('.step-pause').value || '0', 10);
-        const step = { text, gain, pauseMs, emotionOnly };
-        if (emotion) step.emotion = emotion;
-        return step;
-      }).filter(s => s.text || s.emotionOnly);
-      if (steps.length === 0) {
-        showScriptStatus('err', 'Steps must include text.');
-        return;
-      }
-      const btn = el('runScriptBtn');
-      btn.disabled = true;
-      showScriptStatus('info', 'Running script...');
-      try {
-        const body = { deviceId, mode: 'download', steps, baseUrl, combine: document.getElementById('combine').checked };
-        if (broker) body.broker = broker;
-        if (voice) body.voice = voice;
-        const res = await postJSON('/marketing/script', body);
-        if (res.ok) {
-          const lines = (res.results || []).map(r =>
-            `#${r.idx+1} llm=${!!r.llm} play=${!!r.play_url} url=${r.ttsUrl||'-'}`
-          ).join('\n');
-          const combined = res.combinedUrl ? `\ncombined: ${res.combinedUrl}` : '';
-          showScriptStatus('ok', 'Done.\n' + lines + combined);
-        } else {
-          showScriptStatus('err', 'Request failed: ' + JSON.stringify(res));
-        }
-      } catch (e) {
-        showScriptStatus('err', 'Error: ' + (e?.message || e));
-      } finally {
-        btn.disabled = false;
-      }
-    });
-    // seed 3 steps for quick testing
-    addStep({ text: 'Welcome to our promotion!', emotion: 'happy', gain: 1.0, pauseMs: 300 });
-    addStep({ text: 'Up to 30% off this week.' });
-    addStep({ text: 'Don’t miss out!', emotion: 'excited' });
 
-    // Prefill broker to current host:1883 if empty
-    (function seedBrokerDefault(){
-      const b = el('broker');
-      if (b && !b.value) {
-        const host = window.location.hostname || 'localhost';
-        b.value = `mqtt://${host}:1883`;
+    function updateStepMode(stepNode) {
+      const emotionOnly = stepNode.querySelector(".step-emotion-only").checked;
+      const textInput = stepNode.querySelector(".step-text");
+      const gainInput = stepNode.querySelector(".step-gain");
+      const durationLabel = stepNode.querySelector(".step-duration-label");
+      const textLabel = stepNode.querySelector(".step-text-label");
+
+      textInput.disabled = emotionOnly;
+      gainInput.disabled = emotionOnly;
+
+      if (emotionOnly) {
+        textInput.placeholder = "No voice for this step";
+        durationLabel.textContent = "Animation Hold (sec)";
+        textLabel.textContent = "Voice Line";
+      } else {
+        textInput.placeholder = "What should the character say?";
+        durationLabel.textContent = "Pause After (sec)";
+        textLabel.textContent = "Voice Line";
       }
+    }
+
+    function addStep(prefill = {}) {
+      const steps = el("steps");
+      const wrapper = document.createElement("div");
+      wrapper.className = "step-card";
+      wrapper.innerHTML = `
+        <div class="step-head">
+          <div class="step-title">Step ${steps.children.length + 1}</div>
+          <button type="button" class="danger remove-step">Remove</button>
+        </div>
+        <div class="row">
+          <div class="col-4">
+            <label>Emotion</label>
+            <select class="step-emotion">${emotionOptions(prefill.emotion || "")}</select>
+          </div>
+          <div class="col-4">
+            <label>Gain</label>
+            <input class="step-gain" type="number" min="0" step="0.1" value="${escapeHtml(prefill.gain != null ? prefill.gain : 1.0)}">
+          </div>
+          <div class="col-4">
+            <label class="checkbox">
+              <input class="step-emotion-only" type="checkbox" ${prefill.emotionOnly ? "checked" : ""}>
+              No voice, only animation
+            </label>
+          </div>
+        </div>
+        <div class="row">
+          <div class="col-8">
+            <label class="step-text-label">Voice Line</label>
+            <textarea class="step-text">${escapeHtml(prefill.text || "")}</textarea>
+          </div>
+          <div class="col-4">
+            <label class="step-duration-label">Pause After (sec)</label>
+            <input class="step-duration" type="number" min="0" step="0.1" value="${escapeHtml(prefill.durationSec != null ? prefill.durationSec : 0)}">
+            <div class="field-help">Use this as the hold time when the step is animation-only.</div>
+          </div>
+        </div>
+      `;
+
+      steps.appendChild(wrapper);
+      wrapper.querySelector(".remove-step").addEventListener("click", () => {
+        wrapper.remove();
+        refreshStepTitles();
+      });
+      wrapper.querySelector(".step-emotion-only").addEventListener("change", () => updateStepMode(wrapper));
+      updateStepMode(wrapper);
+    }
+
+    function collectSteps() {
+      const steps = [];
+      const nodes = [...document.querySelectorAll(".step-card")];
+
+      for (let index = 0; index < nodes.length; index += 1) {
+        const node = nodes[index];
+        const text = node.querySelector(".step-text").value.trim();
+        const emotion = node.querySelector(".step-emotion").value.trim();
+        const emotionOnly = node.querySelector(".step-emotion-only").checked;
+        const gain = parseFloat(node.querySelector(".step-gain").value || "1.0");
+        const durationSec = parseFloat(node.querySelector(".step-duration").value || "0");
+        const pauseMs = Math.max(0, Math.round(durationSec * 1000));
+
+        if (emotionOnly && !emotion) {
+          throw new Error(`Step ${index + 1}: choose an emotion for animation-only steps.`);
+        }
+        if (!emotionOnly && !text) {
+          throw new Error(`Step ${index + 1}: enter a voice line or switch the step to animation-only.`);
+        }
+
+        const step = {
+          gain: Number.isFinite(gain) ? gain : 1.0,
+          pauseMs,
+        };
+        if (emotion) step.emotion = emotion;
+        if (emotionOnly) {
+          step.emotionOnly = true;
+        } else {
+          step.text = text;
+        }
+        steps.push(step);
+      }
+
+      if (steps.length === 0) {
+        throw new Error("Add at least one step.");
+      }
+
+      return steps;
+    }
+
+    function renderScriptResult(result) {
+      if (result.error) {
+        return `#${result.idx + 1} error=${result.error}`;
+      }
+      if (result.emotion_only) {
+        return `#${result.idx + 1} animation-only llm=${!!result.llm}`;
+      }
+      if (result.combined) {
+        return `combined play=${!!result.play_url} url=${result.ttsUrl || "-"}`;
+      }
+      return `#${result.idx + 1} llm=${!!result.llm} play=${!!result.play_url} url=${result.ttsUrl || "-"}`;
+    }
+
+    el("character").addEventListener("change", syncCharacterFields);
+    el("customVoiceId").addEventListener("input", () => {
+      el("resolvedVoice").value = currentVoiceId();
+    });
+    el("animationFolder").addEventListener("input", () => {
+      el("resolvedBinUrl").value = computeResolvedBinUrl();
+    });
+    el("deviceBinFolderUrl").addEventListener("input", () => {
+      el("resolvedBinUrl").value = computeResolvedBinUrl();
+    });
+
+    el("addStepBtn").addEventListener("click", () => addStep({ emotion: "normal", gain: 1.0, durationSec: 0.3 }));
+
+    el("refreshCharactersBtn").addEventListener("click", async () => {
+      el("refreshCharactersBtn").disabled = true;
+      showStatus(el("characterStatus"), "info", "Refreshing character folders from live bucket...");
+      try {
+        await fetchCharactersFromServer();
+        populateCharacterOptions();
+        syncCharacterFields();
+        showStatus(el("characterStatus"), "ok", `Loaded ${state.characters.length} character folders from bucket.`);
+      } catch (error) {
+        showStatus(el("characterStatus"), "err", error.message || String(error));
+      } finally {
+        el("refreshCharactersBtn").disabled = false;
+      }
+    });
+
+    el("saveCharacterBtn").addEventListener("click", async () => {
+      const folder = el("manageCharacterFolder").value.trim() || currentCharacterFolder();
+      const voiceId = el("manageVoiceId").value.trim() || currentVoiceId();
+      if (!folder) {
+        showStatus(el("characterStatus"), "err", "Please input character bucket folder name.");
+        return;
+      }
+      if (!voiceId) {
+        showStatus(el("characterStatus"), "err", "Please input voiceId.");
+        return;
+      }
+      el("saveCharacterBtn").disabled = true;
+      showStatus(el("characterStatus"), "info", "Saving character mapping...");
+      try {
+        const result = await postJSON("/marketing/characters", { characterFolder: folder, voiceId });
+        await fetchCharactersFromServer();
+        populateCharacterOptions();
+        el("character").value = folder;
+        syncCharacterFields();
+        showStatus(el("characterStatus"), "ok", `Saved ${result.characterFolder} -> ${result.voiceId}`);
+      } catch (error) {
+        showStatus(el("characterStatus"), "err", error.message || String(error));
+      } finally {
+        el("saveCharacterBtn").disabled = false;
+      }
+    });
+
+    el("uploadBinBtn").addEventListener("click", async () => {
+      const folder = el("manageCharacterFolder").value.trim() || currentCharacterFolder();
+      const fileInput = el("uploadBinFile");
+      const file = fileInput.files && fileInput.files[0];
+      if (!folder) {
+        showStatus(el("characterStatus"), "err", "Please input character folder name for upload.");
+        return;
+      }
+      if (!file) {
+        showStatus(el("characterStatus"), "err", "Please choose a .bin file first.");
+        return;
+      }
+
+      el("uploadBinBtn").disabled = true;
+      showStatus(el("characterStatus"), "info", `Uploading ${file.name} to ${folder}/test.bin ...`);
+      try {
+        const form = new FormData();
+        form.append("characterFolder", folder);
+        form.append("filename", config.defaultFilename || "test.bin");
+        form.append("bucket", config.defaultBucket || "milu-public");
+        form.append("prefix", config.defaultPrefix || "marketing-say-tool");
+        form.append("binFile", file, file.name);
+        const response = await fetch("/marketing/character-bin-upload", { method: "POST", body: form });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || !result.ok) {
+          throw new Error(result.error || `HTTP ${response.status}`);
+        }
+        el("animationFolder").value = folder;
+        el("deviceBinFolderUrl").value = result.url.replace(/\/[^/]+$/, "");
+        el("resolvedBinUrl").value = result.url;
+        showStatus(el("characterStatus"), "ok", `Uploaded successfully.\n${result.url}`);
+      } catch (error) {
+        showStatus(el("characterStatus"), "err", error.message || String(error));
+      } finally {
+        el("uploadBinBtn").disabled = false;
+      }
+    });
+
+    el("updateAnimationBtn").addEventListener("click", async () => {
+      const deviceId = el("deviceId").value.trim();
+      const broker = el("broker").value.trim();
+      const character = currentCharacter();
+      const characterFolder = currentCharacterFolder();
+
+      if (!deviceId) {
+        showStatus(el("animationStatus"), "err", "Please enter a device MAC.");
+        return;
+      }
+      if (!characterFolder) {
+        showStatus(el("animationStatus"), "err", "Please choose a character or provide a character bin folder.");
+        return;
+      }
+
+      el("updateAnimationBtn").disabled = true;
+      showStatus(el("animationStatus"), "info", "Publishing test.bin update...");
+      try {
+        const body = {
+          deviceId,
+          character: character ? character.value : "",
+          characterFolder,
+          folderUrl: el("deviceBinFolderUrl").value.trim(),
+          filename: config.defaultFilename || "test.bin",
+        };
+        if (broker) body.broker = broker;
+        if (el("resolvedBinUrl").value.trim()) body.url = el("resolvedBinUrl").value.trim();
+        const result = await postJSON("/marketing/animation-device-bin", body);
+        showStatus(
+          el("animationStatus"),
+          "ok",
+          `Published: ${result.published}\nVerified: ${result.verified}\nURL: ${result.url}`
+        );
+      } catch (error) {
+        showStatus(el("animationStatus"), "err", error.message || String(error));
+      } finally {
+        el("updateAnimationBtn").disabled = false;
+      }
+    });
+
+    el("runScriptBtn").addEventListener("click", async () => {
+      const deviceId = el("deviceId").value.trim();
+      const broker = el("broker").value.trim();
+      const baseUrl = (el("baseUrl").value || window.location.origin).trim();
+      const voiceId = currentVoiceId();
+
+      if (!deviceId) {
+        showStatus(el("scriptStatus"), "err", "Please enter a device MAC.");
+        return;
+      }
+
+      let steps;
+      try {
+        steps = collectSteps();
+      } catch (error) {
+        showStatus(el("scriptStatus"), "err", error.message || String(error));
+        return;
+      }
+
+      el("runScriptBtn").disabled = true;
+      showStatus(el("scriptStatus"), "info", "Running marketing script...");
+      try {
+        const body = {
+          deviceId,
+          mode: "download",
+          steps,
+          baseUrl,
+          combine: el("combine").checked,
+        };
+        if (broker) body.broker = broker;
+        if (voiceId) body.voice = voiceId;
+
+        const result = await postJSON("/marketing/script", body);
+        const lines = (result.results || []).map(renderScriptResult).join("\n");
+        const combinedLine = result.combinedUrl ? `\ncombinedUrl=${result.combinedUrl}` : "";
+        showStatus(el("scriptStatus"), "ok", `Done.\n${lines}${combinedLine}`);
+      } catch (error) {
+        showStatus(el("scriptStatus"), "err", error.message || String(error));
+      } finally {
+        el("runScriptBtn").disabled = false;
+      }
+    });
+
+    (async () => {
+      try {
+        await fetchCharactersFromServer();
+      } catch (_) {
+        state.characters = config.characters || [];
+      }
+      populateCharacterOptions();
+      syncCharacterFields();
+      addStep({ emotion: "normal", text: "Welcome to our campaign.", gain: 1.0, durationSec: 0.4 });
+      addStep({ emotion: "starry", emotionOnly: true, durationSec: 1.2 });
     })();
   </script>
 </body>
 </html>
-

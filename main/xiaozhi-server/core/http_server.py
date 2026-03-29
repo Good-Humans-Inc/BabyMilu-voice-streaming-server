@@ -1,5 +1,5 @@
 import asyncio
-from aiohttp import web
+from aiohttp import web, ClientSession, ClientTimeout
 from config.logger import setup_logging
 from core.api.ota_handler import OTAHandler
 from core.api.vision_handler import VisionHandler
@@ -11,8 +11,175 @@ import struct
 import math
 import os
 import json
+import re
+import tempfile
+from pathlib import Path
+from urllib.parse import quote
 
 TAG = __name__
+CHAR_INFO_FILE = Path(__file__).resolve().parent.parent / "data" / "marketing_characters.json"
+DEFAULT_MARKETING_BUCKET = os.environ.get("MARKETING_CHARACTER_BUCKET", "milu-public")
+DEFAULT_MARKETING_PREFIX = os.environ.get("MARKETING_CHARACTER_PREFIX", "marketing-say-tool")
+_STORAGE_CLIENT = None
+
+
+def normalize_folder_name(value: str) -> str:
+    folder = (value or "").strip().strip("/")
+    if not folder:
+        return ""
+    if not re.fullmatch(r"[a-zA-Z0-9._-]+(?:/[a-zA-Z0-9._-]+)*", folder):
+        raise ValueError("characterFolder contains invalid characters")
+    return folder
+
+
+def load_character_info() -> dict:
+    if not CHAR_INFO_FILE.exists():
+        return {}
+    try:
+        data = json.loads(CHAR_INFO_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            cleaned = {}
+            for key, value in data.items():
+                try:
+                    folder = normalize_folder_name(str(key))
+                except ValueError:
+                    continue
+                if not folder:
+                    continue
+                if isinstance(value, dict):
+                    voice_id = str(value.get("voiceId") or "").strip()
+                else:
+                    voice_id = str(value or "").strip()
+                cleaned[folder] = {"voiceId": voice_id}
+            return cleaned
+    except Exception:
+        pass
+    return {}
+
+
+def save_character_info(info: dict) -> None:
+    CHAR_INFO_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CHAR_INFO_FILE.write_text(json.dumps(info, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def get_storage_client():
+    global _STORAGE_CLIENT
+    if _STORAGE_CLIENT is not None:
+        return _STORAGE_CLIENT
+
+    try:
+        from google.cloud import storage
+    except Exception as exc:
+        raise RuntimeError(
+            "google-cloud-storage is required for marketing character list/upload"
+        ) from exc
+
+    _STORAGE_CLIENT = storage.Client()
+    return _STORAGE_CLIENT
+
+
+def list_marketing_character_folders(bucket: str, prefix: str) -> list[str]:
+    bucket = (bucket or DEFAULT_MARKETING_BUCKET).strip()
+    prefix = (prefix or DEFAULT_MARKETING_PREFIX).strip().strip("/")
+    if not bucket:
+        return []
+
+    client = get_storage_client()
+    normalized_prefix = f"{prefix}/" if prefix else ""
+    iterator = client.list_blobs(bucket, prefix=normalized_prefix, delimiter="/")
+    folders = set()
+
+    for page in iterator.pages:
+        for item_prefix in page.prefixes:
+            rel = item_prefix[len(normalized_prefix):] if normalized_prefix else item_prefix
+            rel = rel.strip("/")
+            if rel and "/" not in rel:
+                folders.add(rel)
+
+    return sorted(folders)
+
+
+def upload_bin_to_marketing_bucket(local_path: str, folder: str, bucket: str, prefix: str, filename: str) -> str:
+    bucket = (bucket or DEFAULT_MARKETING_BUCKET).strip()
+    prefix = (prefix or DEFAULT_MARKETING_PREFIX).strip().strip("/")
+    filename = (filename or "test.bin").strip()
+    folder = normalize_folder_name(folder)
+    if not bucket:
+        raise ValueError("bucket is required")
+    if not folder:
+        raise ValueError("characterFolder is required")
+
+    client = get_storage_client()
+    object_parts = [p for p in prefix.split("/") if p] + [p for p in folder.split("/") if p] + [filename]
+    object_path = "/".join(object_parts)
+
+    try:
+        blob = client.bucket(bucket).blob(object_path)
+        blob.upload_from_filename(local_path, content_type="application/octet-stream")
+    except Exception as exc:
+        raise RuntimeError(str(exc) or "failed to upload test.bin to GCS")
+
+    return f"https://storage.googleapis.com/{quote(bucket, safe='')}/" + "/".join(
+        quote(part, safe="") for part in ([p for p in prefix.split("/") if p] + [p for p in folder.split("/") if p] + [filename])
+    )
+
+
+def build_marketing_device_bin_url(payload: dict) -> str:
+    explicit_url = (payload.get("url") or "").strip()
+    if explicit_url:
+        return explicit_url
+
+    bucket = (payload.get("bucket") or os.environ.get("MARKETING_DEVICE_BIN_BUCKET") or "milu-public").strip()
+    prefix = (payload.get("prefix") or os.environ.get("MARKETING_DEVICE_BIN_PREFIX") or DEFAULT_MARKETING_PREFIX).strip().strip("/")
+    folder = (
+        payload.get("characterFolder")
+        or payload.get("folder")
+        or payload.get("character")
+        or ""
+    )
+    folder = normalize_folder_name(folder)
+    folder_url = (payload.get("folderUrl") or "").strip().rstrip("/")
+    filename = (payload.get("filename") or os.environ.get("MARKETING_DEVICE_BIN_FILENAME") or "test.bin").strip()
+
+    if folder_url:
+        return f"{folder_url}/{quote(filename, safe='')}"
+
+    if not folder:
+        raise ValueError("characterFolder is required when url is not provided")
+    if not bucket:
+        raise ValueError("bucket is required")
+    if not filename:
+        raise ValueError("filename is required")
+
+    parts = []
+    if prefix:
+        parts.extend(quote(part, safe="") for part in prefix.split("/") if part)
+    parts.extend(quote(part, safe="") for part in folder.split("/") if part)
+    parts.append(quote(filename, safe=""))
+    return f"https://storage.googleapis.com/{quote(bucket, safe='')}/" + "/".join(parts)
+
+
+async def verify_public_download_url(url: str) -> tuple[bool, str]:
+    timeout = ClientTimeout(total=6)
+    async with ClientSession(timeout=timeout) as session:
+        try:
+            async with session.head(url) as resp:
+                if resp.status < 400:
+                    return True, f"HEAD {resp.status}"
+                if resp.status not in {403, 405}:
+                    return False, f"HEAD {resp.status}"
+        except Exception as exc:
+            head_error = str(exc)
+        else:
+            head_error = "HEAD 403/405"
+
+        try:
+            async with session.get(url, headers={"Range": "bytes=0-0"}) as resp:
+                if resp.status < 400:
+                    return True, f"GET {resp.status}"
+                return False, f"GET {resp.status}"
+        except Exception as exc:
+            return False, head_error or str(exc)
 
 
 class SimpleHttpServer:
@@ -69,6 +236,10 @@ class SimpleHttpServer:
                     # Marketing: synthesize and play text with emotion on device
                     web.post("/marketing/say", self.handle_marketing_say),
                     web.post("/marketing/script", self.handle_marketing_script),
+                    web.post("/marketing/animation-device-bin", self.handle_marketing_animation_device_bin),
+                    web.get("/marketing/characters", self.handle_marketing_list_characters),
+                    web.post("/marketing/characters", self.handle_marketing_save_character),
+                    web.post("/marketing/character-bin-upload", self.handle_marketing_upload_character_bin),
                 ]
             )
             # Serve synthesized TTS files (default tmp directory)
@@ -120,6 +291,172 @@ class SimpleHttpServer:
 
         ok = publish_ws_start(broker, device_id, ws_url, version=version)
         return web.json_response({"ok": bool(ok)})
+
+    async def handle_marketing_list_characters(self, request: web.Request) -> web.Response:
+        bucket = (request.query.get("bucket") or DEFAULT_MARKETING_BUCKET).strip()
+        prefix = (request.query.get("prefix") or DEFAULT_MARKETING_PREFIX).strip().strip("/")
+        try:
+            folders = list_marketing_character_folders(bucket, prefix)
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+        mapping = load_character_info()
+        characters = []
+        for folder in folders:
+            voice_id = (mapping.get(folder) or {}).get("voiceId", "")
+            characters.append(
+                {
+                    "value": folder,
+                    "label": folder,
+                    "voiceId": voice_id,
+                    "animationFolder": folder,
+                    "bucketFolder": folder,
+                }
+            )
+        return web.json_response(
+            {
+                "ok": True,
+                "bucket": bucket,
+                "prefix": prefix,
+                "characters": characters,
+                "mapping": mapping,
+                "sourceCount": len(characters),
+            }
+        )
+
+    async def handle_marketing_save_character(self, request: web.Request) -> web.Response:
+        try:
+            data = await request.json()
+        except Exception:
+            text = await request.text()
+            try:
+                data = json.loads(text)
+            except Exception:
+                return web.json_response({"ok": False, "error": "invalid json"}, status=400)
+
+        try:
+            folder = normalize_folder_name(data.get("characterFolder") or data.get("folder") or "")
+        except ValueError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        voice_id = str(data.get("voiceId") or data.get("voice") or "").strip()
+        if not folder:
+            return web.json_response({"ok": False, "error": "characterFolder is required"}, status=400)
+        if not voice_id:
+            return web.json_response({"ok": False, "error": "voiceId is required"}, status=400)
+
+        mapping = load_character_info()
+        mapping[folder] = {"voiceId": voice_id}
+        save_character_info(mapping)
+        return web.json_response({"ok": True, "characterFolder": folder, "voiceId": voice_id, "savedCount": len(mapping)})
+
+    async def handle_marketing_upload_character_bin(self, request: web.Request) -> web.Response:
+        reader = await request.multipart()
+        folder = ""
+        bucket = DEFAULT_MARKETING_BUCKET
+        prefix = DEFAULT_MARKETING_PREFIX
+        filename = "test.bin"
+        file_path = ""
+
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            if part.name == "characterFolder":
+                folder = (await part.text()).strip()
+            elif part.name == "bucket":
+                bucket = (await part.text()).strip() or bucket
+            elif part.name == "prefix":
+                prefix = (await part.text()).strip() or prefix
+            elif part.name == "filename":
+                filename = (await part.text()).strip() or filename
+            elif part.name == "binFile":
+                suffix = ".bin"
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                    while True:
+                        chunk = await part.read_chunk()
+                        if not chunk:
+                            break
+                        tmp.write(chunk)
+                    file_path = tmp.name
+
+        if not folder:
+            return web.json_response({"ok": False, "error": "characterFolder is required"}, status=400)
+        if not file_path or not os.path.exists(file_path):
+            return web.json_response({"ok": False, "error": "binFile is required"}, status=400)
+
+        try:
+            public_url = upload_bin_to_marketing_bucket(file_path, folder, bucket, prefix, filename)
+            return web.json_response({"ok": True, "url": public_url, "characterFolder": folder, "filename": filename})
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+        finally:
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+
+    async def handle_marketing_animation_device_bin(self, request: web.Request) -> web.Response:
+        """
+        Publish a test.bin auto_update command for a selected character folder.
+
+        Body JSON:
+        {
+          "deviceId": "A4_CF_12_34_56_78",
+          "characterFolder": "sylus",
+          "broker": "mqtt://localhost:1883",
+          "url": "https://storage.googleapis.com/milu-public/marketing-say-tool/lads-sylus/test.bin"
+        }
+        """
+        try:
+            data = await request.json()
+        except Exception:
+            text = await request.text()
+            try:
+                data = json.loads(text)
+            except Exception:
+                return web.json_response({"ok": False, "error": "invalid json"}, status=400)
+
+        device_id = (data.get("deviceId") or data.get("device_id") or "").strip()
+        broker = (data.get("broker") or os.environ.get("MQTT_URL") or "").strip()
+
+        if not device_id:
+            return web.json_response({"ok": False, "error": "deviceId is required"}, status=400)
+
+        try:
+            download_url = build_marketing_device_bin_url(data)
+        except ValueError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+        should_verify = data.get("verify")
+        if should_verify is None:
+            should_verify = True
+        verified = None
+        verify_detail = None
+        if should_verify:
+            verified, verify_detail = await verify_public_download_url(download_url)
+            if not verified:
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": f"test.bin is not reachable yet ({verify_detail})",
+                        "url": download_url,
+                    },
+                    status=400,
+                )
+
+        published = publish_down_command(
+            broker,
+            device_id,
+            {"type": "auto_update", "url": download_url},
+        )
+        return web.json_response(
+            {
+                "ok": bool(published),
+                "published": bool(published),
+                "verified": verified,
+                "verifyDetail": verify_detail,
+                "url": download_url,
+            }
+        )
 
     async def handle_marketing_say(self, request: web.Request) -> web.Response:
         """
