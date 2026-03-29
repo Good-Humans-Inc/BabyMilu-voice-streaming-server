@@ -950,6 +950,10 @@
       if (registryCard && scriptCard && scriptCard.parentElement) {
         scriptCard.parentElement.appendChild(registryCard);
       }
+      if (!el("broker").value.trim()) {
+        const host = window.location.hostname || "localhost";
+        el("broker").value = `mqtt://${host}:1883`;
+      }
       el("characterPreview").addEventListener("error", () => {
         el("previewCaption").textContent = `No normal.gif preview found for ${currentCharacterFolder() || "this folder"}.`;
       });
