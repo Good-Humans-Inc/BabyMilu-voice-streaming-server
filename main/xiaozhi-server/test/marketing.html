@@ -276,6 +276,35 @@
       border: 1px solid rgba(148, 163, 184, 0.35);
     }
 
+    .registry-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+      font-size: 13px;
+    }
+
+    .registry-table th,
+    .registry-table td {
+      border: 1px solid var(--line);
+      padding: 8px;
+      vertical-align: top;
+      text-align: left;
+    }
+
+    .registry-table th {
+      background: #f8fafc;
+      color: #334155;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .registry-table input {
+      border-radius: 10px;
+      padding: 8px 10px;
+      font-size: 13px;
+    }
+
     @media (max-width: 860px) {
       .col-3,
       .col-4,
@@ -360,28 +389,39 @@
       <div class="card-head">
         <div>
           <h2>Character Registry</h2>
-          <div class="muted">Save character folder + ElevenLabs voiceId locally on this server, and upload `test.bin` into that character bucket folder.</div>
+          <div class="muted">Manage local character mappings. Edit name, voiceId, and bin URL directly, then save.</div>
         </div>
       </div>
       <div class="row">
-        <div class="col-4">
+        <div class="col-3">
           <label for="manageCharacterFolder">Character Bucket Folder Name</label>
           <input id="manageCharacterFolder" placeholder="lads-sylus">
         </div>
-        <div class="col-4">
+        <div class="col-3">
           <label for="manageVoiceId">ElevenLabs Voice ID</label>
           <input id="manageVoiceId" placeholder="g6uQR0Q9ieSD9KFclcZB">
         </div>
-        <div class="col-4">
-          <label for="uploadBinFile">Upload `test.bin`</label>
-          <input id="uploadBinFile" type="file" accept=".bin,application/octet-stream">
+        <div class="col-6">
+          <label for="manageBinUrl">Character `test.bin` URL</label>
+          <input id="manageBinUrl" placeholder="https://storage.googleapis.com/milu-public/marketing-say-tool/lads-sylus/test.bin">
         </div>
       </div>
       <div class="actions">
         <button id="refreshCharactersBtn" type="button" class="secondary">Refresh Character List</button>
-        <button id="saveCharacterBtn" type="button">Save Character</button>
-        <button id="uploadBinBtn" type="button" class="secondary">Upload Bin To Bucket</button>
+        <button id="saveCharacterBtn" type="button">Add / Update Row</button>
+        <button id="saveRegistryBtn" type="button" class="secondary">Save Registry</button>
       </div>
+      <table class="registry-table">
+        <thead>
+          <tr>
+            <th style="width: 20%;">Name</th>
+            <th style="width: 28%;">Voice ID</th>
+            <th style="width: 44%;">Bin URL</th>
+            <th style="width: 8%;">Action</th>
+          </tr>
+        </thead>
+        <tbody id="characterRegistryRows"></tbody>
+      </table>
       <div id="characterStatus" class="status info"></div>
     </div>
 
@@ -444,6 +484,7 @@
     const config = window.MARKETING_CONFIG || { defaultBucket: "milu-public", defaultPrefix: "marketing-say-tool", defaultFilename: "test.bin", emotions: [], characters: [] };
     const state = {
       characters: [],
+      selectedCharacter: "",
     };
     const el = id => document.getElementById(id);
 
@@ -479,7 +520,13 @@
       if (!result.ok) {
         throw new Error(result.error || "Failed to load character list");
       }
-      state.characters = result.characters || [];
+      state.characters = (result.characters || []).map(item => ({
+        value: item.value || item.label || "",
+        label: item.label || item.value || "",
+        voiceId: item.voiceId || "",
+        animationFolder: item.animationFolder || item.value || "",
+        binUrl: item.binUrl || buildDeviceBinUrl(item.animationFolder || item.value || ""),
+      })).filter(item => item.value);
       return state.characters;
     }
 
@@ -489,7 +536,14 @@
         .map(item => `<option value="${item.value}">${item.label}</option>`)
         .join("");
       if (state.characters.length > 0) {
-        select.value = state.characters[0].value;
+        if (state.selectedCharacter && state.characters.some(item => item.value === state.selectedCharacter)) {
+          select.value = state.selectedCharacter;
+        } else {
+          select.value = state.characters[0].value;
+          state.selectedCharacter = select.value;
+        }
+      } else {
+        state.selectedCharacter = "";
       }
     }
 
@@ -521,7 +575,7 @@
       return character ? (character.animationFolder || "") : "";
     }
 
-    function buildDeviceBinUrl(folder) {
+    function buildFolderUrl(folder) {
       const cleanFolder = String(folder || "").trim().replace(/^\/+|\/+$/g, "");
       if (!cleanFolder) return "";
       const parts = [];
@@ -529,8 +583,80 @@
         parts.push(...config.defaultPrefix.split("/").filter(Boolean).map(encodeURIComponent));
       }
       parts.push(...cleanFolder.split("/").filter(Boolean).map(encodeURIComponent));
-      parts.push(encodeURIComponent(config.defaultFilename || "test.bin"));
       return `https://storage.googleapis.com/${encodeURIComponent(config.defaultBucket || "milu-public")}/${parts.join("/")}`;
+    }
+
+    function buildDeviceBinUrl(folder) {
+      const cleanFolder = String(folder || "").trim().replace(/^\/+|\/+$/g, "");
+      if (!cleanFolder) return "";
+      return `${buildFolderUrl(cleanFolder)}/${encodeURIComponent(config.defaultFilename || "test.bin")}`;
+    }
+
+    function normalizeBinUrl(rawUrl, folder) {
+      const value = String(rawUrl || "").trim();
+      if (!value) return buildDeviceBinUrl(folder);
+      if (value.endsWith("/")) return `${value}${encodeURIComponent(config.defaultFilename || "test.bin")}`;
+      return value;
+    }
+
+    function toFolderUrl(rawBinUrl, folder) {
+      const normalized = normalizeBinUrl(rawBinUrl, folder);
+      const suffix = `/${config.defaultFilename || "test.bin"}`;
+      if (normalized.endsWith(suffix)) {
+        return normalized.slice(0, -suffix.length);
+      }
+      return normalized.replace(/\/+$/, "");
+    }
+
+    function renderRegistryRows() {
+      const tbody = el("characterRegistryRows");
+      tbody.innerHTML = state.characters.map((item, index) => `
+        <tr data-index="${index}">
+          <td><input data-field="value" value="${escapeHtml(item.value)}"></td>
+          <td><input data-field="voiceId" value="${escapeHtml(item.voiceId || "")}"></td>
+          <td><input data-field="binUrl" value="${escapeHtml(item.binUrl || buildDeviceBinUrl(item.value))}"></td>
+          <td><button type="button" class="danger row-remove">Remove</button></td>
+        </tr>
+      `).join("");
+
+      [...tbody.querySelectorAll("tr")].forEach((row) => {
+        const index = Number(row.dataset.index);
+        row.querySelectorAll("input[data-field]").forEach((input) => {
+          input.addEventListener("input", (event) => {
+            const field = event.target.dataset.field;
+            if (!field) return;
+            state.characters[index][field] = event.target.value.trim();
+            if (field === "value") {
+              state.characters[index].animationFolder = state.characters[index].value;
+              if (!state.characters[index].binUrl) {
+                state.characters[index].binUrl = buildDeviceBinUrl(state.characters[index].value);
+              }
+            }
+          });
+        });
+
+        const removeBtn = row.querySelector(".row-remove");
+        removeBtn.addEventListener("click", () => {
+          const removed = state.characters[index];
+          state.characters.splice(index, 1);
+          if (removed && removed.value === state.selectedCharacter) {
+            state.selectedCharacter = state.characters[0] ? state.characters[0].value : "";
+          }
+          populateCharacterOptions();
+          renderRegistryRows();
+          syncCharacterFields();
+        });
+      });
+    }
+
+    function collectRegistryRowsForSave() {
+      return state.characters
+        .map(item => ({
+          characterFolder: String(item.value || "").trim(),
+          voiceId: String(item.voiceId || "").trim(),
+          binUrl: normalizeBinUrl(item.binUrl, item.value),
+        }))
+        .filter(item => item.characterFolder);
     }
 
     function computeResolvedBinUrl() {
@@ -588,6 +714,7 @@
       const character = currentCharacter();
       const isCustom = !!character && character.value === "custom";
       el("customVoiceRow").classList.toggle("hidden", !isCustom);
+      state.selectedCharacter = character ? character.value : "";
 
       if (character && !isCustom) {
         el("resolvedVoice").value = character.voiceId || "";
@@ -602,11 +729,11 @@
 
       const folder = currentCharacterFolder();
       if (folder) {
-        const parts = [];
-        if (config.defaultPrefix) parts.push(...config.defaultPrefix.split("/").filter(Boolean).map(encodeURIComponent));
-        parts.push(...folder.split("/").filter(Boolean).map(encodeURIComponent));
-        el("deviceBinFolderUrl").value =
-          `https://storage.googleapis.com/${encodeURIComponent(config.defaultBucket || "milu-public")}/${parts.join("/")}`;
+        if (character && character.binUrl) {
+          el("deviceBinFolderUrl").value = toFolderUrl(character.binUrl, folder);
+        } else {
+          el("deviceBinFolderUrl").value = buildFolderUrl(folder);
+        }
       }
       el("resolvedBinUrl").value = computeResolvedBinUrl();
       const previewUrl = computeNormalGifUrl();
@@ -614,6 +741,7 @@
       el("previewCaption").textContent = previewUrl ? `Preview: ${previewUrl}` : "";
       el("manageCharacterFolder").value = currentCharacterFolder();
       el("manageVoiceId").value = currentVoiceId();
+      el("manageBinUrl").value = character ? (character.binUrl || buildDeviceBinUrl(character.value)) : "";
       refreshCharacterBinStatus().catch((error) => {
         showStatus(el("binCheckStatus"), "err", error.message || String(error));
         el("updateAnimationBtn").disabled = true;
@@ -783,6 +911,7 @@
       try {
         await fetchCharactersFromServer();
         populateCharacterOptions();
+        renderRegistryRows();
         syncCharacterFields();
         showStatus(el("characterStatus"), "ok", `Loaded ${state.characters.length} character folders from bucket.`);
       } catch (error) {
@@ -795,69 +924,51 @@
     el("saveCharacterBtn").addEventListener("click", async () => {
       const folder = el("manageCharacterFolder").value.trim() || currentCharacterFolder();
       const voiceId = el("manageVoiceId").value.trim() || currentVoiceId();
+      const binUrl = el("manageBinUrl").value.trim() || buildDeviceBinUrl(folder);
       if (!folder) {
         showStatus(el("characterStatus"), "err", "Please input character bucket folder name.");
         return;
       }
-      if (!voiceId) {
-        showStatus(el("characterStatus"), "err", "Please input voiceId.");
-        return;
+      const existing = state.characters.find(item => item.value === folder);
+      if (existing) {
+        existing.voiceId = voiceId;
+        existing.binUrl = normalizeBinUrl(binUrl, folder);
+        existing.animationFolder = folder;
+      } else {
+        state.characters.push({
+          value: folder,
+          label: folder,
+          voiceId,
+          animationFolder: folder,
+          binUrl: normalizeBinUrl(binUrl, folder),
+        });
       }
-      el("saveCharacterBtn").disabled = true;
-      showStatus(el("characterStatus"), "info", "Saving character mapping...");
-      try {
-        const result = await postJSON("/marketing/characters", { characterFolder: folder, voiceId });
-        await fetchCharactersFromServer();
-        populateCharacterOptions();
-        el("character").value = folder;
-        syncCharacterFields();
-        showStatus(el("characterStatus"), "ok", `Saved ${result.characterFolder} -> ${result.voiceId}`);
-      } catch (error) {
-        showStatus(el("characterStatus"), "err", error.message || String(error));
-      } finally {
-        el("saveCharacterBtn").disabled = false;
-      }
+      state.selectedCharacter = folder;
+      populateCharacterOptions();
+      renderRegistryRows();
+      syncCharacterFields();
+      showStatus(el("characterStatus"), "ok", `Prepared row for ${folder}. Click "Save Registry" to persist.`);
     });
 
-    el("uploadBinBtn").addEventListener("click", async () => {
-      const folder = el("manageCharacterFolder").value.trim() || currentCharacterFolder();
-      const fileInput = el("uploadBinFile");
-      const file = fileInput.files && fileInput.files[0];
-      if (!folder) {
-        showStatus(el("characterStatus"), "err", "Please input character folder name for upload.");
+    el("saveRegistryBtn").addEventListener("click", async () => {
+      const payload = collectRegistryRowsForSave();
+      if (!payload.length) {
+        showStatus(el("characterStatus"), "err", "Registry is empty. Add at least one character row.");
         return;
       }
-      if (!file) {
-        showStatus(el("characterStatus"), "err", "Please choose a .bin file first.");
-        return;
-      }
-
-      el("uploadBinBtn").disabled = true;
-      showStatus(el("characterStatus"), "info", `Uploading ${file.name} to ${folder}/test.bin ...`);
+      el("saveRegistryBtn").disabled = true;
+      showStatus(el("characterStatus"), "info", "Saving full registry...");
       try {
-        const form = new FormData();
-        form.append("characterFolder", folder);
-        form.append("filename", config.defaultFilename || "test.bin");
-        form.append("bucket", config.defaultBucket || "milu-public");
-        form.append("prefix", config.defaultPrefix || "marketing-say-tool");
-        form.append("binFile", file, file.name);
-        const response = await fetch("/marketing/character-bin-upload", { method: "POST", body: form });
-        const result = await response.json().catch(() => ({}));
-        if (!response.ok || !result.ok) {
-          throw new Error(result.error || `HTTP ${response.status}`);
-        }
-        el("animationFolder").value = folder;
-        el("deviceBinFolderUrl").value = result.url.replace(/\/[^/]+$/, "");
-        el("resolvedBinUrl").value = result.url;
-        const previewUrl = computeNormalGifUrl();
-        el("characterPreview").src = previewUrl;
-        el("previewCaption").textContent = previewUrl ? `Preview: ${previewUrl}` : "";
-        await refreshCharacterBinStatus();
-        showStatus(el("characterStatus"), "ok", `Uploaded successfully.\n${result.url}`);
+        await postJSON("/marketing/characters", { characters: payload });
+        await fetchCharactersFromServer();
+        populateCharacterOptions();
+        renderRegistryRows();
+        syncCharacterFields();
+        showStatus(el("characterStatus"), "ok", `Saved ${payload.length} characters.`);
       } catch (error) {
         showStatus(el("characterStatus"), "err", error.message || String(error));
       } finally {
-        el("uploadBinBtn").disabled = false;
+        el("saveRegistryBtn").disabled = false;
       }
     });
 
@@ -960,9 +1071,16 @@
       try {
         await fetchCharactersFromServer();
       } catch (_) {
-        state.characters = config.characters || [];
+        state.characters = (config.characters || []).map(item => ({
+          value: item.value || item.label || "",
+          label: item.label || item.value || "",
+          voiceId: item.voiceId || "",
+          animationFolder: item.animationFolder || item.value || "",
+          binUrl: item.binUrl || buildDeviceBinUrl(item.animationFolder || item.value || ""),
+        })).filter(item => item.value);
       }
       populateCharacterOptions();
+      renderRegistryRows();
       syncCharacterFields();
       addStep({ emotion: "normal", text: "Welcome to our campaign.", gain: 1.0, durationSec: 0.4 });
       addStep({ emotion: "starry", emotionOnly: true, durationSec: 1.2 });

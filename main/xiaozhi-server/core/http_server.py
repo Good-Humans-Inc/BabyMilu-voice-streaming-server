@@ -12,7 +12,6 @@ import math
 import os
 import json
 import re
-import tempfile
 from pathlib import Path
 from urllib.parse import quote
 
@@ -48,9 +47,11 @@ def load_character_info() -> dict:
                     continue
                 if isinstance(value, dict):
                     voice_id = str(value.get("voiceId") or "").strip()
+                    bin_url = str(value.get("binUrl") or "").strip()
                 else:
                     voice_id = str(value or "").strip()
-                cleaned[folder] = {"voiceId": voice_id}
+                    bin_url = ""
+                cleaned[folder] = {"voiceId": voice_id, "binUrl": bin_url}
             return cleaned
     except Exception:
         pass
@@ -246,7 +247,6 @@ class SimpleHttpServer:
                     web.get("/marketing/character-bin-status", self.handle_marketing_character_bin_status),
                     web.get("/marketing/characters", self.handle_marketing_list_characters),
                     web.post("/marketing/characters", self.handle_marketing_save_character),
-                    web.post("/marketing/character-bin-upload", self.handle_marketing_upload_character_bin),
                 ]
             )
             # Serve synthesized TTS files (default tmp directory)
@@ -307,14 +307,25 @@ class SimpleHttpServer:
         except Exception as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=500)
         mapping = load_character_info()
+        all_folders = sorted(set(folders) | set(mapping.keys()))
         characters = []
-        for folder in folders:
-            voice_id = (mapping.get(folder) or {}).get("voiceId", "")
+        for folder in all_folders:
+            mapping_item = mapping.get(folder) or {}
+            voice_id = mapping_item.get("voiceId", "")
+            bin_url = mapping_item.get("binUrl", "") or build_marketing_device_bin_url(
+                {
+                    "bucket": bucket,
+                    "prefix": prefix,
+                    "characterFolder": folder,
+                    "filename": "test.bin",
+                }
+            )
             characters.append(
                 {
                     "value": folder,
                     "label": folder,
                     "voiceId": voice_id,
+                    "binUrl": bin_url,
                     "animationFolder": folder,
                     "bucketFolder": folder,
                 }
@@ -327,6 +338,7 @@ class SimpleHttpServer:
                 "characters": characters,
                 "mapping": mapping,
                 "sourceCount": len(characters),
+                "bucketSourceCount": len(folders),
             }
         )
 
@@ -340,66 +352,51 @@ class SimpleHttpServer:
             except Exception:
                 return web.json_response({"ok": False, "error": "invalid json"}, status=400)
 
+        def parse_entry(entry: dict) -> tuple[str, dict]:
+            try:
+                folder = normalize_folder_name(entry.get("characterFolder") or entry.get("folder") or "")
+            except ValueError as exc:
+                raise ValueError(str(exc))
+            if not folder:
+                raise ValueError("characterFolder is required")
+            voice_id = str(entry.get("voiceId") or entry.get("voice") or "").strip()
+            raw_bin_url = str(entry.get("binUrl") or "").strip()
+            if raw_bin_url and raw_bin_url.endswith("/"):
+                raw_bin_url = f"{raw_bin_url}test.bin"
+            bin_url = raw_bin_url or build_marketing_device_bin_url(
+                {
+                    "bucket": DEFAULT_MARKETING_BUCKET,
+                    "prefix": DEFAULT_MARKETING_PREFIX,
+                    "characterFolder": folder,
+                    "filename": "test.bin",
+                }
+            )
+            return folder, {"voiceId": voice_id, "binUrl": bin_url}
+
+        payload_entries = data.get("characters")
+        if isinstance(payload_entries, list):
+            mapping = {}
+            for index, entry in enumerate(payload_entries):
+                if not isinstance(entry, dict):
+                    return web.json_response({"ok": False, "error": f"characters[{index}] must be an object"}, status=400)
+                try:
+                    folder, info = parse_entry(entry)
+                except ValueError as exc:
+                    return web.json_response({"ok": False, "error": f"characters[{index}]: {exc}"}, status=400)
+                mapping[folder] = info
+            save_character_info(mapping)
+            return web.json_response({"ok": True, "savedCount": len(mapping)})
+
         try:
-            folder = normalize_folder_name(data.get("characterFolder") or data.get("folder") or "")
+            folder, info = parse_entry(data)
         except ValueError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
-        voice_id = str(data.get("voiceId") or data.get("voice") or "").strip()
-        if not folder:
-            return web.json_response({"ok": False, "error": "characterFolder is required"}, status=400)
-        if not voice_id:
-            return web.json_response({"ok": False, "error": "voiceId is required"}, status=400)
-
         mapping = load_character_info()
-        mapping[folder] = {"voiceId": voice_id}
+        mapping[folder] = info
         save_character_info(mapping)
-        return web.json_response({"ok": True, "characterFolder": folder, "voiceId": voice_id, "savedCount": len(mapping)})
-
-    async def handle_marketing_upload_character_bin(self, request: web.Request) -> web.Response:
-        reader = await request.multipart()
-        folder = ""
-        bucket = DEFAULT_MARKETING_BUCKET
-        prefix = DEFAULT_MARKETING_PREFIX
-        filename = "test.bin"
-        file_path = ""
-
-        while True:
-            part = await reader.next()
-            if part is None:
-                break
-            if part.name == "characterFolder":
-                folder = (await part.text()).strip()
-            elif part.name == "bucket":
-                bucket = (await part.text()).strip() or bucket
-            elif part.name == "prefix":
-                prefix = (await part.text()).strip() or prefix
-            elif part.name == "filename":
-                filename = (await part.text()).strip() or filename
-            elif part.name == "binFile":
-                suffix = ".bin"
-                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                    while True:
-                        chunk = await part.read_chunk()
-                        if not chunk:
-                            break
-                        tmp.write(chunk)
-                    file_path = tmp.name
-
-        if not folder:
-            return web.json_response({"ok": False, "error": "characterFolder is required"}, status=400)
-        if not file_path or not os.path.exists(file_path):
-            return web.json_response({"ok": False, "error": "binFile is required"}, status=400)
-
-        try:
-            public_url = upload_bin_to_marketing_bucket(file_path, folder, bucket, prefix, filename)
-            return web.json_response({"ok": True, "url": public_url, "characterFolder": folder, "filename": filename})
-        except Exception as exc:
-            return web.json_response({"ok": False, "error": str(exc)}, status=500)
-        finally:
-            try:
-                os.remove(file_path)
-            except Exception:
-                pass
+        return web.json_response(
+            {"ok": True, "characterFolder": folder, "voiceId": info["voiceId"], "binUrl": info["binUrl"], "savedCount": len(mapping)}
+        )
 
     async def handle_marketing_character_bin_status(self, request: web.Request) -> web.Response:
         folder_url = (request.query.get("folderUrl") or "").strip()
