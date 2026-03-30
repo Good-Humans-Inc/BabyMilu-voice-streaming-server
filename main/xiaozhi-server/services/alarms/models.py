@@ -12,6 +12,7 @@ logger = setup_logging()
 
 class AlarmRepeat(str, Enum):
     WEEKLY = "weekly"
+    DAILY = "daily"
     NONE = "none"  # one-time; fires once then status -> off
 
 

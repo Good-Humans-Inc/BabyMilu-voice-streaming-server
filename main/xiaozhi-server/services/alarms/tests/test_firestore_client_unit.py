@@ -36,18 +36,22 @@ class _FakeDoc:
 
 
 class _FakeWriteRef:
-    """Captures the doc dict passed to .set()."""
+    """Captures the doc dict passed to .set() or .update()."""
     def __init__(self):
         self.written = None
         self.merge = None
+        self.updated = None
 
     def set(self, doc, **kwargs):
         self.written = doc
         self.merge = kwargs.get("merge")
 
+    def update(self, doc):
+        self.updated = doc
+
 
 class _FakeWriteClient:
-    """Minimal fake that supports collection().document().collection().document().set()."""
+    """Minimal fake that supports collection().document().collection().document().set/.update()."""
     def __init__(self):
         self._ref = _FakeWriteRef()
 
@@ -60,6 +64,9 @@ class _FakeWriteClient:
     def set(self, doc, **kwargs):
         self._ref.set(doc, **kwargs)
 
+    def update(self, doc):
+        self._ref.update(doc)
+
     @property
     def written(self):
         return self._ref.written
@@ -67,6 +74,10 @@ class _FakeWriteClient:
     @property
     def merge(self):
         return self._ref.merge
+
+    @property
+    def updated(self):
+        return self._ref.updated
 
 
 class _FakeUserScopedClient:
@@ -307,6 +318,31 @@ def test_fetch_due_alarms_supports_once_repeat_alias(monkeypatch):
     assert results[0].schedule.repeat == firestore_client.models.AlarmRepeat.NONE
 
 
+def test_fetch_due_alarms_supports_daily_repeat(monkeypatch):
+    """AlarmRepeat.DAILY is parsed correctly; daily alarm is returned (not skipped)."""
+    now = datetime.now(timezone.utc)
+    data = {
+        "status": "on",
+        "nextOccurrenceUTC": now.isoformat(),
+        "schedule": {"repeat": "daily", "timeLocal": "08:00", "days": []},
+        "targets": [{"deviceId": "90:e5:b1:a8:e4:38", "mode": "scheduled_conversation"}],
+    }
+    docs = [_FakeDoc("users/user-1/alarms/alarm-1", data)]
+    client = _FakeClient(docs)
+
+    monkeypatch.setattr(
+        firestore_client, "FieldFilter", lambda field_path, op, value: (field_path, op, value)
+    )
+    monkeypatch.setattr(firestore_client, "_get_user_metadata", lambda doc, cache: {})
+
+    results = firestore_client.fetch_due_alarms(
+        now, lookahead=timedelta(minutes=1), client=client
+    )
+
+    assert len(results) == 1
+    assert results[0].schedule.repeat == firestore_client.models.AlarmRepeat.DAILY
+
+
 def test_fetch_active_alarms_for_user_returns_on_alarms(monkeypatch):
     """Returns scheduled_conversation alarms when stream has a valid doc."""
     now = datetime.now(timezone.utc)
@@ -379,4 +415,53 @@ def test_cancel_scheduled_conversation_writes_status_off():
     assert "updatedAt" in doc
     assert "lastProcessedUTC" not in doc
     assert fake_client.merge is True
+
+
+def test_modify_scheduled_conversation_updates_top_level_fields():
+    """Non-time fields are written via update(); schedule fields are untouched."""
+    fake_client = _FakeWriteClient()
+
+    firestore_client.modify_scheduled_conversation(
+        uid="user-1",
+        alarm_id="alarm-42",
+        content="updated gym session",
+        priority="high",
+        delivery_preference="be direct",
+        client=fake_client,
+    )
+
+    doc = fake_client.updated
+    assert doc is not None
+    assert doc["content"] == "updated gym session"
+    assert doc["label"] == "updated gym session"
+    assert doc["priority"] == "high"
+    assert doc["deliveryPreference"] == "be direct"
+    assert "updatedAt" in doc
+    # time fields not touched
+    assert "nextOccurrenceUTC" not in doc
+    assert "schedule.timeLocal" not in doc
+
+
+def test_modify_scheduled_conversation_updates_time_fields():
+    """When resolved_dt is provided, schedule dot-notation keys and nextOccurrenceUTC are written."""
+    from datetime import timezone as tz_module
+    fake_client = _FakeWriteClient()
+    resolved = datetime(2026, 4, 1, 9, 0, tzinfo=tz_module.utc)
+
+    firestore_client.modify_scheduled_conversation(
+        uid="user-1",
+        alarm_id="alarm-42",
+        resolved_dt=resolved,
+        tz_str="UTC",
+        client=fake_client,
+    )
+
+    doc = fake_client.updated
+    assert doc is not None
+    assert "nextOccurrenceUTC" in doc
+    assert doc["schedule.timeLocal"] == "09:00"
+    assert doc["schedule.days"] == ["2026-04-01"]
+    # non-time fields not present (only updatedAt + time keys)
+    assert "content" not in doc
+    assert "priority" not in doc
 

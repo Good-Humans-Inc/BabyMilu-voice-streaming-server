@@ -18,6 +18,7 @@ logger = setup_logging()
 
 _REPEAT_ALIASES = {
     "weekly": models.AlarmRepeat.WEEKLY,
+    "daily": models.AlarmRepeat.DAILY,
     "none": models.AlarmRepeat.NONE,
     "once": models.AlarmRepeat.NONE,
     "one_time": models.AlarmRepeat.NONE,
@@ -431,6 +432,67 @@ def fetch_active_alarms_for_user(
         f"Fetched {len(docs)} active scheduled_conversation reminders for user {uid}"
     )
     return docs
+
+
+def modify_scheduled_conversation(
+    uid: str,
+    alarm_id: str,
+    *,
+    resolved_dt: Optional[datetime] = None,
+    tz_str: Optional[str] = None,
+    content: Optional[str] = None,
+    priority: Optional[str] = None,
+    recurrence: Optional[str] = None,
+    delivery_preference: Optional[str] = None,
+    conversation_outline: Optional[str] = None,
+    character_reminder: Optional[str] = None,
+    emotional_context: Optional[str] = None,
+    completion_signal: Optional[str] = None,
+    client: Optional[firestore.Client] = None,
+) -> None:
+    """Partially update a scheduled_conversation alarm doc.
+
+    Only the provided (non-None) fields are written. Uses .update() with dot
+    notation for schedule subfields so schedule.repeat is never overwritten.
+    """
+    client = client or _build_client()
+    now = datetime.now(timezone.utc)
+    updates: dict = {"updatedAt": _format_datetime(now)}
+
+    if resolved_dt is not None and tz_str is not None:
+        resolved_local = resolved_dt.astimezone(ZoneInfo(tz_str))
+        updates["nextOccurrenceUTC"] = _format_datetime(resolved_dt)
+        updates["schedule.timeLocal"] = resolved_local.strftime("%H:%M")
+        updates["schedule.days"] = [resolved_local.strftime("%Y-%m-%d")]
+
+    if content is not None:
+        updates["content"] = content
+        updates["label"] = content
+    if priority is not None:
+        updates["priority"] = priority
+    if recurrence is not None:
+        updates["schedule.repeat"] = recurrence
+    if delivery_preference is not None:
+        updates["deliveryPreference"] = delivery_preference
+    if conversation_outline is not None:
+        updates["conversationOutline"] = conversation_outline
+    if character_reminder is not None:
+        updates["characterReminder"] = character_reminder
+    if emotional_context is not None:
+        updates["emotionalContext"] = emotional_context
+    if completion_signal is not None:
+        updates["completionSignal"] = completion_signal
+
+    (
+        client.collection("users")
+        .document(uid)
+        .collection("alarms")
+        .document(alarm_id)
+        .update(updates)
+    )
+    logger.bind(tag=TAG).info(
+        f"Modified scheduled conversation {alarm_id} for user {uid}: {list(updates.keys())}"
+    )
 
 
 def cancel_scheduled_conversation(

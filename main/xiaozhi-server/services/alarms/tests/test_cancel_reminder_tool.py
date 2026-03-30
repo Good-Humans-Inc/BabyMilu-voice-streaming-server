@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from plugins_func.functions.cancel_reminder import cancel_reminder, list_reminders
 from plugins_func.register import Action
 from services.alarms import models
@@ -85,6 +83,22 @@ def test_list_reminders_returns_empty_message_when_none(monkeypatch):
 
     assert response.action == Action.REQLLM
     assert "No active reminders" in response.result
+
+
+def test_list_reminders_fetch_error_returns_response(monkeypatch):
+    monkeypatch.setattr(
+        "plugins_func.functions.cancel_reminder.get_owner_phone_for_device",
+        lambda device_id: "user-1",
+    )
+    monkeypatch.setattr(
+        "plugins_func.functions.cancel_reminder.fetch_active_alarms_for_user",
+        lambda uid: (_ for _ in ()).throw(RuntimeError("Firestore unavailable")),
+    )
+
+    response = list_reminders(_make_conn())
+
+    assert response.action == Action.RESPONSE
+    assert response.response is not None
 
 
 def test_list_reminders_missing_uid_returns_response(monkeypatch):
