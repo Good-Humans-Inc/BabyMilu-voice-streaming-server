@@ -2,7 +2,6 @@ import os
 import sys
 import copy
 import json
-import re
 import uuid
 import time
 import queue
@@ -61,89 +60,6 @@ from core.utils.api_client import query_task, get_assigned_tasks_for_user, proce
 TAG = __name__
 
 auto_import_modules("plugins_func.functions")
-
-
-def _character_identity_suffix(fields: Dict[str, Any]) -> str:
-    """
-    Text to append from Firestore character fields. No 'About you' heading.
-    Inserts a blank line before Your Description when profile lines precede it.
-    """
-    profile_parts: list[str] = []
-    for label, key in (
-        ("Your Name", "name"),
-        ("Your Age", "age"),
-        ("Your Pronouns", "pronouns"),
-        ("Your Relationship with the user", "relationship"),
-        ("You like calling the user", "callMe"),
-    ):
-        val = fields.get(key)
-        if val is not None and str(val).strip():
-            profile_parts.append(f"{label}: {str(val).strip()}")
-
-    bio_raw = fields.get("bio")
-    bio_s = str(bio_raw).strip() if bio_raw is not None else ""
-
-    chunks: list[str] = []
-    if profile_parts:
-        chunks.append("\n".join(profile_parts))
-    if bio_s:
-        chunks.append(f"Your Description: {bio_s}")
-    if not chunks:
-        return ""
-
-    out = "\n" + chunks[0]
-    if len(chunks) > 1:
-        out += "\n\n" + chunks[1]
-    return out
-
-
-def _strip_character_identity_from_prompt(prompt: str) -> str:
-    """
-    Remove previously injected character identity blocks so character switching
-    replaces identity instead of appending to an old persona.
-    """
-    if not prompt:
-        return prompt
-
-    # Labels used over time for the character bio line; strip all when rebuilding.
-    _bio_labels = (
-        "User's description of you:",
-        "My self-description:",
-        "Your Description:",
-    )
-    _bio_alt = "|".join(re.escape(lab) for lab in _bio_labels)
-
-    # Strip markdown "About you" section (any case, any # count; older / remote prompts).
-    prompt = re.sub(
-        rf"(?i)\n#+\s*about you\s*:?\s*\n.*?(?=\n+(?:{_bio_alt})|\nUser profile:|\Z)",
-        "",
-        prompt,
-        flags=re.S,
-    )
-    # Strip a plain "About you:" heading line when it sits right before profile fields.
-    _profile_first = (
-        r"(?:Your Name:|Your Age:|Your Pronouns:|Your Relationship with the user:"
-        r"|You like calling the user:)"
-    )
-    prompt = re.sub(
-        rf"(?i)\n#?\s*about you\s*:?\s*\n(?={_profile_first})",
-        "\n",
-        prompt,
-    )
-    # Strip injected profile lines (same labels as _character_identity_suffix).
-    _profile_line = (
-        r"(?:Your Name:.*|Your Age:.*|Your Pronouns:.*|"
-        r"Your Relationship with the user:.*|You like calling the user:.*)"
-    )
-    prompt = re.sub(rf"(?:\n{_profile_line})+", "", prompt)
-    # Strip bio line(s); allow extra newlines before the label (e.g. blank line before Your Description).
-    prompt = re.sub(
-        rf"\n+(?:{_bio_alt}).*?(?=\nUser profile:|\Z)",
-        "",
-        prompt,
-        flags=re.S,
-    )
-    return prompt
 
 
 class TTSException(RuntimeError):
@@ -342,7 +258,7 @@ class ConnectionHandler:
         # 新建会话时，首轮下发mode instructions
         self._seed_instructions_once = False
         # related to storing logs into database
-        self.chat_store = ChatStore()
+        self.chat_store = ChatStore(logger=self.logger)
         self._session_created = False
         self._session_closed = False
         self.turn_index = 0
@@ -505,11 +421,23 @@ class ConnectionHandler:
                 )
 
             base_prompt = self.common_config.get("prompt", self.config.get("prompt", ""))
-            refreshed_prompt = _strip_character_identity_from_prompt(base_prompt)
+            refreshed_prompt = base_prompt
 
-            _cid = _character_identity_suffix(fields)
-            if _cid:
-                refreshed_prompt += _cid
+            profile_parts = []
+            for label, key in (
+                ("Your Name", "name"),
+                ("Your Age", "age"),
+                ("Your Pronouns", "pronouns"),
+                ("Your Relationship with the user", "relationship"),
+                ("You like calling the user", "callMe"),
+            ):
+                val = fields.get(key)
+                if val:
+                    profile_parts.append(f"{label}: {val}")
+            if profile_parts:
+                refreshed_prompt += "\n# About you:\n" + "\n- ".join(profile_parts)
+            if fields.get("bio"):
+                refreshed_prompt += f"\nUser's description of you: {fields['bio']}"
 
             # Re-append user profile/task context, same as initial handshake behavior.
             try:
@@ -643,9 +571,7 @@ class ConnectionHandler:
             # ---- SAFE DEFAULTS ----
             user_id = f"device:{self.device_id}"
             user_name = "Unknown User"
-            new_prompt = _strip_character_identity_from_prompt(
-                self.config.get("prompt", "")
-            )
+            new_prompt = self.config.get("prompt", "")
 
             cached_enhanced_prompt = self.prompt_manager.get_cached_enhanced_prompt(
                 self.device_id, prompt_text=self.config.get("prompt")
@@ -697,9 +623,27 @@ class ConnectionHandler:
                             "No voice resolved from Firestore character profile; TTS may fall back to default_voice_id"
                         )
 
-                    _cid = _character_identity_suffix(fields)
-                    if _cid:
-                        new_prompt += _cid
+                    profile_parts = []
+                    for label, key in (
+                        ("Your Name", "name"),
+                        ("Your Age", "age"),
+                        ("Your Pronouns", "pronouns"),
+                        ("Your Relationship with the user", "relationship"),
+                        ("You like calling the user", "callMe"),
+                    ):
+                        val = fields.get(key)
+                        if val:
+                            profile_parts.append(f"{label}: {val}")
+
+                    if profile_parts:
+                        new_prompt += "\n# About you:\n" + "\n- ".join(
+                            profile_parts
+                        )
+
+                    if fields.get("bio"):
+                        new_prompt += (
+                            f"\nUser's description of you: {fields['bio']}"
+                        )
                 else:
                     self.logger.bind(tag=TAG, device_id=self.device_id).warning(
                         "MISSING activeCharacterId; using defaults"
@@ -779,7 +723,8 @@ class ConnectionHandler:
 
                 self.chat_store.get_or_create_user(
                     user_id=self.user_id,
-                    name=self.user_name
+                    name=self.user_name,
+                    device_id=self.device_id,
                 )
 
                 self.chat_store.create_session(
@@ -1316,10 +1261,15 @@ Return ONLY the JSON array, no other explanation."""
                             ai_summary = self.generate_ai_conversation_summary()
                             
                             # 检查任务匹配
+                            use_task_provider = bool(
+                                self.memory
+                                and self.task
+                                and hasattr(self.task, "detect_task")
+                            )
                             matched_tasks = []
                             try:
                                 # 获取用户ID (使用owner_phone作为user_id)
-                                if self.device_id:
+                                if self.device_id and not use_task_provider:
                                     owner_phone = get_owner_phone_for_device(self.device_id)
                                     if owner_phone:
                                         matched_tasks = self.check_conversation_against_tasks(owner_phone)
@@ -1399,7 +1349,23 @@ Return ONLY the JSON array, no other explanation."""
             # Ensure session is ended even if memory saving is disabled or fails
             if getattr(self, "_session_created", False) and not getattr(self, "_session_closed", False):
                 try:
-                    self.chat_store.end_session(self.session_id)
+                    try:
+                        self.chat_store.ensure_memory_profile_identity(
+                            user_id=getattr(self, "user_id", None),
+                            device_id=self.device_id,
+                        )
+                    except Exception as identity_err:
+                        self.logger.bind(tag=TAG).warning(
+                            f"Memory profile identity hydration skipped: {identity_err}"
+                        )
+
+                    if getattr(self, "turn_index", 0) == 0:
+                        self.logger.bind(tag=TAG).info(
+                            f"No turns recorded, deleting empty session: {self.session_id}"
+                        )
+                        self.chat_store.delete_session(self.session_id)
+                    else:
+                        self.chat_store.end_session(self.session_id)
                 finally:
                     self._session_closed = True
         except Exception as e:
@@ -1709,8 +1675,6 @@ Return ONLY the JSON array, no other explanation."""
             self.config["prompt"] = private_config["prompt"]
         if private_config.get("voiceprint") is not None:
             self.config["voiceprint"] = private_config["voiceprint"]
-        if private_config.get("summaryMemory") is not None:
-            self.config["summaryMemory"] = private_config["summaryMemory"]
         if private_config.get("device_max_output_size") is not None:
             self.max_output_size = int(private_config["device_max_output_size"])
         if private_config.get("chat_history_conf") is not None:
@@ -1773,7 +1737,7 @@ Return ONLY the JSON array, no other explanation."""
                 mem_type = mem_cfg.get("type", mem_name)
                 try:
                     self.memory = memory_factory.create_instance(
-                        mem_type, mem_cfg, self.config.get("summaryMemory")
+                        mem_type, mem_cfg, None
                     )
                     self.logger.bind(tag=TAG).debug(
                         f"Created per-connection memory provider: {mem_type}"
@@ -1840,11 +1804,30 @@ Return ONLY the JSON array, no other explanation."""
     def _initialize_memory(self):
         if self.memory is None:
             return
+
+        summary_memory_block = ""
+        try:
+            summary_memory_block = self.chat_store.get_system_memory_block(
+                user_id=getattr(self, "user_id", None)
+            )
+            if summary_memory_block:
+                self.logger.bind(tag=TAG).info(
+                    f"Loaded systemMemoryBlock from memory_read_model for user {getattr(self, 'user_id', None)}"
+                )
+            else:
+                self.logger.bind(tag=TAG).info(
+                    f"systemMemoryBlock is empty for user {getattr(self, 'user_id', None)}"
+                )
+        except Exception as e:
+            self.logger.bind(tag=TAG).warning(
+                f"Failed loading systemMemoryBlock from memory_read_model: {e}"
+            )
+
         self.memory.init_memory(
             role_id=self.device_id,
+            user_id=getattr(self, "user_id", None),
             llm=self.llm,
-            summary_memory=self.config.get("summaryMemory", None),
-            save_to_file=not self.read_config_from_api,
+            summary_memory=summary_memory_block,
         )
         # Initialize task module (guard: Task provider may not be configured)
         if self.task:
@@ -1859,9 +1842,9 @@ Return ONLY the JSON array, no other explanation."""
         if memory_type == "nomem":
             return
         elif memory_type == "mem_local_short":
-            memory_llm_name = memory_config[self.config["selected_module"]["Memory"]][
-                "llm"
-            ]
+            memory_llm_name = memory_config[
+                self.config["selected_module"]["Memory"]
+            ].get("llm")
             if memory_llm_name and memory_llm_name in self.config["LLM"]:
                 from core.utils import llm as llm_utils
 

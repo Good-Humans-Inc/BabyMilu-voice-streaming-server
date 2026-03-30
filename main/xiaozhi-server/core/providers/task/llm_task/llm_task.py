@@ -107,15 +107,24 @@ class TaskProvider(TaskProviderBase):
         try:
             # Build conversation text
             conv_text = self._build_conversation_text(msgs)
-            
+
+            assigned_tasks = []
             if tasks is not None:
-                tasks_text = tasks
+                if isinstance(tasks, str):
+                    tasks_text = tasks
+                else:
+                    assigned_tasks = list(tasks)
+                    tasks_text = self._build_tasks_text_from_list(
+                        assigned_tasks, character_name
+                    )
             else:
                 # Fetch user's assigned tasks
                 assigned_tasks = get_assigned_tasks_for_user(user_id)
-                
+
                 # Build tasks text
-                tasks_text = self._build_tasks_text_from_list(assigned_tasks, character_name)
+                tasks_text = self._build_tasks_text_from_list(
+                    assigned_tasks, character_name
+                )
             if not tasks_text:
                 logger.bind(tag=TAG).debug(f"用户 {user_id} 没有分配的任务，跳过任务检测")
                 return []
@@ -129,7 +138,9 @@ class TaskProvider(TaskProviderBase):
             )
             
             # Call LLM for task detection with structured outputs
-            logger.bind(tag=TAG).debug(f"开始任务检测 - 用户: {user_id}, 任务数: {len(assigned_tasks)}")
+            logger.bind(tag=TAG).debug(
+                f"开始任务检测 - 用户: {user_id}, 任务数: {len(assigned_tasks)}"
+            )
             
             # Use Chat Completions API for structured outputs
             # The Responses API doesn't support response_format, so we use completions directly
