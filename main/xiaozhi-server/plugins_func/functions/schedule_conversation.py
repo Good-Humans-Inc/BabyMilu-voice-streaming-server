@@ -1,3 +1,4 @@
+import re
 import dateparser
 from zoneinfo import ZoneInfo
 from datetime import datetime
@@ -9,6 +10,9 @@ from config.logger import setup_logging
 
 TAG = __name__
 logger = setup_logging()
+
+# Matches bare times like "8pm", "9:30am", "8 pm", "9:30 AM"
+_BARE_TIME_RE = re.compile(r'\b(\d{1,2}(?::\d{2})?\s*[ap]m)\b', re.IGNORECASE)
 
 SCHEDULE_CONVERSATION_FUNCTION_DESC = {
     "type": "function",
@@ -30,11 +34,18 @@ SCHEDULE_CONVERSATION_FUNCTION_DESC = {
                 "time_expression": {
                     "type": "string",
                     "description": (
-                        "The time the user wants the check-in, as they expressed it "
-                        "(e.g. 'in 5 minutes', 'tomorrow at 7am', 'Friday at 9pm', '8pm'). "
-                        "Do NOT convert — pass the raw expression. "
-                        "Do NOT include recurrence words like 'daily' or 'every day' here — "
-                        "those belong in the recurrence field."
+                        "Extract ONLY the one-time trigger moment using one of these exact templates: "
+                        "'in N minutes', 'in N hours', 'in N days', 'in N weeks', "
+                        "'today at H:MMam/pm', 'tomorrow at H:MMam/pm', "
+                        "'[Weekday] at H:MMam/pm' (e.g. 'Monday at 8pm'), "
+                        "'next [Weekday] at H:MMam/pm', "
+                        "'[Month] [D] at H:MMam/pm' (e.g. 'March 30 at 9pm'), "
+                        "or a bare time like '8pm' or '9:30am'. "
+                        "Do NOT include recurrence or frequency words such as "
+                        "'every day', 'daily', 'each morning', 'weekly', 'every night', etc. — "
+                        "those belong in the recurrence field. "
+                        "Example: user says 'every day at 8pm' → "
+                        "time_expression='8pm', recurrence='daily'."
                     ),
                 },
                 "content": {
@@ -154,12 +165,17 @@ def schedule_conversation(
         "RETURN_AS_TIMEZONE_AWARE": True,
     }
 
-    # Parse natural language time expression relative to now.
-    # Retry with "today at" prefix for bare times like "8 am" or "9pm" that
-    # dateparser cannot resolve without a date anchor.
+    # Pass 1: parse as-is (handles relative and anchored expressions).
+    # Pass 2: prepend "today at" for bare times like "8pm" or "9:30am".
+    # Pass 3: regex-extract the time token and retry — catches mixed expressions
+    #          like "8pm every day" where the LLM included recurrence words.
     resolved = dateparser.parse(time_expression, languages=["en"], settings=_parse_settings)
     if resolved is None:
         resolved = dateparser.parse(f"today at {time_expression}", languages=["en"], settings=_parse_settings)
+    if resolved is None:
+        m = _BARE_TIME_RE.search(time_expression)
+        if m:
+            resolved = dateparser.parse(f"today at {m.group(1)}", languages=["en"], settings=_parse_settings)
 
     if resolved is None:
         logger.bind(tag=TAG).warning(
