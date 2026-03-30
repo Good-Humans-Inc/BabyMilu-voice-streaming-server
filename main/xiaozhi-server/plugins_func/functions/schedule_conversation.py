@@ -92,10 +92,11 @@ SCHEDULE_CONVERSATION_FUNCTION_DESC = {
                 "character_reminder": {
                     "type": "string",
                     "description": (
-                        "A specific, contextual note to yourself about staying in character "
-                        "for THIS conversation. Not generic. "
-                        "Example: 'Bakugou is checking on someone who said they were exhausted — "
-                        "push without being harsh, this person needs support not scolding.'"
+                        "Look back at your character definition and identify the specific traits — "
+                        "abilities, catchphrases, personal codes, or quirks — "
+                        "that are relevant to what the user is being reminded about. "
+                        "Write a note on how to weave these into the conversation outline "
+                        "so the reminder feels authentically like you, not a generic assistant."
                     ),
                 },
                 "emotional_context": {
@@ -112,7 +113,10 @@ SCHEDULE_CONVERSATION_FUNCTION_DESC = {
                         "What each outcome looks like SPECIFICALLY for this reminder: "
                         "Done (what counts as mission accomplished), "
                         "Snoozed (what signals a delay request), "
-                        "Resisting (what signals pushback or avoidance)."
+                        "Resisting (what signals pushback or avoidance), "
+                        "Ignored (user never responds — write what your character should say "
+                        "in the final follow-up before giving up, e.g. a character-appropriate "
+                        "closing that leaves the door open)."
                     ),
                 },
                 "delivery_preference": {
@@ -226,6 +230,9 @@ def schedule_conversation(
 
     return ActionResponse(
         action=Action.REQLLM,
-        result=f"Scheduled: '{content}' on {resolved.strftime('%A, %B %-d at %-I:%M %p')} ({tz_str}).",
+        result=(
+            f"Scheduled: '{content}' on {resolved.strftime('%A, %B %-d at %-I:%M %p')} ({tz_str}). "
+            f"reminder_id={reminder_id if uid else 'unavailable'}"
+        ),
         response=None,
     )

@@ -486,8 +486,13 @@ def run_phase2(client: openai.OpenAI, model: str, alarm: dict) -> None:
 
     messages: list[dict] = []
 
+    # Character prompt + mode instructions combined, mirroring production:
+    # production seeds character prompt via ensure_conversation_with_system(),
+    # then appends mode_specific_instructions per turn.
+    delivery_system = PHASE1_SYSTEM + "\n\n" + instructions
+
     # LLM initiates (server_initiate_chat = True for scheduled_conversation)
-    opener, _ = llm_turn(client, model, messages, system=instructions)
+    opener, _ = llm_turn(client, model, messages, system=delivery_system)
     print(f"Character: {opener}\n")
     messages.append({"role": "assistant", "content": opener})
 
@@ -502,7 +507,7 @@ def run_phase2(client: openai.OpenAI, model: str, alarm: dict) -> None:
             continue
 
         messages.append({"role": "user", "content": user_input})
-        reply, _ = llm_turn(client, model, messages, system=instructions)
+        reply, _ = llm_turn(client, model, messages, system=delivery_system)
         print(f"\nCharacter: {reply}\n")
         messages.append({"role": "assistant", "content": reply})
 

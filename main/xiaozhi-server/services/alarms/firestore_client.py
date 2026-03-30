@@ -386,6 +386,83 @@ def create_scheduled_conversation(
     return alarm_id
 
 
+def fetch_active_alarms_for_user(
+    uid: str,
+    client: Optional[firestore.Client] = None,
+) -> List[models.AlarmDoc]:
+    """Fetch all active scheduled_conversation reminders for a specific user.
+
+    Queries /users/{uid}/alarms where status=on, then filters to
+    scheduled_conversation mode only (morning_alarm docs are deprecated and ignored).
+    """
+    client = client or _build_client()
+    docs: List[models.AlarmDoc] = []
+    query = (
+        client.collection("users")
+        .document(uid)
+        .collection("alarms")
+        .where(filter=FieldFilter("status", "==", "on"))
+    )
+    for doc in query.stream():
+        data = doc.to_dict() or {}
+        schedule_payload = data.get("schedule") or {}
+        try:
+            repeat = _parse_repeat(schedule_payload.get("repeat", "none"))
+            schedule = models.AlarmSchedule(
+                repeat=repeat,
+                time_local=schedule_payload.get("timeLocal", ""),
+                days=schedule_payload.get("days") or [],
+            )
+            targets_payload = data.get("targets") or []
+            targets = [
+                models.AlarmTarget(
+                    device_id=_normalize_device_id(t["deviceId"]),
+                    mode=t.get("mode", "morning_alarm"),
+                )
+                for t in targets_payload
+                if "deviceId" in t
+            ]
+        except (KeyError, ValueError):
+            continue
+        alarm = _build_alarm_doc(doc, data, schedule, targets)
+        if any(t.mode == "scheduled_conversation" for t in alarm.targets):
+            docs.append(alarm)
+    logger.bind(tag=TAG).info(
+        f"Fetched {len(docs)} active scheduled_conversation reminders for user {uid}"
+    )
+    return docs
+
+
+def cancel_scheduled_conversation(
+    uid: str,
+    alarm_id: str,
+    client: Optional[firestore.Client] = None,
+) -> None:
+    """Cancel a scheduled_conversation reminder by setting status=off.
+
+    All reminders live in /users/{uid}/alarms/. This function is only ever
+    called with scheduled_conversation alarm_ids — the LLM only learns
+    reminder_ids from list_reminders or schedule_conversation, both of which
+    exclusively deal with scheduled_conversation docs.
+    """
+    client = client or _build_client()
+    now = datetime.now(timezone.utc)
+    (
+        client.collection("users")
+        .document(uid)
+        .collection("alarms")
+        .document(alarm_id)
+        .set(
+            {
+                "status": models.AlarmStatus.OFF.value,
+                "updatedAt": _format_datetime(now),
+            },
+            merge=True,
+        )
+    )
+    logger.bind(tag=TAG).info(f"Scheduled conversation {alarm_id} cancelled for user {uid}")
+
+
 def mark_one_time_alarm_complete(
     alarm: models.AlarmDoc,
     *,

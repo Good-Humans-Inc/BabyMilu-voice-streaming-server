@@ -39,9 +39,11 @@ class _FakeWriteRef:
     """Captures the doc dict passed to .set()."""
     def __init__(self):
         self.written = None
+        self.merge = None
 
-    def set(self, doc):
+    def set(self, doc, **kwargs):
         self.written = doc
+        self.merge = kwargs.get("merge")
 
 
 class _FakeWriteClient:
@@ -55,12 +57,34 @@ class _FakeWriteClient:
     def document(self, name):
         return self
 
-    def set(self, doc):
-        self._ref.set(doc)
+    def set(self, doc, **kwargs):
+        self._ref.set(doc, **kwargs)
 
     @property
     def written(self):
         return self._ref.written
+
+    @property
+    def merge(self):
+        return self._ref.merge
+
+
+class _FakeUserScopedClient:
+    """Supports client.collection().document().collection().where().stream()."""
+    def __init__(self, docs):
+        self._docs = docs
+
+    def collection(self, *args, **kwargs):
+        return self
+
+    def document(self, *args, **kwargs):
+        return self
+
+    def where(self, *args, **kwargs):
+        return self
+
+    def stream(self):
+        return self._docs
 
 
 def test_create_scheduled_conversation_writes_correct_mode_and_fields():
@@ -281,4 +305,78 @@ def test_fetch_due_alarms_supports_once_repeat_alias(monkeypatch):
 
     assert len(results) == 1
     assert results[0].schedule.repeat == firestore_client.models.AlarmRepeat.NONE
+
+
+def test_fetch_active_alarms_for_user_returns_on_alarms(monkeypatch):
+    """Returns scheduled_conversation alarms when stream has a valid doc."""
+    now = datetime.now(timezone.utc)
+    data = {
+        "status": "on",
+        "nextOccurrenceUTC": now.isoformat(),
+        "schedule": {"repeat": "once", "timeLocal": "09:00", "days": ["2026-03-29"]},
+        "targets": [{"deviceId": "aa:bb:cc:dd:ee:ff", "mode": "scheduled_conversation"}],
+        "content": "take vitamins",
+        "label": "take vitamins",
+    }
+    docs = [_FakeDoc("users/user-1/alarms/alarm-42", data)]
+    client = _FakeUserScopedClient(docs)
+
+    monkeypatch.setattr(
+        firestore_client, "FieldFilter", lambda field_path, op, value: (field_path, op, value)
+    )
+
+    results = firestore_client.fetch_active_alarms_for_user("user-1", client=client)
+
+    assert len(results) == 1
+    assert results[0].alarm_id == "alarm-42"
+    assert results[0].content == "take vitamins"
+
+
+def test_fetch_active_alarms_for_user_skips_morning_alarm_mode(monkeypatch):
+    """Python-level filter excludes morning_alarm docs; only scheduled_conversation returned."""
+    now = datetime.now(timezone.utc)
+    base = {
+        "status": "on",
+        "nextOccurrenceUTC": now.isoformat(),
+        "schedule": {"repeat": "once", "timeLocal": "09:00", "days": ["2026-03-29"]},
+    }
+    docs = [
+        _FakeDoc("users/user-1/alarms/alarm-sc", {
+            **base,
+            "targets": [{"deviceId": "aa:bb:cc:dd:ee:ff", "mode": "scheduled_conversation"}],
+            "content": "gym",
+        }),
+        _FakeDoc("users/user-1/alarms/alarm-ma", {
+            **base,
+            "targets": [{"deviceId": "aa:bb:cc:dd:ee:ff", "mode": "morning_alarm"}],
+        }),
+    ]
+    client = _FakeUserScopedClient(docs)
+
+    monkeypatch.setattr(
+        firestore_client, "FieldFilter", lambda field_path, op, value: (field_path, op, value)
+    )
+
+    results = firestore_client.fetch_active_alarms_for_user("user-1", client=client)
+
+    assert len(results) == 1
+    assert results[0].alarm_id == "alarm-sc"
+
+
+def test_cancel_scheduled_conversation_writes_status_off():
+    """Sets status=off and updatedAt; does NOT write lastProcessedUTC."""
+    fake_client = _FakeWriteClient()
+
+    firestore_client.cancel_scheduled_conversation(
+        uid="user-1",
+        alarm_id="alarm-42",
+        client=fake_client,
+    )
+
+    doc = fake_client.written
+    assert doc is not None
+    assert doc["status"] == "off"
+    assert "updatedAt" in doc
+    assert "lastProcessedUTC" not in doc
+    assert fake_client.merge is True
 
