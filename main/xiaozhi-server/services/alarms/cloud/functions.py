@@ -155,7 +155,6 @@ def scan_due_scheduled_items(request) -> Dict[str, Any]:
         reminders_result = reminder_push_job.run_send_reminder_push_job(
             execute=reminders_execute,
             now=now,
-            client=_db,
         )
     else:
         reminders_result = {
@@ -188,4 +187,3 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
-
