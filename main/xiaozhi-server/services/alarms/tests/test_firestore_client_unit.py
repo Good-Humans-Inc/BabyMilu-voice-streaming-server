@@ -24,6 +24,18 @@ class _FakeClient:
         assert name == "alarms"
         return _FakeQuery(self._docs)
 
+    def collection(self, name):
+        assert name == "devices"
+        return _FakeDevicesCollection()
+
+
+class _FakeDevicesCollection:
+    def where(self, *args, **kwargs):
+        return self
+
+    def stream(self):
+        return iter([])
+
 
 class _FakeDoc:
     def __init__(self, path, data):
@@ -128,3 +140,85 @@ def test_fetch_due_alarms_supports_once_repeat_alias(monkeypatch):
     assert len(results) == 1
     assert results[0].schedule.repeat == firestore_client.models.AlarmRepeat.NONE
 
+
+def test_fetch_due_alarms_supports_daily_repeat_alias(monkeypatch):
+    now = datetime.now(timezone.utc)
+    data = {
+        "status": "on",
+        "nextOccurrenceUTC": now.isoformat(),
+        "schedule": {"repeat": "daily", "timeLocal": "07:00"},
+        "targets": [{"deviceId": "90:e5:b1:a8:e4:38", "mode": "morning_alarm"}],
+    }
+    docs = [_FakeDoc("users/user-1/alarms/alarm-1", data)]
+    client = _FakeClient(docs)
+
+    monkeypatch.setattr(
+        firestore_client, "FieldFilter", lambda field_path, op, value: (field_path, op, value)
+    )
+    monkeypatch.setattr(firestore_client, "_get_user_metadata", lambda doc, cache: {})
+
+    results = firestore_client.fetch_due_alarms(
+        now, lookahead=timedelta(minutes=1), client=client
+    )
+
+    assert len(results) == 1
+    assert results[0].schedule.repeat == firestore_client.models.AlarmRepeat.WEEKLY
+    assert results[0].schedule.days == list(firestore_client.models.DAY_NAMES)
+
+
+def test_fetch_due_alarms_uses_owner_devices_for_legacy_alarm_docs(monkeypatch):
+    now = datetime.now(timezone.utc)
+    data = {
+        "status": "on",
+        "nextOccurrenceUTC": now.isoformat(),
+        "schedule": {"repeat": "weekly", "timeLocal": "07:00", "days": ["Mon"]},
+        "userId": "user-1",
+    }
+    docs = [_FakeDoc("users/user-1/alarms/morning", data)]
+    client = _FakeClient(docs)
+
+    monkeypatch.setattr(
+        firestore_client, "FieldFilter", lambda field_path, op, value: (field_path, op, value)
+    )
+    monkeypatch.setattr(firestore_client, "_get_user_metadata", lambda doc, cache: {})
+    monkeypatch.setattr(
+        firestore_client,
+        "_get_user_device_ids",
+        lambda user_id, client, cache: ["90:e5:b1:a8:e4:38"],
+    )
+
+    results = firestore_client.fetch_due_alarms(
+        now, lookahead=timedelta(minutes=1), client=client
+    )
+
+    assert len(results) == 1
+    assert len(results[0].targets) == 1
+    assert results[0].targets[0].device_id == "90:e5:b1:a8:e4:38"
+    assert results[0].targets[0].mode == "morning_alarm"
+
+
+def test_fetch_due_alarms_ignores_invalid_legacy_owner_device_ids(monkeypatch):
+    now = datetime.now(timezone.utc)
+    data = {
+        "status": "on",
+        "nextOccurrenceUTC": now.isoformat(),
+        "schedule": {"repeat": "weekly", "timeLocal": "07:00", "days": ["Mon"]},
+    }
+    docs = [_FakeDoc("users/user-1/alarms/morning", data)]
+    client = _FakeClient(docs)
+
+    monkeypatch.setattr(
+        firestore_client, "FieldFilter", lambda field_path, op, value: (field_path, op, value)
+    )
+    monkeypatch.setattr(firestore_client, "_get_user_metadata", lambda doc, cache: {})
+    monkeypatch.setattr(
+        firestore_client,
+        "_get_user_device_ids",
+        lambda user_id, client, cache: [],
+    )
+
+    results = firestore_client.fetch_due_alarms(
+        now, lookahead=timedelta(minutes=1), client=client
+    )
+
+    assert results == []

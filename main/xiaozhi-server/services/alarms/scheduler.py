@@ -23,8 +23,11 @@ def prepare_wake_requests(
     lookahead: timedelta,
     ) -> List[tasks.WakeRequest]:
     wake_requests: List[tasks.WakeRequest] = []
-    alarms = firestore_client.fetch_due_alarms(now, lookahead=lookahead)
-    for alarm in alarms:
+    all_docs = (
+        firestore_client.fetch_due_alarms(now, lookahead=lookahead)
+        + firestore_client.fetch_due_reminders(now, lookahead=lookahead)
+    )
+    for alarm in all_docs:
         if not alarm.next_occurrence_utc:
             logger.bind(tag=TAG).warning(
                 f"Alarm {alarm.alarm_id} missing next_occurrence_utc; skipping"

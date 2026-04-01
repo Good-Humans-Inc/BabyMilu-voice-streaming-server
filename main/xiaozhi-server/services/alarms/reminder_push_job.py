@@ -45,7 +45,6 @@ This is a reminder notification that should feel natural, caring, and in-charact
 - Character personality: `{characterBio}`
 - Character relationship to user: `{characterRelationship}`
 - User prefers to be called: `{characterCallMe}`
-- Character pronouns: `{characterPronouns}`
 - Reminder task: `{reminderLabel}`
 - Scheduled time: `{reminderTime}`
 
@@ -56,7 +55,7 @@ This is a reminder notification that should feel natural, caring, and in-charact
 3. **Reminder Context:** Naturally incorporate the reminder task (`{reminderLabel}`) and acknowledge the time if relevant.
 4. **Style:** Write as a caring text message (10–20 words). Sound natural, not robotic or overly formal.
 5. **Tone:** Be supportive and gentle. This is a helpful reminder, not a command.
-6. **Constraints:** No hashtags, no emojis. Use first-person POV with pronouns `{characterPronouns}`. DON'T mention that this is an AI-generated message. It should feel like it came directly from the character. It should not have exact time in the message, just a natural reminder related to the time (e.g. "Don't forget about your meeting later!" or "It's almost time for your appointment!").
+6. **Constraints:** No hashtags, no emojis. Use first-person POV. DON'T mention that this is an AI-generated message. It should feel like it came directly from the character. It should not have exact time in the message, just a natural reminder related to the time (e.g. "Don't forget about your meeting later!" or "It's almost time for your appointment!").
 **Output Format:**
 Return ONLY the reminder message text as a plain string. No JSON, no markdown code blocks, no introductory text.
 
@@ -105,7 +104,6 @@ def _build_reminder_messages(payload: Dict[str, Any]) -> List[Dict[str, str]]:
         or "friend",
         characterCallMe=str(payload.get("characterCallMe", "")).strip()
         or payload.get("characterName", ""),
-        characterPronouns=str(payload.get("characterPronouns", "")).strip() or "they/them",
         reminderLabel=str(payload.get("reminderLabel", "")).strip() or "your reminder",
         reminderTime=reminder_time,
     )
@@ -123,13 +121,10 @@ def get_ai_message(
     """
     payload = {
         "userName": user_name,
-        "characterName": character_data.get("name", "BabyMilu"),
-        "characterBio": character_data.get("bio", ""),
-        "characterRelationship": character_data.get("relationship", "friend"),
-        "characterCallMe": character_data.get(
-            "callMe", character_data.get("name", "BabyMilu")
-        ),
-        "characterPronouns": character_data.get("pronouns", "they/them"),
+        "characterName": character_data.get("profile", {}).get("name", "BabyMilu") or character_data.get("name", "BabyMilu"),
+        "characterBio": character_data.get("profile", {}).get("personality", "") or character_data.get("bio", ""),
+        "characterRelationship": character_data.get("profile", {}).get("characterToUser", "friend") or character_data.get("relationship", "friend"),
+        "characterCallMe": character_data.get("profile", {}).get("nicknameCharacterCallsUser", "") or character_data.get("callMe", "") or character_data.get("name", "BabyMilu"),
         "reminderLabel": reminder_label,
         "reminderTime": reminder_time or "the scheduled time",
     }
@@ -305,7 +300,7 @@ def run_send_reminder_push_job(
                         character_data = char_snap.to_dict() or {}
                         character_cache[active_character_id] = character_data
 
-            character_name = character_data.get("name", "Milu") if character_data else "Milu"
+            character_name = character_data.get("profile", {}).get("name", "Milu") or character_data.get("name", "Milu") if character_data else "Milu"
             label = reminder_data.get("label", "Reminder")
             next_occurrence_str = reminder_data.get("nextOccurrenceUTC")
             user_name = user_data.get("name") or "there"
@@ -332,8 +327,6 @@ def run_send_reminder_push_job(
                     f"AI message failed for reminder {reminder_id}: {ai_error}"
                 )
                 ai_message = f"Hey {user_name}, reminder: {label}"
-                if reminder_time_display:
-                    ai_message += f" at {reminder_time_display}"
 
             if not execute:
                 results.append(

@@ -231,6 +231,7 @@ Intent:
       - get_weather
       - play_music
       - set_alarm
+      - set_reminder
       - get_capabilities
       - self_introduction
       - lookup_recipe
