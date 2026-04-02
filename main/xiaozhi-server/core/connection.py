@@ -1610,6 +1610,9 @@ Return ONLY the JSON array, no other explanation."""
                 self.logger.bind(tag=TAG).info(
                     f"systemMemoryBlock is empty for user {getattr(self, 'user_id', None)}"
                 )
+        # persist system memory block on the connection for use by memory-agent
+        # at the start of a conversation
+        self.system_memory_block = summary_memory_block or ""
         except Exception as e:
             self.logger.bind(tag=TAG).warning(
                 f"Failed loading systemMemoryBlock from user_memory_model: {e}"
@@ -2128,10 +2131,32 @@ Return ONLY the JSON array, no other explanation."""
             memory_str = None
             if self.memory is not None:
                 try:
-                    future = asyncio.run_coroutine_threadsafe(
-                        self.memory.query_memory(query), self.loop
-                    )
-                    memory_str = future.result(timeout=5.0)
+                    # Detect first genuine user turn in this conversation.
+                    # At this point the current user Message has already been
+                    # appended to self.dialogue; if there are no other prior
+                    # user/assistant messages then this is the first turn.
+                    prior_non_system = [m for m in self.dialogue.dialogue if m.role in ("user", "assistant")]
+                    is_first_turn = len(prior_non_system) == 1 and prior_non_system[-1].role == "user"
+
+                    if is_first_turn:
+                        # Build a minimal memory for the memory-agent: only the
+                        # system memory block (from user memory model) and the
+                        # character memory prompt. This avoids mixing in other
+                        # ephemeral or contextual memories at conversation start.
+                        sys_mem = getattr(self, "system_memory_block", "") or ""
+                        char_mem = getattr(self, "character_memory_prompt", "") or ""
+                        combined = sys_mem
+                        if char_mem:
+                            if combined:
+                                combined = combined + "\n\n" + char_mem
+                            else:
+                                combined = char_mem
+                        memory_str = combined or ""
+                    else:
+                        future = asyncio.run_coroutine_threadsafe(
+                            self.memory.query_memory(query), self.loop
+                        )
+                        memory_str = future.result(timeout=5.0)
                 except Exception as e:
                     self.logger.bind(tag=TAG).warning(f"记忆查询失败或超时: {e}")
 
