@@ -39,7 +39,7 @@ create table if not exists public.turns (
   "timestamp" timestamptz
 );
 
-create table if not exists public.memory_events (
+create table if not exists public.user_memory_events (
   id bigserial primary key,
   user_id text not null references public.users(user_id),
   device_id text,
@@ -49,7 +49,7 @@ create table if not exists public.memory_events (
   created_at timestamptz not null default now()
 );
 
-create table if not exists public.memory_read_model (
+create table if not exists public.user_memory_model (
   user_id text primary key references public.users(user_id),
   summary text,
   profile jsonb,
@@ -69,7 +69,7 @@ create table if not exists public.memory_jobs (
 
 create index if not exists idx_sessions_user_created_at on public.sessions(user_id, created_at desc);
 create index if not exists idx_turns_session_created_at on public.turns(session_id, created_at);
-create index if not exists idx_memory_events_user_created_at on public.memory_events(user_id, created_at desc);
+create index if not exists idx_user_memory_events_user_created_at on public.user_memory_events(user_id, created_at desc);
 create index if not exists idx_memory_jobs_status_created_at on public.memory_jobs(status, created_at);
 ```
 
@@ -100,8 +100,8 @@ Look for startup/store logs and then check rows in:
 - `public.users`
 - `public.sessions`
 - `public.turns`
-- `public.memory_events`
-- `public.memory_read_model`
+- `public.user_memory_events`
+- `public.user_memory_model`
 - `public.memory_jobs`
 
 A new device conversation should create one session row and multiple turn rows.
@@ -109,7 +109,7 @@ A new device conversation should create one session row and multiple turn rows.
 Current runtime write path is:
 
 - writes: `users`, `sessions`, `turns`
-- not yet written by runtime: `memory_events`, `memory_read_model`, `memory_jobs`
+- not yet written by runtime: `user_memory_events`, `user_memory_model`, `memory_jobs`
 
 ## Notes
 

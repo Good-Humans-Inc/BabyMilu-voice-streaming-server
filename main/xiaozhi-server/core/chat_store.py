@@ -336,8 +336,8 @@ class SupabaseChatStore:
         self.users_table = os.environ.get("SUPABASE_USERS_TABLE", "users")
         self.sessions_table = os.environ.get("SUPABASE_SESSIONS_TABLE", "sessions")
         self.turns_table = os.environ.get("SUPABASE_TURNS_TABLE", "turns")
-        self.memory_read_model_table = os.environ.get(
-            "SUPABASE_MEMORY_READ_MODEL_TABLE", "memory_read_model"
+        self.user_memory_model_table = os.environ.get(
+            "SUPABASE_USER_MEMORY_MODEL_TABLE", "user_memory_model"
         )
 
         self.headers = {
@@ -348,7 +348,7 @@ class SupabaseChatStore:
 
         if self.logger:
             self.logger.info(
-                f"[ChatStore:init] backend=supabase base_url={self.base_url}, users_table={self.users_table}, sessions_table={self.sessions_table}, turns_table={self.turns_table}, memory_read_model_table={self.memory_read_model_table}"
+                f"[ChatStore:init] backend=supabase base_url={self.base_url}, users_table={self.users_table}, sessions_table={self.sessions_table}, turns_table={self.turns_table}, user_memory_model_table={self.user_memory_model_table}"
             )
 
     def is_configured(self) -> bool:
@@ -488,7 +488,7 @@ class SupabaseChatStore:
             f"{facts_text}"
         )
 
-    def _build_memory_read_model_payload(self, user_id: str, device_id: str = "") -> dict:
+    def _build_user_memory_model_payload(self, user_id: str, device_id: str = "") -> dict:
         identity = self._build_identity_from_firestore(user_id=user_id, device_id=device_id)
         system_memory_block = self._build_initial_system_memory_block(identity)
         return {
@@ -524,17 +524,17 @@ class SupabaseChatStore:
             },
         }
 
-    def _ensure_memory_read_model(self, user_id: str, device_id: str = ""):
+    def _ensure_user_memory_model(self, user_id: str, device_id: str = ""):
         if not user_id:
             return
 
-        existing = self._select_eq(self.memory_read_model_table, "user_id", user_id)
+        existing = self._select_eq(self.user_memory_model_table, "user_id", user_id)
         if existing:
             return
 
-        payload = self._build_memory_read_model_payload(user_id=user_id, device_id=device_id)
+        payload = self._build_user_memory_model_payload(user_id=user_id, device_id=device_id)
         try:
-            self._insert(self.memory_read_model_table, payload)
+            self._insert(self.user_memory_model_table, payload)
         except RuntimeError as e:
             if "status=409" in str(e):
                 return
@@ -544,9 +544,9 @@ class SupabaseChatStore:
         if not user_id:
             return
 
-        existing = self._select_eq(self.memory_read_model_table, "user_id", user_id)
+        existing = self._select_eq(self.user_memory_model_table, "user_id", user_id)
         if not existing:
-            self._ensure_memory_read_model(user_id=user_id, device_id=device_id)
+            self._ensure_user_memory_model(user_id=user_id, device_id=device_id)
             return
 
         profile = existing.get("profile") if isinstance(existing.get("profile"), dict) else {}
@@ -583,7 +583,7 @@ class SupabaseChatStore:
         updated_profile["identity"] = updated_identity
 
         self._update_eq(
-            self.memory_read_model_table,
+            self.user_memory_model_table,
             "user_id",
             user_id,
             {
@@ -596,7 +596,7 @@ class SupabaseChatStore:
         if not user_id:
             return ""
 
-        existing = self._select_eq(self.memory_read_model_table, "user_id", user_id)
+        existing = self._select_eq(self.user_memory_model_table, "user_id", user_id)
         if not isinstance(existing, dict):
             return ""
 
@@ -628,15 +628,15 @@ class SupabaseChatStore:
             on_conflict="user_id",
         )
         try:
-            self._ensure_memory_read_model(user_id, device_id)
+            self._ensure_user_memory_model(user_id, device_id)
             if self.logger:
                 self.logger.info(
-                    f"[ChatStore:supabase] ensured memory_read_model(user_id={user_id})"
+                    f"[ChatStore:supabase] ensured user_memory_model(user_id={user_id})"
                 )
         except Exception as e:
             if self.logger:
                 self.logger.warning(
-                    f"[ChatStore:supabase] ensure memory_read_model failed for user_id={user_id}: {e}"
+                    f"[ChatStore:supabase] ensure user_memory_model failed for user_id={user_id}: {e}"
                 )
 
     def create_session(self, *, session_id, user_id, user_name, device_id):
