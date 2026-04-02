@@ -135,6 +135,7 @@ class ConnectionHandler:
         self.websocket = None
         self.headers = None
         self.device_id: Optional[str] = None
+        self.active_character_id: Optional[str] = None
         self.client_ip = None
         self.prompt = None
         self.welcome_msg = None
@@ -450,6 +451,8 @@ class ConnectionHandler:
                         f"🔍 Looking up device: {self.device_id}"
                     )
                     char_id = get_active_character_for_device(self.device_id)
+                    # persist active character id on the connection for downstream use
+                    self.active_character_id = char_id
                     if not char_id:
                         fallback_id = (
                             get_most_recent_character_via_user_for_device(
@@ -465,7 +468,7 @@ class ConnectionHandler:
                             char_id = fallback_id
 
                 if char_id:
-                    self.logger.info(f"char_id={char_id!r}")
+                    self.logger.bind(tag=TAG, device_id=self.device_id).info(f"Active character id: {char_id!r}")
                     char_doc = get_character_profile(char_id)
                     fields = extract_character_profile_fields(char_doc or {})
 
@@ -500,6 +503,8 @@ class ConnectionHandler:
                             f"\nUser's description of you: {fields['bio']}"
                         )
                 else:
+                    # ensure attribute is explicit when missing
+                    self.active_character_id = None
                     self.logger.bind(tag=TAG, device_id=self.device_id).warning(
                         "MISSING activeCharacterId; using defaults"
                     )
@@ -1173,6 +1178,8 @@ Return ONLY the JSON array, no other explanation."""
                         char_id = None
                         if self.device_id:
                             char_id = get_active_character_for_device(self.device_id)
+                            # persist active character id on the connection for downstream use
+                            self.active_character_id = char_id
                             if not char_id:
                                 fallback_id = get_most_recent_character_via_user_for_device(self.device_id)
                                 if fallback_id:
@@ -1181,7 +1188,7 @@ Return ONLY the JSON array, no other explanation."""
                                     )
                                     char_id = fallback_id
                         if char_id:
-                            self.logger.info(f"char_id={char_id!r}")
+                            self.logger.bind(tag=TAG, device_id=self.device_id).info(f"Active character id: {char_id!r}")
                             char_doc = get_character_profile(char_id)
                             self.logger.info(f"char_doc_keys={list((char_doc or {}).keys())}")
                             fields = extract_character_profile_fields(char_doc or {})
