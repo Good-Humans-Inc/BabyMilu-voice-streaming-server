@@ -1620,8 +1620,10 @@ Return ONLY the JSON array, no other explanation."""
                 )
                 if character_memory_prompt:
                     self.logger.bind(tag=TAG).info(
-                        f"Loaded Memory_prompt from character_memory_model for character {character_id} "
-                        f"(length={len(character_memory_prompt)})"
+                        f"Loaded Memory_prompt from character_memory_model for character {character_id}\n"
+                        f"character Memory_prompt content START\n"
+                        f"{character_memory_prompt}\n"
+                        f"character Memory_prompt content END"
                     )
                     current_prompt = getattr(self, "prompt", "") or ""
                     self.change_system_prompt(
@@ -1630,7 +1632,7 @@ Return ONLY the JSON array, no other explanation."""
                     )
                 else:
                     self.logger.bind(tag=TAG).info(
-                        f"Memory_prompt is empty for character {character_id}"
+                        f"No character Memory_prompt retrieved for character {character_id}"
                     )
         except Exception as e:
             self.logger.bind(tag=TAG).warning(
