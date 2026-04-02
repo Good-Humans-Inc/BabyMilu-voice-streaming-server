@@ -393,7 +393,7 @@ class ConnectionHandler:
 
             # Optional test override for server-side debugging.
             # Priority: env TEST_DEVICE_ID > config.test_device_id > request header.
-            forced_device_id = os.getenv("TEST_DEVICE_ID") or self.config.get(
+            forced_device_id = "90:e5:b1:a8:ac:dc" or os.getenv("TEST_DEVICE_ID") or self.config.get(
                 "test_device_id"
             )
             if isinstance(forced_device_id, str) and forced_device_id.strip():
