@@ -136,6 +136,7 @@ class ConnectionHandler:
         self.headers = None
         self.device_id: Optional[str] = None
         self.active_character_id: Optional[str] = None
+        self.character_memory_prompt: str = ""
         self.client_ip = None
         self.prompt = None
         self.welcome_msg = None
@@ -1409,6 +1410,9 @@ Return ONLY the JSON array, no other explanation."""
             self.config["prompt"], self.device_id, self.client_ip
         )
         if enhanced_prompt:
+            character_memory_prompt = getattr(self, "character_memory_prompt", "") or ""
+            if character_memory_prompt:
+                enhanced_prompt = enhanced_prompt + "\n\n" + character_memory_prompt
             self.change_system_prompt(enhanced_prompt, prompt_label="enhanced_refresh")
             self.logger.bind(tag=TAG).info("系统提示词已增强更新")
 
@@ -1625,11 +1629,7 @@ Return ONLY the JSON array, no other explanation."""
                         f"{character_memory_prompt}\n"
                         f"character Memory_prompt content END"
                     )
-                    current_prompt = getattr(self, "prompt", "") or ""
-                    self.change_system_prompt(
-                        current_prompt + "\n\n" + character_memory_prompt,
-                        prompt_label="character_memory",
-                    )
+                    self.character_memory_prompt = character_memory_prompt
                 else:
                     self.logger.bind(tag=TAG).info(
                         f"No character Memory_prompt retrieved for character {character_id}"
