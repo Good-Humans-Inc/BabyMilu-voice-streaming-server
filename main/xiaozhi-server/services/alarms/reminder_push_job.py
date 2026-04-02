@@ -124,7 +124,7 @@ def get_ai_message(
         "characterName": character_data.get("profile", {}).get("name", "BabyMilu") or character_data.get("name", "BabyMilu"),
         "characterBio": character_data.get("profile", {}).get("personality", "") or character_data.get("bio", ""),
         "characterRelationship": character_data.get("profile", {}).get("characterToUser", "friend") or character_data.get("relationship", "friend"),
-        "characterCallMe": character_data.get("profile", {}).get("nicknameCharacterCallsUser", "") or character_data.get("callMe", "") or character_data.get("name", "BabyMilu"),
+        "characterCallMe": character_data.get("profile", {}).get("nicknameCharacterCallsUser", "") or character_data.get("callMe", "") or user_name,
         "reminderLabel": reminder_label,
         "reminderTime": reminder_time or "the scheduled time",
     }
@@ -304,7 +304,6 @@ def run_send_reminder_push_job(
             label = reminder_data.get("label", "Reminder")
             next_occurrence_str = reminder_data.get("nextOccurrenceUTC")
             user_name = user_data.get("name") or "there"
-
             reminder_time_display = None
             if next_occurrence_str:
                 try:
