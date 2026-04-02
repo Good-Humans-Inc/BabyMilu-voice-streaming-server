@@ -629,7 +629,7 @@ class SupabaseChatStore:
         if not isinstance(existing, dict):
             return ""
 
-        prompt = existing.get("Memory_prompt")
+        prompt = existing.get("memory_prompt") or existing.get("Memory_prompt")
         if isinstance(prompt, str):
             return prompt
 
