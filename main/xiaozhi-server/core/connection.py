@@ -1610,13 +1610,14 @@ Return ONLY the JSON array, no other explanation."""
                 self.logger.bind(tag=TAG).info(
                     f"systemMemoryBlock is empty for user {getattr(self, 'user_id', None)}"
                 )
-        # persist system memory block on the connection for use by memory-agent
-        # at the start of a conversation
-        self.system_memory_block = summary_memory_block or ""
         except Exception as e:
             self.logger.bind(tag=TAG).warning(
                 f"Failed loading systemMemoryBlock from user_memory_model: {e}"
             )
+
+        # persist system memory block on the connection for use by memory-agent
+        # at the start of a conversation
+        self.system_memory_block = summary_memory_block or ""
 
         character_memory_prompt = ""
         try:
