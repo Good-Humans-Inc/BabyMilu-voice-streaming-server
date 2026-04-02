@@ -1231,7 +1231,7 @@ Return ONLY the JSON array, no other explanation."""
                         )
                         self.chat_store.delete_session(self.session_id)
                     else:
-                        self.chat_store.end_session(self.session_id)
+                        self.chat_store.end_session(self.session_id, character_id=self.active_character_id)
                 finally:
                     self._session_closed = True
         except Exception as e:

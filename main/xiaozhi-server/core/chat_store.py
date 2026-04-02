@@ -257,19 +257,20 @@ class SQLiteChatStore:
         existing_turns.append(turn_id)
         return json.dumps(existing_turns, ensure_ascii=False)
 
-    def end_session(self, session_id):
+    def end_session(self, session_id, character_id=None):
         if self.logger:
-            self.logger.info(f"[ChatStore:sqlite] end_session(session_id={session_id})")
+            self.logger.info(f"[ChatStore:sqlite] end_session(session_id={session_id}, character_id={character_id})")
         with get_db() as db:
             cur = db.execute(
                 """
                 UPDATE sessions
                 SET end_time = ?,
                     analysis_status = 'pending',
-                    memory_status = 'pending'
+                    memory_status = 'pending',
+                    character_id = COALESCE(?, character_id)
                 WHERE session_id = ?
                 """,
-                (_now_iso(), session_id),
+                (_now_iso(), character_id, session_id),
             )
 
             if self.logger:
@@ -722,18 +723,21 @@ class SupabaseChatStore:
                 return inserted_row.get("turn_id")
         return default
 
-    def end_session(self, session_id):
+    def end_session(self, session_id, character_id=None):
         if self.logger:
-            self.logger.info(f"[ChatStore:supabase] end_session(session_id={session_id})")
+            self.logger.info(f"[ChatStore:supabase] end_session(session_id={session_id}, character_id={character_id})")
+        payload = {
+            "end_time": _now_iso(),
+            "analysis_status": "pending",
+            "memory_status": "pending",
+        }
+        if character_id is not None:
+            payload["character_id"] = character_id
         self._update_eq(
             self.sessions_table,
             "session_id",
             session_id,
-            {
-                "end_time": _now_iso(),
-                "analysis_status": "pending",
-                "memory_status": "pending",
-            },
+            payload,
         )
 
     def delete_session(self, session_id):
@@ -805,9 +809,9 @@ class ChatStore:
             if self.logger:
                 self.logger.error(f"[ChatStore] insert_turn failed: {e}")
 
-    def end_session(self, session_id):
+    def end_session(self, session_id, character_id=None):
         try:
-            self.store.end_session(session_id=session_id)
+            self.store.end_session(session_id=session_id, character_id=character_id)
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ChatStore] end_session failed: {e}")
