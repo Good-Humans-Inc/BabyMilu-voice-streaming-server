@@ -1,5 +1,6 @@
 import json
 import time
+import asyncio
 from core.utils import textUtils
 from core.utils.util import audio_to_data
 from core.providers.tts.dto.dto import SentenceType
@@ -197,7 +198,6 @@ async def send_tts_message(conn, state, text=None):
 
     # TTS播放结束
     if state == "stop":
-        _disarm_tts_stop_watchdog(conn)
         # 标记TTS停止时间，用于后续“静音窗口”计算
         try:
             conn.last_tts_stop_ms = int(time.time() * 1000)
