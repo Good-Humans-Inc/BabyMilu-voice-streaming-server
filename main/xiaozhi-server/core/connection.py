@@ -1611,6 +1611,32 @@ Return ONLY the JSON array, no other explanation."""
                 f"Failed loading systemMemoryBlock from user_memory_model: {e}"
             )
 
+        character_memory_prompt = ""
+        try:
+            character_id = getattr(self, "active_character_id", None)
+            if character_id:
+                character_memory_prompt = self.chat_store.get_character_memory_prompt(
+                    character_id=character_id
+                )
+                if character_memory_prompt:
+                    self.logger.bind(tag=TAG).info(
+                        f"Loaded Memory_prompt from character_memory_model for character {character_id} "
+                        f"(length={len(character_memory_prompt)})"
+                    )
+                    current_prompt = getattr(self, "prompt", "") or ""
+                    self.change_system_prompt(
+                        current_prompt + "\n\n" + character_memory_prompt,
+                        prompt_label="character_memory",
+                    )
+                else:
+                    self.logger.bind(tag=TAG).info(
+                        f"Memory_prompt is empty for character {character_id}"
+                    )
+        except Exception as e:
+            self.logger.bind(tag=TAG).warning(
+                f"Failed loading Memory_prompt from character_memory_model: {e}"
+            )
+
         self.memory.init_memory(
             role_id=self.device_id,
             user_id=getattr(self, "user_id", None),

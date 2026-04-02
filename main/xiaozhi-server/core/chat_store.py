@@ -79,7 +79,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             start_time TEXT,
             end_time TEXT,
             analysis_status TEXT,
-            memory_status TEXT,
+            memory_status_user TEXT,
+            memory_status_character TEXT,
             turns TEXT,
             conversation_id TEXT,
             analysis_json TEXT,
@@ -106,7 +107,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "sessions", "analysis_json", "TEXT")
     _add_column_if_missing(conn, "sessions", "token_usage", "INTEGER DEFAULT 0")
     _add_column_if_missing(conn, "sessions", "last_active_at", "TEXT")
-    _add_column_if_missing(conn, "sessions", "memory_status", "TEXT")
+    _add_column_if_missing(conn, "sessions", "memory_status_user", "TEXT")
+    _add_column_if_missing(conn, "sessions", "memory_status_character", "TEXT")
     _add_column_if_missing(conn, "sessions", "turns", "TEXT")
     _add_column_if_missing(conn, "turns", "created_at", "TEXT")
     _add_column_if_missing(conn, "users", "device_ids", "TEXT")
@@ -171,8 +173,8 @@ class SQLiteChatStore:
         with get_db() as db:
             cur = db.execute(
                 """
-                INSERT INTO sessions (session_id, user_name, user_id, device_id, created_at, start_time, last_active_at, memory_status, turns)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO sessions (session_id, user_name, user_id, device_id, created_at, start_time, last_active_at, turns)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     user_name = excluded.user_name,
                     user_id = excluded.user_id,
@@ -181,7 +183,8 @@ class SQLiteChatStore:
                     start_time = excluded.start_time,
                     end_time = NULL,
                     analysis_status = NULL,
-                    memory_status = 'pending',
+                    memory_status_user = NULL,
+                    memory_status_character = NULL,
                     turns = COALESCE(sessions.turns, '[]'),
                     last_active_at = excluded.last_active_at
                 """,
@@ -193,7 +196,6 @@ class SQLiteChatStore:
                     _now_iso(),
                     _now_iso(),
                     _now_iso(),
-                    "pending",
                     "[]",
                 ),
             )
@@ -266,7 +268,8 @@ class SQLiteChatStore:
                 UPDATE sessions
                 SET end_time = ?,
                     analysis_status = 'pending',
-                    memory_status = 'pending',
+                    memory_status_user = 'pending',
+                    memory_status_character = 'pending',
                     character_id = COALESCE(?, character_id)
                 WHERE session_id = ?
                 """,
@@ -326,6 +329,9 @@ class SQLiteChatStore:
     def get_system_memory_block(self, user_id: str) -> str:
         return ""
 
+    def get_character_memory_prompt(self, character_id: str) -> str:
+        return ""
+
 
 class SupabaseChatStore:
     def __init__(self, logger=None):
@@ -338,6 +344,9 @@ class SupabaseChatStore:
         self.turns_table = os.environ.get("SUPABASE_TURNS_TABLE", "turns")
         self.user_memory_model_table = os.environ.get(
             "SUPABASE_USER_MEMORY_MODEL_TABLE", "user_memory_model"
+        )
+        self.character_memory_model_table = os.environ.get(
+            "SUPABASE_CHARACTER_MEMORY_MODEL_TABLE", "character_memory_model"
         )
 
         self.headers = {
@@ -612,6 +621,20 @@ class SupabaseChatStore:
 
         return ""
 
+    def get_character_memory_prompt(self, character_id: str) -> str:
+        if not character_id:
+            return ""
+
+        existing = self._select_eq(self.character_memory_model_table, "characterId", character_id)
+        if not isinstance(existing, dict):
+            return ""
+
+        prompt = existing.get("Memory_prompt")
+        if isinstance(prompt, str):
+            return prompt
+
+        return ""
+
     def get_or_create_user(self, user_id: str, name: str, device_id: str = ""):
         if self.logger:
             self.logger.info(
@@ -653,7 +676,6 @@ class SupabaseChatStore:
             "created_at": now_iso,
             "start_time": now_iso,
             "last_active_at": now_iso,
-            "memory_status": "pending",
             "turns": [],
         }
         try:
@@ -673,7 +695,8 @@ class SupabaseChatStore:
                         "end_time": None,
                         "analysis_status": None,
                         "last_active_at": now_iso,
-                        "memory_status": "pending",
+                        "memory_status_user": None,
+                        "memory_status_character": None,
                     },
                 )
             else:
@@ -729,7 +752,8 @@ class SupabaseChatStore:
         payload = {
             "end_time": _now_iso(),
             "analysis_status": "pending",
-            "memory_status": "pending",
+            "memory_status_user": "pending",
+            "memory_status_character": "pending",
         }
         if character_id is not None:
             payload["character_id"] = character_id
@@ -849,5 +873,15 @@ class ChatStore:
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ChatStore] get_system_memory_block failed: {e}")
+        return ""
+
+    def get_character_memory_prompt(self, character_id: str) -> str:
+        try:
+            if hasattr(self.store, "get_character_memory_prompt"):
+                result = self.store.get_character_memory_prompt(character_id=character_id)
+                return result if isinstance(result, str) else ""
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"[ChatStore] get_character_memory_prompt failed: {e}")
         return ""
 
