@@ -625,7 +625,7 @@ class SupabaseChatStore:
         if not character_id:
             return ""
 
-        existing = self._select_eq(self.character_memory_model_table, "characterId", character_id)
+        existing = self._select_eq(self.character_memory_model_table, "character_id", character_id)
         if not isinstance(existing, dict):
             return ""
 
