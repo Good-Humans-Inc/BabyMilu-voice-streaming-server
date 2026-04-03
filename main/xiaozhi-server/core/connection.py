@@ -2087,6 +2087,35 @@ Return ONLY the JSON array, no other explanation."""
                 self.followup_task.cancel()
                 self.logger.bind(tag=TAG).info("User responded - cancelling follow-up")
 
+            # If we have a canonical character profile, ensure any stored
+            # conversation summary with prior assistant statements doesn't
+            # force the LLM to repeat outdated facts. Clear the device-scoped
+            # conversation state so a fresh conversation is used instead.
+            try:
+                char_mem_check = getattr(self, "character_memory_prompt", "") or ""
+                if char_mem_check and getattr(self, "device_id", None):
+                    state = get_conversation_state_for_device(self.device_id)
+                    if state and state.get("last_interaction_summary") and "assistant:" in state.get("last_interaction_summary"):
+                        self.logger.bind(tag=TAG).info(
+                            "Character override active — clearing stored conversation to avoid stale assistant assertions"
+                        )
+                        update_conversation_state_for_device(
+                            self.device_id,
+                            conversation_id=None,
+                            last_used=None,
+                            last_interaction_summary=None,
+                        )
+                        # Also reset local tracking so we create a fresh LLM convo
+                        try:
+                            self.current_conversation_id = None
+                            if hasattr(self.llm, "clear_conversation_for_session"):
+                                # Some LLM adapters may expose a reset helper
+                                self.llm.clear_conversation_for_session(self.session_id)
+                        except Exception:
+                            pass
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(f"Failed to clear stale conversation: {e}")
+
         if depth == 0:
             self.sentence_id = str(uuid.uuid4().hex)
             self.dialogue.put(Message(role="user", content=query))
