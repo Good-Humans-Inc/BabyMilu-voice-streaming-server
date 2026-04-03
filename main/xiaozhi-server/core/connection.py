@@ -1656,7 +1656,7 @@ Return ONLY the JSON array, no other explanation."""
         )
         # 获取记忆总结配置
         memory_config = self.config["Memory"]
-        memory_type = memory_config[self.config["selected_module"]["Memory"]]["type"]
+        memory_type = memory_config[self.config["selected_module"]["Memory"]].get("type", "nomem")
 
         if memory_type == "nomem":
             return

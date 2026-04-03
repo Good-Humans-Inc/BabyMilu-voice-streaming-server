@@ -55,7 +55,6 @@ class PromptManager:
     def __init__(self, config: Dict[str, Any], logger=None):
         self.config = config
         self.logger = logger or setup_logging()
-        self.base_prompt_template = None
         self.last_update_time = 0
         self._enhanced_prompt_ttl_seconds = 12 * 60 * 60
 
@@ -64,37 +63,6 @@ class PromptManager:
 
         self.cache_manager = cache_manager
         self.CacheType = CacheType
-
-        self._load_base_template()
-
-    def _load_base_template(self):
-        """加载基础提示词模板"""
-        try:
-            template_path = "agent-base-prompt.txt"
-            cache_key = f"prompt_template:{template_path}"
-
-            # 先从缓存获取
-            cached_template = self.cache_manager.get(self.CacheType.CONFIG, cache_key)
-            if cached_template is not None:
-                self.base_prompt_template = cached_template
-                self.logger.bind(tag=TAG).debug("从缓存加载基础提示词模板")
-                return
-
-            # 缓存未命中，从文件读取
-            if os.path.exists(template_path):
-                with open(template_path, "r", encoding="utf-8") as f:
-                    template_content = f.read()
-
-                # 存入缓存（CONFIG类型默认不自动过期，需要手动失效）
-                self.cache_manager.set(
-                    self.CacheType.CONFIG, cache_key, template_content
-                )
-                self.base_prompt_template = template_content
-                self.logger.bind(tag=TAG).debug("成功加载基础提示词模板并缓存")
-            else:
-                self.logger.bind(tag=TAG).warning("未找到agent-base-prompt.txt文件")
-        except Exception as e:
-            self.logger.bind(tag=TAG).error(f"加载提示词模板失败: {e}")
 
     def _get_enhanced_prompt_cache_key(self, device_id: str) -> str:
         return f"enhanced_prompt:{device_id}"
@@ -358,83 +326,5 @@ class PromptManager:
     def build_enhanced_prompt(
         self, user_prompt: str, device_id: str, client_ip: str = None
     ) -> str:
-        """构建增强的系统提示词"""
-        if not self.base_prompt_template:
-            return user_prompt
-
-        try:
-            cached_enhanced = self._get_cached_enhanced_prompt(device_id)
-            if cached_enhanced:
-                self.logger.bind(tag=TAG).info(
-                    f"Enhanced prompt cache hit for device {device_id}, "
-                    "skipping enhanced prompt render"
-                )
-                return cached_enhanced
-
-            # 获取最新的时间信息（不缓存）
-            tz = get_timezone_for_device(device_id) if device_id else None
-            current_time, today_date, today_weekday = self._get_current_time_info(tz or None)
-
-            # 获取缓存的上下文信息
-            local_address = ""
-            weather_info = ""
-
-            # 优先根据用户档案/客户端IP解析城市
-            preferred_location = self._resolve_preferred_location(device_id, client_ip)
-            print(f"[WeatherDebug] build_enhanced_prompt: preferred_location={preferred_location!r}")
-            if preferred_location:
-                local_address = preferred_location
-                # 始终新鲜获取天气（不使用缓存）
-                weather_info = self._get_weather_info(local_address) or ""
-                print(f"[WeatherDebug] build_enhanced_prompt: weather fetched fresh -> {weather_info!r}")
-                # 将选择的地址也写入 LOCATION 缓存，便于其他模块读取
-                if client_ip:
-                    self.cache_manager.set(self.CacheType.LOCATION, client_ip, local_address)
-                    print(f"[WeatherDebug] build_enhanced_prompt: set LOCATION cache[{client_ip!r}]={local_address!r}")
-
-            # 替换模板变量
-            template = Template(self.base_prompt_template)
-            # 读取用户名称用于 {{user}}
-            user_name = ""
-            try:
-                if device_id:
-                    owner_phone = get_owner_phone_for_device(device_id)
-                    if owner_phone:
-                        user_doc = get_user_profile_by_phone(owner_phone)
-                        if user_doc:
-                            user_fields = extract_user_profile_fields(user_doc)
-                            user_name = user_fields.get("name") or ""
-            except Exception:
-                user_name = ""
-            enhanced_prompt = template.render(
-                base_prompt=user_prompt,
-                current_time=current_time,
-                today_date=today_date,
-                today_weekday=today_weekday,
-                local_address=local_address,
-                weather_info=weather_info,
-                emojiList=EMOJI_List,
-                device_id=device_id,
-                user=user_name,
-            )
-            # 基本验证输出（避免打印全部prompt）
-            contains_local = "{{local_address}}" in self.base_prompt_template
-            contains_weather = "{{weather_info}}" in self.base_prompt_template
-            print(f"[WeatherDebug] build_enhanced_prompt: template has local={contains_local}, weather={contains_weather}")
-            print(f"[WeatherDebug] build_enhanced_prompt: values -> local_address={local_address!r}, weather_info={weather_info!r}")
-            print(f"[WeatherDebug] build_enhanced_prompt: enhanced prompt length={len(enhanced_prompt)}")
-            device_cache_key = self._get_enhanced_prompt_cache_key(device_id)
-            self.cache_manager.set(
-                self.CacheType.DEVICE_PROMPT,
-                device_cache_key,
-                enhanced_prompt,
-                ttl=self._enhanced_prompt_ttl_seconds,
-            )
-            self.logger.bind(tag=TAG).info(
-                f"构建增强提示词成功，长度: {len(enhanced_prompt)}"
-            )
-            return enhanced_prompt
-
-        except Exception as e:
-            self.logger.bind(tag=TAG).error(f"构建增强提示词失败: {e}")
-            return user_prompt
+        """返回用户提示词（无模板包装）"""
+        return user_prompt
