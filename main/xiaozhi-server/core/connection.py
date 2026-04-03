@@ -2170,6 +2170,20 @@ Return ONLY the JSON array, no other explanation."""
                 instructions += self.mode_specific_instructions
                 self.mode_specific_instructions = ""
 
+            # If we have a character memory prompt, add a high-priority
+            # override so older assistant outputs or stored summaries
+            # do not conflict with the canonical character profile.
+            char_mem = getattr(self, "character_memory_prompt", "") or ""
+            if char_mem:
+                override = (
+                    "<system_override>\n"
+                    "IMPORTANT: Ignore any previous assistant statements about the character's\n"
+                    "identity, appearance, or other canonical attributes. The character\n"
+                    "profile provided in the memory block below is authoritative for this\n"
+                    "conversation.\n</system_override>\n\n"
+                )
+                instructions = override + instructions
+
             if memory_str:
                 instructions += f"\n\n<memory>\n{memory_str}\n</memory>"
 
