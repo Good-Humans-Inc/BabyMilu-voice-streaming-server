@@ -2108,9 +2108,33 @@ Return ONLY the JSON array, no other explanation."""
                         # Also reset local tracking so we create a fresh LLM convo
                         try:
                             self.current_conversation_id = None
+                            # Best-effort: remove any in-memory conversation mapping
+                            # the LLM adapter may keep. This forces creation of a
+                            # fresh conversation without prior assistant history.
+                            if hasattr(self.llm, "_conversations") and self.session_id in self.llm._conversations:
+                                try:
+                                    del self.llm._conversations[self.session_id]
+                                except Exception:
+                                    pass
+                            # If adapter provides a reset helper, call it.
                             if hasattr(self.llm, "clear_conversation_for_session"):
-                                # Some LLM adapters may expose a reset helper
-                                self.llm.clear_conversation_for_session(self.session_id)
+                                try:
+                                    self.llm.clear_conversation_for_session(self.session_id)
+                                except Exception:
+                                    pass
+                            # Recreate a fresh conversation seeded with the base
+                            # system prompt plus the authoritative character profile
+                            # so the LLM has the correct canonical info.
+                            seed_text = (getattr(self, "prompt", "") or "")
+                            char_profile = getattr(self, "character_memory_prompt", "") or ""
+                            if hasattr(self.llm, "ensure_conversation_with_system"):
+                                try:
+                                    combined_seed = seed_text
+                                    if char_profile:
+                                        combined_seed = combined_seed + "\n\nCharacter Profile:\n" + char_profile
+                                    self.llm.ensure_conversation_with_system(self.session_id, combined_seed)
+                                except Exception:
+                                    pass
                         except Exception:
                             pass
             except Exception as e:
