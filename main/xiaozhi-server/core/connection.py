@@ -1660,29 +1660,17 @@ Return ONLY the JSON array, no other explanation."""
 
         if memory_type == "nomem":
             return
-        elif memory_type == "mem_local_short":
-            memory_llm_name = memory_config[self.config["selected_module"]["Memory"]][
-                "llm"
-            ]
-            if memory_llm_name and memory_llm_name in self.config["LLM"]:
-                from core.utils import llm as llm_utils
 
-                memory_llm_config = self.config["LLM"][memory_llm_name]
-                memory_llm_type = memory_llm_config.get("type", memory_llm_name)
-                memory_llm = llm_utils.create_instance(
-                    memory_llm_type, memory_llm_config
-                )
-                self.logger.bind(tag=TAG).info(
-                    f"为记忆总结创建了专用LLM: {memory_llm_name}, 类型: {memory_llm_type}"
-                )
-                # 设置任务模块的LLM
-                self.task.set_llm(memory_llm)
-                self.memory.set_llm(memory_llm)
-            else:
-                # 否则使用主LLM
-                self.task.set_llm(self.llm)
-                self.memory.set_llm(self.llm)
-                self.logger.bind(tag=TAG).info("使用主LLM作为意图识别模型")
+        # Default behavior: use the main LLM for task/memory operations.
+        # The removed `mem_local_short` provider previously created a dedicated
+        # LLM here; that provider has been deleted and we now fall back to the
+        # primary LLM for any memory-related processing.
+        try:
+            self.task.set_llm(self.llm)
+            self.memory.set_llm(self.llm)
+        except Exception:
+            # Defensive: if task/memory are not initialized, ignore.
+            pass
 
     def _initialize_intent(self):
         if self.intent is None:
