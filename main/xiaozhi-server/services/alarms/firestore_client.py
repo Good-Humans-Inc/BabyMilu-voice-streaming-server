@@ -49,6 +49,33 @@ def _collection_group(client: firestore.Client):
     return client.collection_group("alarms")
 
 
+def _iter_alarm_docs(client: firestore.Client):
+    query = _collection_group(client)
+    query = query.where(filter=FieldFilter("status", "==", "on"))
+    try:
+        yield from query.stream()
+        return
+    except Exception as exc:
+        logger.bind(tag=TAG).warning(
+            f"Collection-group alarm scan failed; falling back to per-user scan: {exc}"
+        )
+
+    users = client.collection("users")
+    for user_doc in users.stream():
+        try:
+            alarms = (
+                user_doc.reference.collection("alarms")
+                .where(filter=FieldFilter("status", "==", "on"))
+                .stream()
+            )
+            for alarm_doc in alarms:
+                yield alarm_doc
+        except Exception as exc:
+            logger.bind(tag=TAG).warning(
+                f"Failed alarm scan for user {user_doc.id}: {exc}"
+            )
+
+
 def fetch_due_alarms(
     now: datetime,
     lookahead: timedelta,
@@ -63,11 +90,8 @@ def fetch_due_alarms(
         "Scanning alarms where status='on' and evaluating nextOccurrenceUTC <= "
         f"{upper_bound_str} (window start={window_start}, lookahead={lookahead})"
     )
-    query = _collection_group(client)
-    query = query.where(filter=FieldFilter("status", "==", "on"))
-
     docs: List[models.AlarmDoc] = []
-    for doc in query.stream():
+    for doc in _iter_alarm_docs(client):
         user_id = _resolve_user_id(doc)
         data = doc.to_dict() or {}
         user_meta = _get_user_metadata(doc, user_cache)
