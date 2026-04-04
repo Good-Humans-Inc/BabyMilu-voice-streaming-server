@@ -230,7 +230,10 @@ Intent:
       - change_role
       - get_weather
       - play_music
-      - set_alarm
+      - schedule_conversation
+      - list_reminders
+      - modify_reminder
+      - cancel_reminder
       - get_capabilities
       - self_introduction
       - lookup_recipe
