@@ -60,12 +60,11 @@ def fetch_due_alarms(
     upper_bound_str = _format_datetime(upper_bound)
     window_start = _format_datetime(now)
     logger.bind(tag=TAG).debug(
-        "Scanning alarms where status='on' and nextOccurrenceUTC <= "
+        "Scanning alarms where status='on' and evaluating nextOccurrenceUTC <= "
         f"{upper_bound_str} (window start={window_start}, lookahead={lookahead})"
     )
     query = _collection_group(client)
     query = query.where(filter=FieldFilter("status", "==", "on"))
-    query = query.where(filter=FieldFilter("nextOccurrenceUTC", "<=", upper_bound_str))
 
     docs: List[models.AlarmDoc] = []
     for doc in query.stream():
@@ -84,6 +83,17 @@ def fetch_due_alarms(
                 f"label={data.get('label')} targets={len(data.get('targets', []))}"
             )
         )
+        parsed_next_occurrence = _parse_datetime(raw_next_occurrence)
+        if parsed_next_occurrence is None:
+            logger.bind(tag=TAG).warning(
+                f"Skipping alarm {doc.reference.path} (user={user_id}): invalid nextOccurrenceUTC ({raw_next_occurrence})"
+            )
+            continue
+        if parsed_next_occurrence > upper_bound:
+            logger.bind(tag=TAG).debug(
+                f"Skipping alarm {doc.reference.path} (user={user_id}): nextOccurrenceUTC {parsed_next_occurrence.isoformat()} is outside scan window ending {upper_bound.isoformat()}"
+            )
+            continue
         schedule_payload = data.get("schedule")
         if not isinstance(schedule_payload, dict):
             logger.bind(tag=TAG).warning(
