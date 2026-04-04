@@ -148,6 +148,14 @@ class OTAHandler(BaseHandler):
         else:
             return f"ws://{local_ip}:{port}/xiaozhi/v1/"
 
+    def _get_mqtt_endpoint(self, local_ip: str) -> str:
+        return (
+            os.environ.get("MQTT_ENDPOINT", "").strip()
+            or os.environ.get("SERVER_EXTERNAL_IP", "").strip()
+            or os.environ.get("SERVER_PUBLIC_HOST", "").strip()
+            or local_ip
+        )
+
     async def handle_post(self, request):
         """处理 OTA POST 请求"""
         try:
@@ -187,8 +195,8 @@ class OTAHandler(BaseHandler):
                 fw_force = 0
                 manifest_mqtt = None
 
-            # Build MQTT config: manifest > environment variable > hardcoded default
-            mqtt_endpoint = "136.111.52.199"  # Default fallback
+            # Build MQTT config: manifest > explicit environment > external server IP > local IP
+            mqtt_endpoint = self._get_mqtt_endpoint(local_ip)
             if manifest_mqtt and isinstance(manifest_mqtt, dict):
                 # Use endpoint from manifest if provided
                 mqtt_endpoint = manifest_mqtt.get("endpoint", mqtt_endpoint)
@@ -198,11 +206,9 @@ class OTAHandler(BaseHandler):
                 mqtt_publish_topic = manifest_mqtt.get("publish_topic", publish_topic)
                 self.logger.bind(tag=TAG).info(f"Using MQTT config from manifest: endpoint={mqtt_endpoint}")
             else:
-                # Check environment variable as fallback
-                env_mqtt_endpoint = os.environ.get("MQTT_ENDPOINT", "").strip()
-                if env_mqtt_endpoint:
-                    mqtt_endpoint = env_mqtt_endpoint
-                    self.logger.bind(tag=TAG).info(f"Using MQTT endpoint from environment: {mqtt_endpoint}")
+                self.logger.bind(tag=TAG).info(
+                    f"Using MQTT endpoint fallback: {mqtt_endpoint}"
+                )
                 mqtt_client_id = mac_upper
                 mqtt_publish_topic = publish_topic
 
