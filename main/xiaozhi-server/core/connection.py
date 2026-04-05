@@ -155,12 +155,14 @@ class ModeRuntimeState:
     """In-memory state for a mode session (e.g. morning_alarm)."""
     active_mode: Optional[str] = None
     instructions: str = ""
+    persistent_instructions: str = ""
     server_initiate_chat: bool = False
     greeting_scheduled: bool = False
 
     def reset(self) -> None:
         self.active_mode = None
         self.instructions = ""
+        self.persistent_instructions = ""
         self.server_initiate_chat = False
         self.greeting_scheduled = False
 
@@ -357,6 +359,14 @@ class ConnectionHandler:
     @mode_specific_instructions.setter
     def mode_specific_instructions(self, value: str) -> None:
         self._mode_state.instructions = value or ""
+
+    @property
+    def persistent_mode_specific_instructions(self) -> str:
+        return self._mode_state.persistent_instructions
+
+    @persistent_mode_specific_instructions.setter
+    def persistent_mode_specific_instructions(self, value: str) -> None:
+        self._mode_state.persistent_instructions = value or ""
 
     @property
     def server_initiate_chat(self) -> bool:
@@ -2413,6 +2423,8 @@ Return ONLY the JSON array, no other explanation."""
                 current_input = [{"role": "user", "content": query}]
 
             instructions = ""
+            if self.persistent_mode_specific_instructions:
+                instructions += self.persistent_mode_specific_instructions
             if self.mode_specific_instructions:
                 instructions += self.mode_specific_instructions
                 self.mode_specific_instructions = ""
