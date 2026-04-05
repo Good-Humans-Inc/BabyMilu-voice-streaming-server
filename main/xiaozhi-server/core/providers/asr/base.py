@@ -69,7 +69,9 @@ class ASRProviderBase(ABC):
             conn.asr_audio.clear()
             conn.reset_vad_states()
 
-            if len(asr_audio_task) > 15:
+            # Opus packets are handled as ~60 ms frames here, so >3 packets
+            # allows forwarding utterances of roughly 0.2 seconds or longer.
+            if len(asr_audio_task) > 3:
                 await self.handle_voice_stop(conn, asr_audio_task)
 
     # 处理语音停止
