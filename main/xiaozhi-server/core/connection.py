@@ -71,12 +71,14 @@ class ModeRuntimeState:
     """In-memory state for a mode session (e.g. morning_alarm)."""
     active_mode: Optional[str] = None
     instructions: str = ""
+    persistent_instructions: str = ""
     server_initiate_chat: bool = False
     greeting_scheduled: bool = False
 
     def reset(self) -> None:
         self.active_mode = None
         self.instructions = ""
+        self.persistent_instructions = ""
         self.server_initiate_chat = False
         self.greeting_scheduled = False
 
@@ -258,7 +260,7 @@ class ConnectionHandler:
         # 新建会话时，首轮下发mode instructions
         self._seed_instructions_once = False
         # related to storing logs into database
-        self.chat_store = ChatStore()
+        self.chat_store = ChatStore(logger=self.logger)
         self._session_created = False
         self._session_closed = False
         self.turn_index = 0
@@ -273,6 +275,14 @@ class ConnectionHandler:
     @mode_specific_instructions.setter
     def mode_specific_instructions(self, value: str) -> None:
         self._mode_state.instructions = value or ""
+
+    @property
+    def persistent_mode_specific_instructions(self) -> str:
+        return self._mode_state.persistent_instructions
+
+    @persistent_mode_specific_instructions.setter
+    def persistent_mode_specific_instructions(self, value: str) -> None:
+        self._mode_state.persistent_instructions = value or ""
 
     @property
     def server_initiate_chat(self) -> bool:
@@ -723,7 +733,8 @@ class ConnectionHandler:
 
                 self.chat_store.get_or_create_user(
                     user_id=self.user_id,
-                    name=self.user_name
+                    name=self.user_name,
+                    device_id=self.device_id,
                 )
 
                 self.chat_store.create_session(
@@ -1260,10 +1271,15 @@ Return ONLY the JSON array, no other explanation."""
                             ai_summary = self.generate_ai_conversation_summary()
                             
                             # 检查任务匹配
+                            use_task_provider = bool(
+                                self.memory
+                                and self.task
+                                and hasattr(self.task, "detect_task")
+                            )
                             matched_tasks = []
                             try:
                                 # 获取用户ID (使用owner_phone作为user_id)
-                                if self.device_id:
+                                if self.device_id and not use_task_provider:
                                     owner_phone = get_owner_phone_for_device(self.device_id)
                                     if owner_phone:
                                         matched_tasks = self.check_conversation_against_tasks(owner_phone)
@@ -1343,7 +1359,23 @@ Return ONLY the JSON array, no other explanation."""
             # Ensure session is ended even if memory saving is disabled or fails
             if getattr(self, "_session_created", False) and not getattr(self, "_session_closed", False):
                 try:
-                    self.chat_store.end_session(self.session_id)
+                    try:
+                        self.chat_store.ensure_memory_profile_identity(
+                            user_id=getattr(self, "user_id", None),
+                            device_id=self.device_id,
+                        )
+                    except Exception as identity_err:
+                        self.logger.bind(tag=TAG).warning(
+                            f"Memory profile identity hydration skipped: {identity_err}"
+                        )
+
+                    if getattr(self, "turn_index", 0) == 0:
+                        self.logger.bind(tag=TAG).info(
+                            f"No turns recorded, deleting empty session: {self.session_id}"
+                        )
+                        self.chat_store.delete_session(self.session_id)
+                    else:
+                        self.chat_store.end_session(self.session_id)
                 finally:
                     self._session_closed = True
         except Exception as e:
@@ -1653,8 +1685,6 @@ Return ONLY the JSON array, no other explanation."""
             self.config["prompt"] = private_config["prompt"]
         if private_config.get("voiceprint") is not None:
             self.config["voiceprint"] = private_config["voiceprint"]
-        if private_config.get("summaryMemory") is not None:
-            self.config["summaryMemory"] = private_config["summaryMemory"]
         if private_config.get("device_max_output_size") is not None:
             self.max_output_size = int(private_config["device_max_output_size"])
         if private_config.get("chat_history_conf") is not None:
@@ -1717,7 +1747,7 @@ Return ONLY the JSON array, no other explanation."""
                 mem_type = mem_cfg.get("type", mem_name)
                 try:
                     self.memory = memory_factory.create_instance(
-                        mem_type, mem_cfg, self.config.get("summaryMemory")
+                        mem_type, mem_cfg, None
                     )
                     self.logger.bind(tag=TAG).debug(
                         f"Created per-connection memory provider: {mem_type}"
@@ -1784,11 +1814,30 @@ Return ONLY the JSON array, no other explanation."""
     def _initialize_memory(self):
         if self.memory is None:
             return
+
+        summary_memory_block = ""
+        try:
+            summary_memory_block = self.chat_store.get_system_memory_block(
+                user_id=getattr(self, "user_id", None)
+            )
+            if summary_memory_block:
+                self.logger.bind(tag=TAG).info(
+                    f"Loaded systemMemoryBlock from memory_read_model for user {getattr(self, 'user_id', None)}"
+                )
+            else:
+                self.logger.bind(tag=TAG).info(
+                    f"systemMemoryBlock is empty for user {getattr(self, 'user_id', None)}"
+                )
+        except Exception as e:
+            self.logger.bind(tag=TAG).warning(
+                f"Failed loading systemMemoryBlock from memory_read_model: {e}"
+            )
+
         self.memory.init_memory(
             role_id=self.device_id,
+            user_id=getattr(self, "user_id", None),
             llm=self.llm,
-            summary_memory=self.config.get("summaryMemory", None),
-            save_to_file=not self.read_config_from_api,
+            summary_memory=summary_memory_block,
         )
         # Initialize task module (guard: Task provider may not be configured)
         if self.task:
@@ -1803,9 +1852,9 @@ Return ONLY the JSON array, no other explanation."""
         if memory_type == "nomem":
             return
         elif memory_type == "mem_local_short":
-            memory_llm_name = memory_config[self.config["selected_module"]["Memory"]][
-                "llm"
-            ]
+            memory_llm_name = memory_config[
+                self.config["selected_module"]["Memory"]
+            ].get("llm")
             if memory_llm_name and memory_llm_name in self.config["LLM"]:
                 from core.utils import llm as llm_utils
 
@@ -2352,6 +2401,8 @@ Return ONLY the JSON array, no other explanation."""
                 current_input = [{"role": "user", "content": query}]
 
             instructions = ""
+            if self.persistent_mode_specific_instructions:
+                instructions += self.persistent_mode_specific_instructions
             if self.mode_specific_instructions:
                 instructions += self.mode_specific_instructions
                 self.mode_specific_instructions = ""

@@ -24,6 +24,18 @@ class _FakeClient:
         assert name == "alarms"
         return _FakeQuery(self._docs)
 
+    def collection(self, name):
+        assert name == "devices"
+        return _FakeDevicesCollection()
+
+
+class _FakeDevicesCollection:
+    def where(self, *args, **kwargs):
+        return self
+
+    def stream(self):
+        return iter([])
+
 
 class _FakeDoc:
     def __init__(self, path, data):

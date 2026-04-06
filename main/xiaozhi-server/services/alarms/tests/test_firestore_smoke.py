@@ -10,12 +10,11 @@ from google.api_core import exceptions as gcloud_exceptions
 
 from services.alarms import scheduler
 from services.alarms.config import ALARM_TIMING
+from core.utils.mac import normalize_mac
 
 
 def _ensure_firestore() -> firestore.Client:
     try:
-        user_ref = client.collection("users").document(user_id)
-        user_ref.set({"timezone": "America/Los_Angeles"}, merge=True)
         return firestore.Client()
     except Exception:  # pragma: no cover - only triggers when creds missing
         pytest.skip("Firestore client unavailable (credentials missing)")
@@ -32,8 +31,8 @@ def test_firestore_prepare_wake_smoke():
 
     user_id = f"test-user-{uuid.uuid4().hex[:6]}"
     alarm_id = f"alarm-{uuid.uuid4().hex[:6]}"
-    device_id = f"DEV_{uuid.uuid4().hex[:6]}"
-    normalized_device_id = device_id.lower()
+    device_id = uuid.uuid4().hex[:12]
+    normalized_device_id = normalize_mac(device_id)
 
     alarm_ref = (
         client.collection("users").document(user_id).collection("alarms").document(alarm_id)
@@ -85,3 +84,75 @@ def test_firestore_prepare_wake_smoke():
         alarm_ref.delete()
         client.collection("sessionContexts").document(normalized_device_id).delete()
         client.collection("users").document(user_id).delete()
+
+
+@pytest.mark.integration
+def test_firestore_prepare_reminder_wake_smoke():
+    if not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") and not os.environ.get(
+        "FIRESTORE_EMULATOR_HOST"
+    ):
+        pytest.skip("Set GOOGLE_APPLICATION_CREDENTIALS or FIRESTORE_EMULATOR_HOST")
+
+    client = _ensure_firestore()
+
+    user_id = f"test-user-{uuid.uuid4().hex[:6]}"
+    reminder_id = f"reminder-{uuid.uuid4().hex[:6]}"
+    device_id = uuid.uuid4().hex[:12]
+    normalized_device_id = normalize_mac(device_id)
+
+    user_ref = client.collection("users").document(user_id)
+    user_ref.set({"timezone": "America/Los_Angeles"}, merge=True)
+
+    reminder_ref = (
+        client.collection("users").document(user_id).collection("reminders").document(reminder_id)
+    )
+    reminder_payload = {
+        "status": "on",
+        "label": "Smoke Test Reminder",
+        "context": "Smoke Test Reminder",
+        "nextOccurrenceUTC": datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z"),
+        "schedule": {
+            "repeat": "none",
+            "timeLocal": "07:00",
+            "dateLocal": datetime.now(timezone.utc).date().isoformat(),
+            "days": [datetime.now(timezone.utc).date().isoformat()],
+        },
+        "targets": [
+            {
+                "deviceId": device_id,
+                "mode": "reminder",
+            }
+        ],
+        "deliveryChannel": ["plushie"],
+    }
+    reminder_ref.set(reminder_payload, merge=True)
+    print(f"[smoke] inserted reminder at users/{user_id}/reminders/{reminder_id} for device {device_id}")
+
+    try:
+        now = datetime.now(timezone.utc)
+        try:
+            wake_requests = scheduler.prepare_wake_requests(
+                now, lookahead=ALARM_TIMING["lookahead"]
+            )
+        except gcloud_exceptions.FailedPrecondition as exc:
+            pytest.skip(f"Firestore index missing for query: {exc.message}")
+        print(f"[smoke] scheduler returned {len(wake_requests)} requests")
+        matching = [
+            req for req in wake_requests if req.target.device_id == normalized_device_id
+        ]
+        assert matching, "Expected at least one wake request for smoke reminder device"
+        assert matching[0].target.mode == "reminder"
+
+        session_doc = (
+            client.collection("sessionContexts").document(normalized_device_id).get()
+        )
+        assert session_doc.exists, "sessionContexts doc should exist after scheduler runs"
+        session_data = session_doc.to_dict()
+        assert session_data["sessionConfig"]["mode"] == "reminder"
+        assert session_data["sessionConfig"]["alarmId"] == reminder_id
+    finally:
+        reminder_ref.delete()
+        client.collection("sessionContexts").document(normalized_device_id).delete()
+        user_ref.delete()

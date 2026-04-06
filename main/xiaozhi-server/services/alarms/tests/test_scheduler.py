@@ -93,6 +93,7 @@ def test_prepare_wake_requests_creates_session(monkeypatch):
         ]
 
     monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
+    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_reminders", lambda now, lookahead: [])
 
     now = datetime.now(timezone.utc)
     wake_requests = scheduler.prepare_wake_requests(now, lookahead=timedelta(minutes=1))
@@ -134,6 +135,7 @@ def test_prepare_wake_requests_skips_existing_session(monkeypatch):
         return [_make_alarm("DEV123", "morning_alarm")]
 
     monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
+    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_reminders", lambda now, lookahead: [])
     wake_requests = scheduler.prepare_wake_requests(
         datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
     )
@@ -159,6 +161,7 @@ def test_prepare_wake_requests_skips_when_last_processed_matches(monkeypatch):
         ]
 
     monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
+    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_reminders", lambda now, lookahead: [])
     wake_requests = scheduler.prepare_wake_requests(
         datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
     )
@@ -244,6 +247,7 @@ def test_prepare_wake_requests_one_time_uses_short_session_ttl(monkeypatch):
         ]
 
     monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
+    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_reminders", lambda now, lookahead: [])
 
     wake_requests = scheduler.prepare_wake_requests(
         datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
