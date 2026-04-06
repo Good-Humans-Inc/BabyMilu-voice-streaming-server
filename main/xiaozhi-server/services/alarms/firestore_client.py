@@ -18,9 +18,8 @@ TAG = __name__
 logger = setup_logging()
 
 _REPEAT_ALIASES = {
-    "daily": models.AlarmRepeat.WEEKLY,
-    "weekly": models.AlarmRepeat.WEEKLY,
     "daily": models.AlarmRepeat.DAILY,
+    "weekly": models.AlarmRepeat.WEEKLY,
     "none": models.AlarmRepeat.NONE,
     "once": models.AlarmRepeat.NONE,
     "one_time": models.AlarmRepeat.NONE,
@@ -48,7 +47,7 @@ def _build_client() -> firestore.Client:
 
 
 def _collection_group(client: firestore.Client):
-    return client.collection_group("alarms")
+    return client.collection_group("reminders")
 
 
 def fetch_due_alarms(
@@ -108,6 +107,12 @@ def fetch_due_alarms(
             continue
 
         targets_payload = data.get("targets")
+        if not targets_payload:
+            # No targets = push-only reminder; handled by reminder_push_job, not here.
+            logger.bind(tag=TAG).debug(
+                f"Skipping {doc.reference.path} (user={user_id}): push-only reminder (no targets)"
+            )
+            continue
         try:
             targets = _build_alarm_targets(
                 data=data,
@@ -128,13 +133,83 @@ def fetch_due_alarms(
             logger.bind(tag=TAG).warning(
                 (
                     f"Skipping alarm {doc.reference.path} (user={user_id}): "
-                    f"targets payload missing or empty ({targets_payload})"
+                    f"targets resolved empty ({targets_payload})"
                 )
             )
             continue
 
         docs.append(_build_alarm_doc(doc, data, schedule, targets))
     logger.bind(tag=TAG).info(f"Fetched {len(docs)} due alarms")
+    return docs
+
+
+def fetch_due_reminders(
+    now: datetime,
+    lookahead: timedelta,
+    client: Optional[firestore.Client] = None,
+) -> List[models.AlarmDoc]:
+    """Fetch due reminder docs (mode='reminder') from the reminders collection group.
+
+    Like fetch_due_alarms but scoped to docs whose targets have mode='reminder'
+    (i.e. voice-created reminders from set_reminder, NOT scheduled_conversations).
+    The alarm scanner calls this alongside fetch_due_alarms so they can be
+    given different session TTLs.
+    """
+    client = client or _build_client()
+    user_cache: Dict[str, Dict[str, Any]] = {}
+    device_cache: Dict[str, List[str]] = {}
+    upper_bound = now + lookahead
+    upper_bound_str = _format_datetime(upper_bound)
+
+    query = _collection_group(client)
+    query = query.where(filter=FieldFilter("status", "==", "on"))
+    query = query.where(filter=FieldFilter("nextOccurrenceUTC", "<=", upper_bound_str))
+
+    docs: List[models.AlarmDoc] = []
+    for doc in query.stream():
+        user_id = _resolve_user_id(doc)
+        data = doc.to_dict() or {}
+        user_meta = _get_user_metadata(doc, user_cache)
+        if user_meta:
+            data = dict(data)
+            data["user"] = user_meta
+
+        targets_payload = data.get("targets")
+        if not targets_payload:
+            continue
+
+        # Only include docs with at least one target whose mode is "reminder"
+        if not any(
+            str(t.get("mode", "")).lower() == "reminder"
+            for t in targets_payload
+            if isinstance(t, dict)
+        ):
+            continue
+
+        schedule_payload = data.get("schedule")
+        if not isinstance(schedule_payload, dict):
+            continue
+        try:
+            schedule = _build_schedule(schedule_payload)
+        except (KeyError, ValueError):
+            continue
+
+        try:
+            targets = _build_alarm_targets(
+                data=data,
+                user_id=user_id,
+                targets_payload=targets_payload,
+                client=client,
+                device_cache=device_cache,
+            )
+        except (KeyError, ValueError):
+            continue
+        if not targets:
+            continue
+
+        docs.append(_build_alarm_doc(doc, data, schedule, targets))
+
+    logger.bind(tag=TAG).info(f"Fetched {len(docs)} due reminders")
     return docs
 
 
@@ -341,7 +416,7 @@ def create_alarm(
     tz_str: str,
     client: Optional[firestore.Client] = None,
 ) -> str:
-    """Write a one-time alarm doc to /users/{uid}/alarms/{alarm_id} and return the alarm_id.
+    """Write a one-time alarm doc to /users/{uid}/reminders/{alarm_id} and return the alarm_id.
 
     Args:
         uid: The user's document ID (ownerPhone).
@@ -363,11 +438,9 @@ def create_alarm(
         "label": label,
         "context": context,
         "schedule": {
-            # Keep "once" for backward compatibility with currently deployed
-            # cloud scheduler revisions that may not recognize "none".
             "repeat": "once",
             "timeLocal": time_local,
-            "days": [date_local],  # ISO date string for one-time alarms
+            "dateLocal": date_local,
         },
         "nextOccurrenceUTC": _format_datetime(resolved_dt),
         "status": models.AlarmStatus.ON.value,
@@ -378,12 +451,71 @@ def create_alarm(
         "updatedAt": _format_datetime(now_utc),
     }
 
-    client.collection("users").document(uid).collection("alarms").document(alarm_id).set(doc)
+    client.collection("users").document(uid).collection("reminders").document(alarm_id).set(doc)
     logger.bind(tag=TAG).info(
         f"Created one-time alarm {alarm_id} for user {uid} device {device_id} "
         f"at {_format_datetime(resolved_dt)} (local {time_local} {tz_str}): '{label}'"
     )
     return alarm_id
+
+
+def create_reminder(
+    uid: str,
+    device_id: str,
+    resolved_dt: datetime,
+    label: str,
+    context: str,
+    tz_str: str,
+    delivery_channels: Optional[List[str]] = None,
+    client: Optional[firestore.Client] = None,
+) -> str:
+    """Write a device-wake reminder doc to /users/{uid}/reminders/{reminder_id}.
+
+    The doc has a targets array with mode="reminder" so the alarm scanner can
+    find it and wake the device for a short reminder session (distinct from a
+    full scheduled_conversation).  reminder_push_job skips these (targets present).
+
+    Args:
+        uid: The user's document ID (ownerPhone).
+        device_id: The device MAC to wake for the reminder session.
+        resolved_dt: Timezone-aware absolute datetime for the reminder.
+        label: Short human-readable name (e.g. "drink water").
+        context: Full reason/purpose for the reminder.
+        tz_str: IANA timezone string (e.g. "America/Los_Angeles").
+        delivery_channels: Which delivery channels to use (default ["plushie"]).
+    """
+    client = client or _build_client()
+    reminder_id = str(uuid.uuid4())
+
+    resolved_local = resolved_dt.astimezone(ZoneInfo(tz_str))
+    time_local = resolved_local.strftime("%H:%M")
+    date_local = resolved_local.strftime("%Y-%m-%d")
+
+    now_utc = datetime.now(timezone.utc)
+    doc = {
+        "label": label,
+        "context": context,
+        "schedule": {
+            "repeat": "none",
+            "timeLocal": time_local,
+            "dateLocal": date_local,
+        },
+        "nextOccurrenceUTC": _format_datetime(resolved_dt),
+        "status": models.AlarmStatus.ON.value,
+        "targets": [{"deviceId": device_id, "mode": "reminder"}],
+        "deliveryChannel": delivery_channels if delivery_channels is not None else ["plushie"],
+        "uid": uid,
+        "source": "voice",
+        "createdAt": _format_datetime(now_utc),
+        "updatedAt": _format_datetime(now_utc),
+    }
+
+    client.collection("users").document(uid).collection("reminders").document(reminder_id).set(doc)
+    logger.bind(tag=TAG).info(
+        f"Created reminder {reminder_id} for user {uid} (device {device_id}) "
+        f"at {_format_datetime(resolved_dt)} (local {time_local} {tz_str}): '{label}'"
+    )
+    return reminder_id
 
 
 def create_scheduled_conversation(
@@ -404,7 +536,7 @@ def create_scheduled_conversation(
     delivery_preference: Optional[str] = None,
     client: Optional[firestore.Client] = None,
 ) -> str:
-    """Write a scheduled-conversation alarm doc to /users/{uid}/alarms/{alarm_id}.
+    """Write a scheduled-conversation alarm doc to /users/{uid}/reminders/{alarm_id}.
 
     Like create_alarm() but uses mode='scheduled_conversation' and stores the
     LLM-generated intake fields (outline, character reminder, emotional context, etc.)
@@ -426,7 +558,7 @@ def create_scheduled_conversation(
         "schedule": {
             "repeat": "once",
             "timeLocal": time_local,
-            "days": [date_local],
+            "dateLocal": date_local,
         },
         "nextOccurrenceUTC": _format_datetime(resolved_dt),
         "status": models.AlarmStatus.ON.value,
@@ -446,7 +578,7 @@ def create_scheduled_conversation(
         "deliveryPreference": delivery_preference,
     }
 
-    client.collection("users").document(uid).collection("alarms").document(alarm_id).set(doc)
+    client.collection("users").document(uid).collection("reminders").document(alarm_id).set(doc)
     logger.bind(tag=TAG).info(
         f"Created scheduled conversation {alarm_id} for user {uid} device {device_id} "
         f"at {_format_datetime(resolved_dt)} (local {time_local} {tz_str}): '{label}'"
@@ -460,15 +592,15 @@ def fetch_active_alarms_for_user(
 ) -> List[models.AlarmDoc]:
     """Fetch all active scheduled_conversation reminders for a specific user.
 
-    Queries /users/{uid}/alarms where status=on, then filters to
-    scheduled_conversation mode only (morning_alarm docs are deprecated and ignored).
+    Queries /users/{uid}/reminders where status=on, then filters to
+    scheduled_conversation mode only.
     """
     client = client or _build_client()
     docs: List[models.AlarmDoc] = []
     query = (
         client.collection("users")
         .document(uid)
-        .collection("alarms")
+        .collection("reminders")
         .where(filter=FieldFilter("status", "==", "on"))
     )
     for doc in query.stream():
@@ -530,7 +662,7 @@ def modify_scheduled_conversation(
         resolved_local = resolved_dt.astimezone(ZoneInfo(tz_str))
         updates["nextOccurrenceUTC"] = _format_datetime(resolved_dt)
         updates["schedule.timeLocal"] = resolved_local.strftime("%H:%M")
-        updates["schedule.days"] = [resolved_local.strftime("%Y-%m-%d")]
+        updates["schedule.dateLocal"] = resolved_local.strftime("%Y-%m-%d")
 
     if content is not None:
         updates["content"] = content
@@ -553,7 +685,7 @@ def modify_scheduled_conversation(
     (
         client.collection("users")
         .document(uid)
-        .collection("alarms")
+        .collection("reminders")
         .document(alarm_id)
         .update(updates)
     )
@@ -569,7 +701,7 @@ def cancel_scheduled_conversation(
 ) -> None:
     """Cancel a scheduled_conversation reminder by setting status=off.
 
-    All reminders live in /users/{uid}/alarms/. This function is only ever
+    All reminders live in /users/{uid}/reminders/. This function is only ever
     called with scheduled_conversation alarm_ids — the LLM only learns
     reminder_ids from list_reminders or schedule_conversation, both of which
     exclusively deal with scheduled_conversation docs.
@@ -579,7 +711,7 @@ def cancel_scheduled_conversation(
     (
         client.collection("users")
         .document(uid)
-        .collection("alarms")
+        .collection("reminders")
         .document(alarm_id)
         .set(
             {

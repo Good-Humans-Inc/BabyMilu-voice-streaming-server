@@ -244,6 +244,19 @@ def run_send_reminder_push_job(
         reminder_id = reminder_doc.id
         try:
             reminder_data = reminder_doc.to_dict() or {}
+
+            # Docs with a targets array are device-triggered (alarm scanner handles them).
+            if reminder_data.get("targets"):
+                skipped += 1
+                results.append(
+                    {
+                        "reminderId": reminder_id,
+                        "processed": False,
+                        "skipped": "device_triggered",
+                    }
+                )
+                continue
+
             uid = _resolve_uid_from_reminder_doc(reminder_doc, reminder_data)
             if not uid:
                 skipped += 1

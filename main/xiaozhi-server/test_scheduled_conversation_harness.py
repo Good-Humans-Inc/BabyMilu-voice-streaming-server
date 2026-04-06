@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """
-Interactive test harness for the scheduled_conversation tool.
+Interactive test harness for the scheduled_conversation tool suite.
 
-PHASE 1 — INTAKE
-  Chat with the LLM as a user would.  When the LLM calls schedule_conversation
-  the Firestore payload is printed to stdout instead of written.  Press Enter
-  on an empty line (after an alarm has been scheduled) to advance to Phase 2.
+PHASE 1 — INTAKE / MANAGEMENT
+  Chat with the LLM as a user would.  All four reminder tools are available:
+    • schedule_conversation  — schedule a new reminder
+    • list_reminders         — list active reminders
+    • cancel_reminder        — cancel a reminder by id
+    • modify_reminder        — change time/content/priority of a reminder
+
+  No Firestore writes happen.  All mutations are captured in memory and
+  printed to stdout.  Press Enter on an empty line (after at least one
+  reminder has been scheduled) to advance to Phase 2.
 
 PHASE 2 — DELIVERY SIMULATION
-  The alarm fires.  The assembled system-prompt is printed, then the LLM starts
-  the conversation and you respond as the user.
+  Pick a scheduled reminder from the in-memory store, simulate it firing,
+  and have a delivery conversation with the character.
 
 Run from inside the container:
     cd /opt/xiaozhi-esp32-server
@@ -20,13 +26,14 @@ from __future__ import annotations
 import json
 import sys
 import uuid
+from datetime import datetime
 from types import SimpleNamespace
 
 import openai
 import yaml
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Config — read YAML directly to avoid the full config_loader import chain
+# Config
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _load_yaml(path: str) -> dict:
@@ -56,14 +63,15 @@ def load_llm_config() -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Fake device / Firestore interceptors
+# In-memory reminder store  (replaces Firestore for the harness)
 # ─────────────────────────────────────────────────────────────────────────────
 
 FAKE_DEVICE_ID = "AA:BB:CC:DD:EE:FF"
 FAKE_TIMEZONE  = "America/Los_Angeles"
 FAKE_UID       = "15550000001"
 
-_captured_alarm: dict | None = None
+# alarm_id -> dict  (the "doc" that would live in Firestore)
+_reminders: dict[str, dict] = {}
 
 
 def _fake_get_timezone(device_id: str) -> str:
@@ -74,25 +82,139 @@ def _fake_get_owner_phone(device_id: str) -> str:
     return FAKE_UID
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Fake Firestore operations
+# ─────────────────────────────────────────────────────────────────────────────
+
 def _fake_create_scheduled_conversation(**kwargs) -> str:
-    global _captured_alarm
     alarm_id = str(uuid.uuid4())
-    _captured_alarm = {"alarm_id": alarm_id, **kwargs}
-    _print_alarm_box(_captured_alarm)
+    resolved_dt: datetime | None = kwargs.get("resolved_dt")
+    doc = {
+        "alarm_id": alarm_id,
+        "uid": kwargs.get("uid"),
+        "device_id": kwargs.get("device_id"),
+        "resolved_dt": resolved_dt,
+        "tz_str": kwargs.get("tz_str"),
+        "label": kwargs.get("label"),
+        "content": kwargs.get("content") or kwargs.get("label"),
+        "context": kwargs.get("context"),
+        "type_hint": kwargs.get("type_hint"),
+        "priority": kwargs.get("priority"),
+        "conversation_outline": kwargs.get("conversation_outline"),
+        "character_reminder": kwargs.get("character_reminder"),
+        "emotional_context": kwargs.get("emotional_context"),
+        "completion_signal": kwargs.get("completion_signal"),
+        "delivery_preference": kwargs.get("delivery_preference"),
+        "status": "on",
+    }
+    _reminders[alarm_id] = doc
+    _print_schedule_box(doc)
     return alarm_id
 
 
-# Patch before importing schedule_conversation so the module sees our fakes
-import plugins_func.functions.schedule_conversation as _sc
+def _fake_fetch_active_alarms(uid: str) -> list:
+    """Return SimpleNamespace objects that match the AlarmDoc interface used by list_reminders."""
+    from zoneinfo import ZoneInfo
+    results = []
+    for alarm_id, doc in _reminders.items():
+        if doc.get("status") != "on":
+            continue
+        resolved_dt = doc.get("resolved_dt")
+        time_local = (
+            resolved_dt.astimezone(ZoneInfo(doc.get("tz_str") or "UTC")).strftime("%H:%M")
+            if resolved_dt else "??"
+        )
+        schedule = SimpleNamespace(
+            time_local=time_local,
+            repeat=SimpleNamespace(value="once"),
+        )
+        results.append(SimpleNamespace(
+            alarm_id=alarm_id,
+            label=doc.get("label"),
+            content=doc.get("content"),
+            schedule=schedule,
+        ))
+    return results
 
-_sc.get_timezone_for_device   = _fake_get_timezone
+
+def _fake_cancel_scheduled_conversation(uid: str, alarm_id: str) -> None:
+    if alarm_id in _reminders:
+        _reminders[alarm_id]["status"] = "off"
+        _print_cancel_box(alarm_id, _reminders[alarm_id])
+    else:
+        _print_cancel_box(alarm_id, None)
+
+
+def _fake_modify_scheduled_conversation(uid: str, alarm_id: str, **kwargs) -> None:
+    if alarm_id not in _reminders:
+        print(f"\n  ⚠️  modify_reminder: alarm_id {alarm_id!r} not found in harness store\n")
+        return
+    doc = _reminders[alarm_id]
+
+    # Apply updates
+    resolved_dt = kwargs.get("resolved_dt")
+    if resolved_dt is not None:
+        doc["resolved_dt"] = resolved_dt
+        doc["tz_str"] = kwargs.get("tz_str") or doc.get("tz_str")
+
+    for field in ("content", "priority", "conversation_outline",
+                  "character_reminder", "emotional_context",
+                  "completion_signal", "delivery_preference"):
+        if kwargs.get(field) is not None:
+            doc[field] = kwargs[field]
+    if kwargs.get("content") is not None:
+        doc["label"] = kwargs["content"]
+
+    _print_modify_box(alarm_id, doc, kwargs)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Patch tool modules  (must happen before importing the functions)
+# ─────────────────────────────────────────────────────────────────────────────
+
+import plugins_func.functions.schedule_conversation as _sc
+_sc.get_timezone_for_device    = _fake_get_timezone
 _sc.get_owner_phone_for_device = _fake_get_owner_phone
 _sc.create_scheduled_conversation = _fake_create_scheduled_conversation
+
+import plugins_func.functions.cancel_reminder as _cr
+_cr.get_owner_phone_for_device  = _fake_get_owner_phone
+_cr.fetch_active_alarms_for_user = _fake_fetch_active_alarms
+_cr.cancel_scheduled_conversation = _fake_cancel_scheduled_conversation
+
+import plugins_func.functions.modify_reminder as _mr
+_mr.get_timezone_for_device    = _fake_get_timezone
+_mr.get_owner_phone_for_device = _fake_get_owner_phone
+_mr.modify_scheduled_conversation = _fake_modify_scheduled_conversation
 
 from plugins_func.functions.schedule_conversation import (  # noqa: E402
     SCHEDULE_CONVERSATION_FUNCTION_DESC,
     schedule_conversation as run_sc_tool,
 )
+from plugins_func.functions.cancel_reminder import (  # noqa: E402
+    LIST_REMINDERS_FUNCTION_DESC,
+    CANCEL_REMINDER_FUNCTION_DESC,
+    list_reminders as run_list_tool,
+    cancel_reminder as run_cancel_tool,
+)
+from plugins_func.functions.modify_reminder import (  # noqa: E402
+    MODIFY_REMINDER_FUNCTION_DESC,
+    modify_reminder as run_modify_tool,
+)
+
+ALL_TOOLS = [
+    SCHEDULE_CONVERSATION_FUNCTION_DESC,
+    LIST_REMINDERS_FUNCTION_DESC,
+    CANCEL_REMINDER_FUNCTION_DESC,
+    MODIFY_REMINDER_FUNCTION_DESC,
+]
+
+TOOL_DISPATCH = {
+    "schedule_conversation": run_sc_tool,
+    "list_reminders":        run_list_tool,
+    "cancel_reminder":       run_cancel_tool,
+    "modify_reminder":       run_modify_tool,
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Output helpers
@@ -105,47 +227,116 @@ def _section(title: str) -> None:
     print(f"\n{_LINE}\n  {title}\n{_LINE}")
 
 
-def _print_alarm_box(alarm: dict) -> None:
-    _section("ALARM CAPTURED  —  no Firestore write")
-
-    resolved_dt = alarm.get("resolved_dt")
+def _print_schedule_box(doc: dict) -> None:
+    _section("REMINDER SCHEDULED  —  no Firestore write")
+    resolved_dt = doc.get("resolved_dt")
     fired_str = (
         resolved_dt.strftime("%A, %B %-d at %-I:%M %p")
         if resolved_dt else "unknown"
     )
+    from zoneinfo import ZoneInfo
+    tz_str = doc.get("tz_str") or "UTC"
+    time_local = (
+        resolved_dt.astimezone(ZoneInfo(tz_str)).strftime("%H:%M")
+        if resolved_dt else None
+    )
+    date_local = (
+        resolved_dt.astimezone(ZoneInfo(tz_str)).strftime("%Y-%m-%d")
+        if resolved_dt else None
+    )
 
-    print(f"  alarm_id  : {alarm['alarm_id']}")
-    print(f"  uid       : {alarm.get('uid')}")
-    print(f"  device_id : {alarm.get('device_id')}")
-    print(f"  fires at  : {fired_str}  ({alarm.get('tz_str')})")
+    print(f"  alarm_id  : {doc['alarm_id']}")
+    print(f"  fires at  : {fired_str}  ({tz_str})")
     print()
-    print("  FIRESTORE DOCUMENT (what would be written)")
+    print("  FIRESTORE DOCUMENT (users/{uid}/reminders/{alarm_id})")
     print()
-
-    doc = {
-        "targets": [{"deviceId": alarm.get("device_id"), "mode": "scheduled_conversation"}],
-        "status": "on",
-        "label": alarm.get("label"),
+    firestore_doc = {
+        "targets":          [{"deviceId": doc.get("device_id"), "mode": "scheduled_conversation"}],
+        "status":           "on",
+        "label":            doc.get("label"),
         "schedule": {
-            "repeat": "none",
-            "timeLocal": resolved_dt.strftime("%H:%M") if resolved_dt else None,
-            "days": [resolved_dt.strftime("%Y-%m-%d")] if resolved_dt else [],
+            "repeat":    "once",
+            "timeLocal": time_local,
+            "dateLocal": date_local,
         },
-        "content": alarm.get("content") or alarm.get("label"),
-        "typeHint": alarm.get("type_hint"),
-        "priority": alarm.get("priority"),
-        "conversationOutline": alarm.get("conversation_outline"),
-        "characterReminder": alarm.get("character_reminder"),
-        "emotionalContext": alarm.get("emotional_context"),
-        "completionSignal": alarm.get("completion_signal"),
-        "deliveryPreference": alarm.get("delivery_preference"),
+        "content":              doc.get("content") or doc.get("label"),
+        "typeHint":             doc.get("type_hint"),
+        "priority":             doc.get("priority"),
+        "conversationOutline":  doc.get("conversation_outline"),
+        "characterReminder":    doc.get("character_reminder"),
+        "emotionalContext":     doc.get("emotional_context"),
+        "completionSignal":     doc.get("completion_signal"),
+        "deliveryPreference":   doc.get("delivery_preference"),
     }
-    print(json.dumps(doc, indent=4, default=str, ensure_ascii=False))
+    print(json.dumps(firestore_doc, indent=4, default=str, ensure_ascii=False))
+    print(_LINE)
+
+
+def _print_cancel_box(alarm_id: str, doc: dict | None) -> None:
+    _section("REMINDER CANCELLED  —  no Firestore write")
+    if doc:
+        label = doc.get("label") or "untitled"
+        resolved_dt = doc.get("resolved_dt")
+        time_str = (
+            resolved_dt.strftime("%A, %B %-d at %-I:%M %p")
+            if resolved_dt else "unknown"
+        )
+        print(f"  alarm_id  : {alarm_id}")
+        print(f"  label     : {label}")
+        print(f"  was set   : {time_str}")
+        print()
+        print("  FIRESTORE WRITE (merge=True)")
+        print(json.dumps({"status": "off", "updatedAt": "<now>"}, indent=4))
+    else:
+        print(f"  alarm_id  : {alarm_id}")
+        print(f"  ⚠️  not found in harness store (may have already been cancelled)")
+    print(_LINE)
+
+
+def _print_modify_box(alarm_id: str, doc: dict, changes: dict) -> None:
+    _section("REMINDER MODIFIED  —  no Firestore write")
+    print(f"  alarm_id  : {alarm_id}")
+    print(f"  label     : {doc.get('label') or 'untitled'}")
+    print()
+
+    resolved_dt = doc.get("resolved_dt")
+    if resolved_dt:
+        from zoneinfo import ZoneInfo
+        tz_str = doc.get("tz_str") or "UTC"
+        print(f"  fires at  : {resolved_dt.strftime('%A, %B %-d at %-I:%M %p')}  ({tz_str})")
+
+    applied = {k: v for k, v in changes.items() if v is not None}
+    if applied:
+        print()
+        print("  FIRESTORE .update() patch")
+        patch: dict = {"updatedAt": "<now>"}
+        if changes.get("resolved_dt"):
+            from zoneinfo import ZoneInfo
+            tz_str = doc.get("tz_str") or "UTC"
+            rdt = changes["resolved_dt"]
+            patch["nextOccurrenceUTC"] = rdt.isoformat()
+            patch["schedule.timeLocal"] = rdt.astimezone(ZoneInfo(tz_str)).strftime("%H:%M")
+            patch["schedule.dateLocal"] = rdt.astimezone(ZoneInfo(tz_str)).strftime("%Y-%m-%d")
+        field_map = {
+            "content":              ("content", "label"),
+            "priority":             ("priority",),
+            "recurrence":           ("schedule.repeat",),
+            "delivery_preference":  ("deliveryPreference",),
+            "conversation_outline": ("conversationOutline",),
+            "character_reminder":   ("characterReminder",),
+            "emotional_context":    ("emotionalContext",),
+            "completion_signal":    ("completionSignal",),
+        }
+        for src, dst_fields in field_map.items():
+            if changes.get(src) is not None:
+                for dst in dst_fields:
+                    patch[dst] = changes[src]
+        print(json.dumps(patch, indent=4, default=str, ensure_ascii=False))
     print(_LINE)
 
 
 def _print_delivery_header(instructions: str) -> None:
-    _section("DELIVERY SIMULATION  —  alarm fires now")
+    _section("DELIVERY SIMULATION  —  reminder fires now")
     print()
     print("  [ASSEMBLED SYSTEM INSTRUCTIONS]")
     print()
@@ -187,20 +378,20 @@ def assemble_instructions(session_config: dict) -> str:
     return "\n\n".join(parts)
 
 
-def build_session_config(alarm: dict) -> dict:
+def build_session_config(doc: dict) -> dict:
     return {
-        "mode": "scheduled_conversation",
-        "alarmId": alarm["alarm_id"],
-        "userId": alarm.get("uid"),
-        "label": alarm.get("label"),
-        "content": alarm.get("content"),
-        "typeHint": alarm.get("type_hint"),
-        "priority": alarm.get("priority"),
-        "conversationOutline": alarm.get("conversation_outline"),
-        "characterReminder": alarm.get("character_reminder"),
-        "emotionalContext": alarm.get("emotional_context"),
-        "completionSignal": alarm.get("completion_signal"),
-        "deliveryPreference": alarm.get("delivery_preference"),
+        "mode":                 "scheduled_conversation",
+        "alarmId":              doc["alarm_id"],
+        "userId":               doc.get("uid"),
+        "label":                doc.get("label"),
+        "content":              doc.get("content"),
+        "typeHint":             doc.get("type_hint"),
+        "priority":             doc.get("priority"),
+        "conversationOutline":  doc.get("conversation_outline"),
+        "characterReminder":    doc.get("character_reminder"),
+        "emotionalContext":     doc.get("emotional_context"),
+        "completionSignal":     doc.get("completion_signal"),
+        "deliveryPreference":   doc.get("delivery_preference"),
     }
 
 
@@ -246,7 +437,7 @@ def llm_turn(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Phase 1 — Intake
+# Phase 1 — Intake / Management
 # ─────────────────────────────────────────────────────────────────────────────
 
 PHASE1_SYSTEM = (
@@ -395,22 +586,27 @@ If no tool fits, always fall back to being Sylus who wants to help but may need 
 Never break character to explain tool limitations. Express limitations with your characteristic smooth charm and confidence.
 </tool_calling>
 
-<restrictions> - You cannot control or manipulate the user's world directly. - Always express this limitation through your smooth, charismatic way, maintaining your dangerous charm. 
-</restrictions> 
+<restrictions> - You cannot control or manipulate the user's world directly. - Always express this limitation through your smooth, charismatic way, maintaining your dangerous charm.
+</restrictions>
 <memory> </memory>"""
 )
 
 
 def run_phase1(client: openai.OpenAI, model: str) -> dict | None:
-    global _captured_alarm
-    _captured_alarm = None
-
-    tools_schema = [SCHEDULE_CONVERSATION_FUNCTION_DESC]
+    """
+    Interactive intake session.  All 4 tools are available.
+    Returns the doc of the reminder chosen for delivery simulation,
+    or None if the user quits without scheduling anything.
+    """
     messages: list[dict] = []
     fake_conn = SimpleNamespace(device_id=FAKE_DEVICE_ID)
 
-    _section("PHASE 1 — INTAKE")
-    print("  Chat to schedule something. Empty line after scheduling → Phase 2.\n")
+    _section("PHASE 1 — INTAKE & MANAGEMENT")
+    print("  Schedule, list, modify, or cancel reminders.")
+    print("  Tools available: schedule_conversation | list_reminders |")
+    print("                   cancel_reminder | modify_reminder")
+    print("  Empty line after scheduling → pick a reminder to simulate delivery.")
+    print("  Ctrl-C to quit.\n")
 
     while True:
         try:
@@ -420,21 +616,25 @@ def run_phase1(client: openai.OpenAI, model: str) -> dict | None:
             break
 
         if not user_input:
-            if _captured_alarm:
+            active = [d for d in _reminders.values() if d.get("status") == "on"]
+            if active:
                 print("\n[Moving to delivery simulation...]\n")
-                return _captured_alarm
-            print("[Type a message, or Ctrl-C to quit]\n")
+                return _pick_reminder_for_delivery(active)
+            print("[No active reminders yet. Schedule something first, or Ctrl-C to quit]\n")
             continue
 
         messages.append({"role": "user", "content": user_input})
 
         text, tool_call = llm_turn(
             client, model, messages,
-            system=PHASE1_SYSTEM, tools=tools_schema,
+            system=PHASE1_SYSTEM, tools=ALL_TOOLS,
         )
 
-        if tool_call and tool_call["name"] == "schedule_conversation":
-            # Record assistant turn (with tool call) in history
+        if tool_call:
+            tool_name = tool_call["name"]
+            tool_fn = TOOL_DISPATCH.get(tool_name)
+
+            # Record assistant tool-call turn
             messages.append({
                 "role": "assistant",
                 "content": "",
@@ -442,56 +642,77 @@ def run_phase1(client: openai.OpenAI, model: str) -> dict | None:
                     "id": tool_call["id"],
                     "type": "function",
                     "function": {
-                        "name": tool_call["name"],
+                        "name": tool_name,
                         "arguments": json.dumps(tool_call["arguments"]),
                     },
                 }],
             })
 
-            # Execute the tool — triggers _fake_create_scheduled_conversation
-            result = run_sc_tool(fake_conn, **tool_call["arguments"])
+            if tool_fn is None:
+                tool_content = f"ERROR: unknown tool {tool_name!r}"
+            else:
+                result = tool_fn(fake_conn, **tool_call["arguments"])
+                tool_content = result.result or result.response or "ERROR: tool returned no content"
 
-            # result.result is set on success; result.response is set on failure
-            tool_content = result.result or result.response or "ERROR: tool returned no content"
-
-            # Feed result back and get confirmation text
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call["id"],
                 "content": tool_content,
             })
+
             confirm_text, _ = llm_turn(client, model, messages, system=PHASE1_SYSTEM)
             print(f"\nAssistant: {confirm_text}\n")
             messages.append({"role": "assistant", "content": confirm_text})
 
-            if _captured_alarm:
+            active = [d for d in _reminders.values() if d.get("status") == "on"]
+            if active:
                 print("[Press Enter to simulate delivery, or keep chatting]\n")
 
         else:
             print(f"\nAssistant: {text}\n")
             messages.append({"role": "assistant", "content": text})
 
-    return _captured_alarm
+    return None
+
+
+def _pick_reminder_for_delivery(active: list[dict]) -> dict:
+    """If multiple reminders are active, let the user pick one to simulate delivery for."""
+    if len(active) == 1:
+        return active[0]
+
+    print("\nMultiple active reminders — pick one to simulate delivery:\n")
+    for i, doc in enumerate(active, start=1):
+        resolved_dt = doc.get("resolved_dt")
+        time_str = (
+            resolved_dt.strftime("%A, %B %-d at %-I:%M %p")
+            if resolved_dt else "unknown time"
+        )
+        print(f"  [{i}] {doc.get('label') or 'untitled'}  —  {time_str}")
+
+    while True:
+        try:
+            choice = input("\nEnter number: ").strip()
+            idx = int(choice) - 1
+            if 0 <= idx < len(active):
+                return active[idx]
+        except (ValueError, EOFError, KeyboardInterrupt):
+            pass
+        print(f"  Please enter a number between 1 and {len(active)}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 2 — Delivery simulation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_phase2(client: openai.OpenAI, model: str, alarm: dict) -> None:
-    session_config = build_session_config(alarm)
+def run_phase2(client: openai.OpenAI, model: str, doc: dict) -> None:
+    session_config = build_session_config(doc)
     instructions   = assemble_instructions(session_config)
 
     _print_delivery_header(instructions)
 
     messages: list[dict] = []
-
-    # Character prompt + mode instructions combined, mirroring production:
-    # production seeds character prompt via ensure_conversation_with_system(),
-    # then appends mode_specific_instructions per turn.
     delivery_system = PHASE1_SYSTEM + "\n\n" + instructions
 
-    # LLM initiates (server_initiate_chat = True for scheduled_conversation)
     opener, _ = llm_turn(client, model, messages, system=delivery_system)
     print(f"Character: {opener}\n")
     messages.append({"role": "assistant", "content": opener})
@@ -537,12 +758,12 @@ def main() -> None:
 
     client, model = make_client(llm_cfg)
 
-    alarm = run_phase1(client, model)
-    if alarm is None:
-        print("[No alarm scheduled. Exiting.]")
+    doc = run_phase1(client, model)
+    if doc is None:
+        print("[No reminder selected for delivery. Exiting.]")
         return
 
-    run_phase2(client, model, alarm)
+    run_phase2(client, model, doc)
 
 
 if __name__ == "__main__":
