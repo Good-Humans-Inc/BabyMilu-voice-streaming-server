@@ -205,6 +205,7 @@ def schedule_conversation(
                 label=content,
                 context=content,
                 tz_str=tz_str,
+                recurrence=recurrence,
                 content=content,
                 type_hint=type_hint,
                 priority=priority,

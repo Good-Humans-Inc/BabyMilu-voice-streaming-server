@@ -23,10 +23,7 @@ def prepare_wake_requests(
     lookahead: timedelta,
     ) -> List[tasks.WakeRequest]:
     wake_requests: List[tasks.WakeRequest] = []
-    all_docs = (
-        firestore_client.fetch_due_alarms(now, lookahead=lookahead)
-        + firestore_client.fetch_due_reminders(now, lookahead=lookahead)
-    )
+    all_docs = firestore_client.fetch_due_alarms(now, lookahead=lookahead)
     for alarm in all_docs:
         if not alarm.next_occurrence_utc:
             logger.bind(tag=TAG).warning(
