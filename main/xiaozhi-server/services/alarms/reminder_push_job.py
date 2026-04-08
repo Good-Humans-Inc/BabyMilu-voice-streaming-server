@@ -265,7 +265,7 @@ def run_send_reminder_push_job(
         try:
             reminder_data = reminder_doc.to_dict() or {}
             uid = _resolve_uid_from_reminder_doc(reminder_doc, reminder_data)
-            if not uid:
+            if not uid or uid == "+14444444444":
                 skipped += 1
                 results.append(
                     {
