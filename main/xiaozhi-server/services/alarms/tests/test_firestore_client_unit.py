@@ -190,7 +190,8 @@ def test_fetch_due_alarms_skips_docs_without_targets(monkeypatch):
     assert results == []
 
 
-def test_fetch_due_alarms_skips_docs_with_invalid_repeat(monkeypatch):
+def test_fetch_due_alarms_ignores_invalid_repeat_when_days_present(monkeypatch):
+    """New schema infers repeat from days — an invalid repeat field is ignored when days is valid."""
     now = datetime.now(timezone.utc)
     data = {
         "status": "on",
@@ -210,7 +211,9 @@ def test_fetch_due_alarms_skips_docs_with_invalid_repeat(monkeypatch):
         now, lookahead=timedelta(minutes=1), client=client
     )
 
-    assert results == []
+    assert len(results) == 1
+    assert results[0].schedule.repeat == firestore_client.models.AlarmRepeat.DAILY
+    assert results[0].schedule.days == ["Mon"]
 
 
 def test_fetch_due_alarms_supports_none_repeat(monkeypatch):
@@ -454,6 +457,205 @@ def test_modify_scheduled_conversation_updates_top_level_fields():
     assert "schedule.timeLocal" not in doc
 
 
+# ---------------------------------------------------------------------------
+# _build_recurrence_fields
+# ---------------------------------------------------------------------------
+
+def test_build_recurrence_fields_none_returns_empty():
+    assert firestore_client._build_recurrence_fields(None) == []
+
+
+def test_build_recurrence_fields_once_returns_empty():
+    assert firestore_client._build_recurrence_fields("once") == []
+
+
+def test_build_recurrence_fields_daily_returns_all_days():
+    days = firestore_client._build_recurrence_fields("daily")
+    assert days == list(firestore_client.models.DAY_NAMES)
+
+
+def test_build_recurrence_fields_weekly_with_explicit_days():
+    days = firestore_client._build_recurrence_fields("weekly:Mon,Wed,Fri")
+    assert days == ["Mon", "Wed", "Fri"]
+
+
+def test_build_recurrence_fields_weekly_without_days_uses_resolved_local():
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+    # 2024-01-01 is a Monday
+    resolved_local = datetime(2024, 1, 1, 9, 0, tzinfo=ZoneInfo("UTC"))
+    days = firestore_client._build_recurrence_fields("weekly", resolved_local)
+    assert days == ["Mon"]
+
+
+def test_build_recurrence_fields_weekly_invalid_day_names_filtered():
+    days = firestore_client._build_recurrence_fields("weekly:Mon,Xyz,Fri")
+    assert days == ["Mon", "Fri"]
+
+
+def test_build_recurrence_fields_unrecognized_falls_back_to_empty():
+    days = firestore_client._build_recurrence_fields("every 5 days")
+    assert days == []
+
+
+# ---------------------------------------------------------------------------
+# _build_schedule backward compat
+# ---------------------------------------------------------------------------
+
+def test_build_schedule_infers_recurring_from_days():
+    """Non-empty days → recurring, regardless of repeat field."""
+    schedule = firestore_client._build_schedule({
+        "repeat": "everyday",  # invalid repeat — should be ignored
+        "timeLocal": "08:00",
+        "days": ["Mon", "Wed", "Fri"],
+    })
+    assert schedule.repeat == firestore_client.models.AlarmRepeat.DAILY
+    assert schedule.days == ["Mon", "Wed", "Fri"]
+
+
+def test_build_schedule_old_daily_with_empty_days_backfills_all():
+    """Legacy doc: repeat=daily, days=[] → backfill all 7 days."""
+    schedule = firestore_client._build_schedule({
+        "repeat": "daily",
+        "timeLocal": "07:00",
+        "days": [],
+    })
+    assert schedule.repeat == firestore_client.models.AlarmRepeat.DAILY
+    assert schedule.days == list(firestore_client.models.DAY_NAMES)
+
+
+def test_build_schedule_old_weekly_with_empty_days_backfills_all():
+    """Legacy doc: repeat=weekly, days=[] → backfill all 7 days (safe fallback)."""
+    schedule = firestore_client._build_schedule({
+        "repeat": "weekly",
+        "timeLocal": "07:00",
+        "days": [],
+    })
+    assert schedule.repeat == firestore_client.models.AlarmRepeat.DAILY
+    assert schedule.days == list(firestore_client.models.DAY_NAMES)
+
+
+def test_build_schedule_one_time_with_empty_days_and_none_repeat():
+    """One-time doc: repeat=none, days absent → NONE repeat, empty days."""
+    schedule = firestore_client._build_schedule({
+        "repeat": "none",
+        "timeLocal": "09:00",
+        "dateLocal": "2026-04-08",
+    })
+    assert schedule.repeat == firestore_client.models.AlarmRepeat.NONE
+    assert schedule.days == []
+
+
+def test_build_schedule_invalid_repeat_with_no_days_raises():
+    """No valid days and unrecognized repeat → ValueError."""
+    import pytest
+    with pytest.raises(ValueError):
+        firestore_client._build_schedule({
+            "repeat": "every_5_days",
+            "timeLocal": "07:00",
+        })
+
+
+# ---------------------------------------------------------------------------
+# create_scheduled_conversation — recurrence written correctly
+# ---------------------------------------------------------------------------
+
+def test_create_scheduled_conversation_daily_recurrence_writes_days():
+    now = datetime(2026, 4, 8, 20, 0, tzinfo=timezone.utc)
+    fake_client = _FakeWriteClient()
+
+    firestore_client.create_scheduled_conversation(
+        uid="15551234567",
+        device_id="aa:bb:cc:dd:ee:ff",
+        resolved_dt=now,
+        label="gym",
+        context="gym",
+        tz_str="UTC",
+        recurrence="daily",
+        client=fake_client,
+    )
+
+    doc = fake_client.written
+    assert "days" in doc["schedule"]
+    assert doc["schedule"]["days"] == list(firestore_client.models.DAY_NAMES)
+    assert "dateLocal" not in doc["schedule"]
+    assert "repeat" not in doc["schedule"]
+
+
+def test_create_scheduled_conversation_weekly_recurrence_writes_specific_days():
+    now = datetime(2026, 4, 8, 20, 0, tzinfo=timezone.utc)
+    fake_client = _FakeWriteClient()
+
+    firestore_client.create_scheduled_conversation(
+        uid="15551234567",
+        device_id="aa:bb:cc:dd:ee:ff",
+        resolved_dt=now,
+        label="gym",
+        context="gym",
+        tz_str="UTC",
+        recurrence="weekly:Mon,Wed,Fri",
+        client=fake_client,
+    )
+
+    doc = fake_client.written
+    assert doc["schedule"]["days"] == ["Mon", "Wed", "Fri"]
+    assert "dateLocal" not in doc["schedule"]
+
+
+def test_create_scheduled_conversation_no_recurrence_writes_date_local():
+    now = datetime(2026, 4, 8, 20, 0, tzinfo=timezone.utc)
+    fake_client = _FakeWriteClient()
+
+    firestore_client.create_scheduled_conversation(
+        uid="15551234567",
+        device_id="aa:bb:cc:dd:ee:ff",
+        resolved_dt=now,
+        label="one-time check-in",
+        context="once",
+        tz_str="UTC",
+        recurrence=None,
+        client=fake_client,
+    )
+
+    doc = fake_client.written
+    assert "dateLocal" in doc["schedule"]
+    assert "days" not in doc["schedule"]
+    assert "repeat" not in doc["schedule"]
+
+
+# ---------------------------------------------------------------------------
+# modify_scheduled_conversation — recurrence change
+# ---------------------------------------------------------------------------
+
+def test_modify_scheduled_conversation_recurrence_change_writes_days():
+    fake_client = _FakeWriteClient()
+
+    firestore_client.modify_scheduled_conversation(
+        uid="user-1",
+        alarm_id="alarm-42",
+        recurrence="weekly:Mon,Thu",
+        client=fake_client,
+    )
+
+    doc = fake_client.updated
+    assert doc["schedule.days"] == ["Mon", "Thu"]
+    assert "schedule.repeat" not in doc
+
+
+def test_modify_scheduled_conversation_recurrence_to_none_clears_days():
+    fake_client = _FakeWriteClient()
+
+    firestore_client.modify_scheduled_conversation(
+        uid="user-1",
+        alarm_id="alarm-42",
+        recurrence="once",
+        client=fake_client,
+    )
+
+    doc = fake_client.updated
+    assert doc["schedule.days"] == []
+
+
 def test_modify_scheduled_conversation_updates_time_fields():
     """When resolved_dt is provided, schedule dot-notation keys and nextOccurrenceUTC are written."""
     from datetime import timezone as tz_module
@@ -472,7 +674,8 @@ def test_modify_scheduled_conversation_updates_time_fields():
     assert doc is not None
     assert "nextOccurrenceUTC" in doc
     assert doc["schedule.timeLocal"] == "09:00"
-    assert doc["schedule.days"] == ["2026-04-01"]
+    assert doc["schedule.dateLocal"] == "2026-04-01"
+    assert "schedule.days" not in doc  # recurrence not changed
     # non-time fields not present (only updatedAt + time keys)
     assert "content" not in doc
     assert "priority" not in doc

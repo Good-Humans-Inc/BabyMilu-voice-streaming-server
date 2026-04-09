@@ -120,6 +120,37 @@ def test_schedule_conversation_skips_firestore_when_uid_missing(monkeypatch):
     assert create_called is False
 
 
+def test_schedule_conversation_recurrence_forwarded_to_firestore(monkeypatch):
+    """recurrence kwarg must be passed through to create_scheduled_conversation."""
+    conn = SimpleNamespace(device_id="AA:BB:CC:DD:EE:FF")
+    _patch_common(monkeypatch)
+
+    recorded = {}
+
+    def fake_create(**kwargs):
+        recorded.update(kwargs)
+        return "reminder-rec"
+
+    monkeypatch.setattr(sc_module, "create_scheduled_conversation", fake_create)
+
+    sc_module.schedule_conversation(conn, **{**_FULL_KWARGS, "recurrence": "daily"})
+
+    assert recorded["recurrence"] == "daily"
+
+
+def test_schedule_conversation_result_includes_reminder_id(monkeypatch):
+    """reminder_id must appear in result so LLM can use it for immediate cancel."""
+    conn = SimpleNamespace(device_id="AA:BB:CC:DD:EE:FF")
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        sc_module, "create_scheduled_conversation", lambda **kwargs: "reminder-xyz-123"
+    )
+
+    result = sc_module.schedule_conversation(conn, **_FULL_KWARGS)
+
+    assert "reminder-xyz-123" in result.result
+
+
 def test_schedule_conversation_optional_params_default_to_none(monkeypatch):
     """recurrence and delivery_preference are optional — omitting them should not error."""
     conn = SimpleNamespace(device_id="AA:BB:CC:DD:EE:FF")

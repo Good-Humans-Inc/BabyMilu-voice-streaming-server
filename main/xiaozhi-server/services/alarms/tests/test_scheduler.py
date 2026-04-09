@@ -285,6 +285,38 @@ def test_compute_next_occurrence_uses_timezone_and_local_time():
     assert next_dt == datetime(2024, 1, 2, 15, 30, tzinfo=timezone.utc)
 
 
+def test_compute_next_occurrence_daily_all_days_advances_one_day():
+    """Daily alarm (all 7 days) — next occurrence is exactly 24 hours later."""
+    reference = datetime(2024, 1, 1, 7, tzinfo=timezone.utc)  # Monday 07:00 UTC
+    alarm = _make_alarm(
+        "DEV1",
+        "mode",
+        days=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+        next_occurrence=reference,
+        time_local="07:00",
+    )
+
+    next_dt = scheduler.compute_next_occurrence(alarm, now=reference)
+
+    assert next_dt == reference + timedelta(days=1)
+
+
+def test_compute_next_occurrence_daily_empty_days_defaults_to_all():
+    """Empty days list is treated as all 7 days — advances one day."""
+    reference = datetime(2024, 1, 1, 7, tzinfo=timezone.utc)  # Monday 07:00 UTC
+    alarm = _make_alarm(
+        "DEV1",
+        "mode",
+        days=[],
+        next_occurrence=reference,
+        time_local="07:00",
+    )
+
+    next_dt = scheduler.compute_next_occurrence(alarm, now=reference)
+
+    assert next_dt == reference + timedelta(days=1)
+
+
 def test_compute_next_occurrence_requires_timezone():
     reference = datetime(2024, 1, 1, 7, tzinfo=timezone.utc)
     alarm = _make_alarm(

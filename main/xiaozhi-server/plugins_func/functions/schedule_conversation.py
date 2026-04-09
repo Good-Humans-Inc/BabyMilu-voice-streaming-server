@@ -75,8 +75,20 @@ SCHEDULE_CONVERSATION_FUNCTION_DESC = {
                 "recurrence": {
                     "type": "string",
                     "description": (
-                        "Omit or pass 'once' for a one-time reminder. "
-                        "'daily' for every day. 'weekly:Mon,Wed,Fri' for specific days."
+                        "Controls which days this reminder repeats on. "
+                        "— Omit entirely if the user wants a one-time reminder. "
+                        "  One-time includes: 'remind me once', 'just this time', "
+                        "  'on [specific date]', no mention of repeating. "
+                        "— Pass 'daily' if the user says 'every day', 'daily', "
+                        "  'each morning', 'every night', 'every evening', or any "
+                        "  phrase meaning the reminder should repeat every day. "
+                        "— Pass 'weekly:Mon,Wed,Fri' (comma-separated 3-letter "
+                        "  abbreviations) if the user names specific weekdays. "
+                        "  Use: Mon Tue Wed Thu Fri Sat Sun. "
+                        "  Examples: 'every Monday' → 'weekly:Mon', "
+                        "  'weekdays' → 'weekly:Mon,Tue,Wed,Thu,Fri', "
+                        "  'weekends' → 'weekly:Sat,Sun'. "
+                        "Never pass 'weekly' without specifying the days after the colon."
                     ),
                 },
                 "conversation_outline": {

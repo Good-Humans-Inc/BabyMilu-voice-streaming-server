@@ -98,6 +98,7 @@ def _fake_create_scheduled_conversation(**kwargs) -> str:
         "label": kwargs.get("label"),
         "content": kwargs.get("content") or kwargs.get("label"),
         "context": kwargs.get("context"),
+        "recurrence": kwargs.get("recurrence"),
         "type_hint": kwargs.get("type_hint"),
         "priority": kwargs.get("priority"),
         "conversation_outline": kwargs.get("conversation_outline"),
@@ -115,18 +116,20 @@ def _fake_create_scheduled_conversation(**kwargs) -> str:
 def _fake_fetch_active_alarms(uid: str) -> list:
     """Return SimpleNamespace objects that match the AlarmDoc interface used by list_reminders."""
     from zoneinfo import ZoneInfo
+    from services.alarms.firestore_client import _build_recurrence_fields
     results = []
     for alarm_id, doc in _reminders.items():
         if doc.get("status") != "on":
             continue
         resolved_dt = doc.get("resolved_dt")
-        time_local = (
-            resolved_dt.astimezone(ZoneInfo(doc.get("tz_str") or "UTC")).strftime("%H:%M")
-            if resolved_dt else "??"
-        )
+        tz_str = doc.get("tz_str") or "UTC"
+        resolved_local = resolved_dt.astimezone(ZoneInfo(tz_str)) if resolved_dt else None
+        time_local = resolved_local.strftime("%H:%M") if resolved_local else "??"
+        days = _build_recurrence_fields(doc.get("recurrence"), resolved_local)
+        repeat_val = "daily" if days else "once"
         schedule = SimpleNamespace(
             time_local=time_local,
-            repeat=SimpleNamespace(value="once"),
+            repeat=SimpleNamespace(value=repeat_val),
         )
         results.append(SimpleNamespace(
             alarm_id=alarm_id,
@@ -235,15 +238,17 @@ def _print_schedule_box(doc: dict) -> None:
         if resolved_dt else "unknown"
     )
     from zoneinfo import ZoneInfo
+    from services.alarms.firestore_client import _build_recurrence_fields
     tz_str = doc.get("tz_str") or "UTC"
-    time_local = (
-        resolved_dt.astimezone(ZoneInfo(tz_str)).strftime("%H:%M")
-        if resolved_dt else None
-    )
-    date_local = (
-        resolved_dt.astimezone(ZoneInfo(tz_str)).strftime("%Y-%m-%d")
-        if resolved_dt else None
-    )
+    resolved_local = resolved_dt.astimezone(ZoneInfo(tz_str)) if resolved_dt else None
+    time_local = resolved_local.strftime("%H:%M") if resolved_local else None
+    date_local = resolved_local.strftime("%Y-%m-%d") if resolved_local else None
+
+    days = _build_recurrence_fields(doc.get("recurrence"), resolved_local)
+    if days:
+        schedule_block = {"timeLocal": time_local, "days": days}
+    else:
+        schedule_block = {"timeLocal": time_local, "dateLocal": date_local}
 
     print(f"  alarm_id  : {doc['alarm_id']}")
     print(f"  fires at  : {fired_str}  ({tz_str})")
@@ -254,11 +259,7 @@ def _print_schedule_box(doc: dict) -> None:
         "targets":          [{"deviceId": doc.get("device_id"), "mode": "scheduled_conversation"}],
         "status":           "on",
         "label":            doc.get("label"),
-        "schedule": {
-            "repeat":    "once",
-            "timeLocal": time_local,
-            "dateLocal": date_local,
-        },
+        "schedule":         schedule_block,
         "content":              doc.get("content") or doc.get("label"),
         "typeHint":             doc.get("type_hint"),
         "priority":             doc.get("priority"),

@@ -238,24 +238,29 @@ def _normalize_device_id(value) -> str:
 def _build_recurrence_fields(
     recurrence: Optional[str],
     resolved_local: Optional[datetime] = None,
-) -> tuple[str, list]:
-    """Parse a recurrence string into (repeat, days) for writing to Firestore.
+) -> list:
+    """Parse a recurrence string into a days list for writing to Firestore.
+
+    Returns:
+        []                           — one-time (no recurrence)
+        all 7 day names              — daily recurrence
+        specific subset of day names — weekly on named days
 
     Formats accepted:
-      None / "once" / "none"   → ("none", [])
-      "daily"                  → ("daily", all 7 day names)
-      "weekly"                 → ("weekly", [weekday of resolved_local, or [] if unknown])
-      "weekly:Mon,Wed,Fri"     → ("weekly", ["Mon","Wed","Fri"])
+      None / "once" / "none"   → []
+      "daily"                  → ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+      "weekly"                 → [weekday of resolved_local, or [] if unknown]
+      "weekly:Mon,Wed,Fri"     → ["Mon","Wed","Fri"]
     """
     if not recurrence or recurrence.strip().lower() in (
         "once", "none", "one_time", "one-time", "no_repeat"
     ):
-        return "none", []
+        return []
 
     key = recurrence.strip().lower()
 
     if key == "daily":
-        return "daily", list(models.DAY_NAMES)
+        return list(models.DAY_NAMES)
 
     if key.startswith("weekly"):
         parts = recurrence.split(":", 1)
@@ -266,12 +271,12 @@ def _build_recurrence_fields(
                 days = [resolved_local.strftime("%a")]
         else:
             days = [resolved_local.strftime("%a")] if resolved_local else []
-        return "weekly", days
+        return days
 
     logger.bind(tag=TAG).warning(
         f"Unrecognized recurrence value: {recurrence!r}; treating as once"
     )
-    return "none", []
+    return []
 
 
 def _parse_repeat(raw_repeat) -> models.AlarmRepeat:
@@ -282,11 +287,24 @@ def _parse_repeat(raw_repeat) -> models.AlarmRepeat:
 
 
 def _build_schedule(schedule_payload: Dict[str, Any]) -> models.AlarmSchedule:
-    repeat_raw = schedule_payload["repeat"]
-    repeat = _parse_repeat(repeat_raw)
-    days = schedule_payload.get("days") or []
-    if str(repeat_raw).strip().lower() == "daily" and not days:
-        days = list(models.DAY_NAMES)
+    # New schema: infer repeat from days (non-empty = recurring, empty = one-time).
+    # Backward compat: if days is absent/empty, fall back to explicit repeat field.
+    days = [d for d in (schedule_payload.get("days") or []) if d in models.DAY_NAMES]
+
+    if days:
+        repeat = models.AlarmRepeat.DAILY
+    else:
+        repeat_raw = schedule_payload.get("repeat", "none")
+        key = str(repeat_raw).strip().lower()
+        if key in ("daily", "weekly"):
+            # Old doc with repeat but empty days — backfill all days
+            repeat = models.AlarmRepeat.DAILY
+            days = list(models.DAY_NAMES)
+        elif key in _REPEAT_ALIASES:
+            repeat = _REPEAT_ALIASES[key]
+        else:
+            raise ValueError(f"Unsupported repeat value: {repeat_raw!r}")
+
     return models.AlarmSchedule(
         repeat=repeat,
         time_local=schedule_payload["timeLocal"],
@@ -407,7 +425,6 @@ def create_alarm(
         "label": label,
         "context": context,
         "schedule": {
-            "repeat": "once",
             "timeLocal": time_local,
             "dateLocal": date_local,
         },
@@ -461,14 +478,14 @@ def create_scheduled_conversation(
     resolved_local = resolved_dt.astimezone(ZoneInfo(tz_str))
     time_local = resolved_local.strftime("%H:%M")
     date_local = resolved_local.strftime("%Y-%m-%d")
-    repeat, days = _build_recurrence_fields(recurrence, resolved_local)
+    days = _build_recurrence_fields(recurrence, resolved_local)
 
     now_utc = datetime.now(timezone.utc)
-    schedule: dict = {"repeat": repeat, "timeLocal": time_local}
-    if repeat == "none":
-        schedule["dateLocal"] = date_local
-    else:
+    schedule: dict = {"timeLocal": time_local}
+    if days:
         schedule["days"] = days
+    else:
+        schedule["dateLocal"] = date_local
 
     doc = {
         "label": label,
@@ -589,9 +606,10 @@ def modify_scheduled_conversation(
             if resolved_dt is not None and tz_str is not None
             else None
         )
-        repeat, days = _build_recurrence_fields(recurrence, resolved_local_for_days)
-        updates["schedule.repeat"] = repeat
+        days = _build_recurrence_fields(recurrence, resolved_local_for_days)
         updates["schedule.days"] = days
+        if not days and resolved_local_for_days:
+            updates["schedule.dateLocal"] = resolved_local_for_days.strftime("%Y-%m-%d")
     if delivery_preference is not None:
         updates["deliveryPreference"] = delivery_preference
     if conversation_outline is not None:
