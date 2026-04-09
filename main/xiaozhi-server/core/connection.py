@@ -2198,7 +2198,15 @@ Return ONLY the JSON array, no other explanation."""
                         future = asyncio.run_coroutine_threadsafe(
                             self.memory.query_memory(query), self.loop
                         )
-                        memory_str = future.result(timeout=5.0)
+                        queried = future.result(timeout=5.0)
+                        # Always prepend the authoritative system memory block so
+                        # structured user facts (location, identity, etc.) are
+                        # available on every turn, not just the first.
+                        sys_mem = getattr(self, "system_memory_block", "") or ""
+                        char_mem_str = getattr(self, "character_memory_prompt", "") or ""
+                        prefix_parts = [p for p in [sys_mem, char_mem_str] if p]
+                        prefix = "\n\n".join(prefix_parts)
+                        memory_str = (prefix + "\n\n" + queried).strip() if prefix else queried
                 except Exception as e:
                     self.logger.bind(tag=TAG).warning(f"记忆查询失败或超时: {e}")
 
