@@ -54,7 +54,7 @@ def _make_alarm(
     schedule = models.AlarmSchedule(
         repeat=repeat,
         time_local=time_local,
-        days=days or ["Mon"],
+        days=days if days is not None else ["Mon"],
     )
     target = models.AlarmTarget(device_id=device_id, mode=mode)
     raw_payload = {}
