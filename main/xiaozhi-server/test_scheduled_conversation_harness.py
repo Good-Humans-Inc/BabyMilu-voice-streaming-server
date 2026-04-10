@@ -376,6 +376,18 @@ def assemble_instructions(session_config: dict) -> str:
         parts.append(f"[CONVERSATION OUTLINE]\n{conversation_outline}")
     if completion_signal:
         parts.append(f"[COMPLETION SIGNAL]\n{completion_signal}")
+    parts.append(
+        "[SNOOZE INSTRUCTION]\n"
+        "If the user wants to delay this reminder (matches 'Snoozed' in the completion "
+        "signal above), call schedule_conversation with:\n"
+        "- time_expression: the new time they specified (e.g. 'in 10 minutes', 'at 9pm')\n"
+        "- all other fields (content, type_hint, priority, conversation_outline, "
+        "character_reminder, completion_signal, delivery_preference) reused exactly "
+        "from the context above\n"
+        "- emotional_context: reuse from above but append a note, e.g. "
+        "\"Note: user snoozed by 10 minutes.\"\n"
+        "- recurrence: omit (snooze is always one-time)"
+    )
     return "\n\n".join(parts)
 
 
@@ -705,6 +717,16 @@ def _pick_reminder_for_delivery(active: list[dict]) -> dict:
 # Phase 2 — Delivery simulation
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _dispatch_tool_call(tool_call: dict, fake_conn: SimpleNamespace) -> str:
+    """Execute a tool call and return the result string."""
+    tool_name = tool_call["name"]
+    tool_fn = TOOL_DISPATCH.get(tool_name)
+    if tool_fn is None:
+        return f"ERROR: unknown tool {tool_name!r}"
+    result = tool_fn(fake_conn, **tool_call["arguments"])
+    return result.result or result.response or "ERROR: tool returned no content"
+
+
 def run_phase2(client: openai.OpenAI, model: str, doc: dict) -> None:
     session_config = build_session_config(doc)
     instructions   = assemble_instructions(session_config)
@@ -713,8 +735,14 @@ def run_phase2(client: openai.OpenAI, model: str, doc: dict) -> None:
 
     messages: list[dict] = []
     delivery_system = PHASE1_SYSTEM + "\n\n" + instructions
+    fake_conn = SimpleNamespace(device_id=FAKE_DEVICE_ID)
 
-    opener, _ = llm_turn(client, model, messages, system=delivery_system)
+    # LLM opens the conversation (tools available so it can snooze immediately if somehow needed)
+    opener, tool_call = llm_turn(client, model, messages, system=delivery_system, tools=ALL_TOOLS)
+    if tool_call:
+        _handle_tool_turn(client, model, messages, delivery_system, fake_conn, tool_call)
+        # Get character's spoken opener after the tool completes
+        opener, _ = llm_turn(client, model, messages, system=delivery_system, tools=ALL_TOOLS)
     print(f"Character: {opener}\n")
     messages.append({"role": "assistant", "content": opener})
 
@@ -729,9 +757,51 @@ def run_phase2(client: openai.OpenAI, model: str, doc: dict) -> None:
             continue
 
         messages.append({"role": "user", "content": user_input})
-        reply, _ = llm_turn(client, model, messages, system=delivery_system)
-        print(f"\nCharacter: {reply}\n")
-        messages.append({"role": "assistant", "content": reply})
+
+        while True:
+            reply, tool_call = llm_turn(client, model, messages, system=delivery_system, tools=ALL_TOOLS)
+
+            if tool_call:
+                _handle_tool_turn(client, model, messages, delivery_system, fake_conn, tool_call)
+                # Loop: let LLM respond to the tool result before we print or prompt again
+            else:
+                print(f"\nCharacter: {reply}\n")
+                messages.append({"role": "assistant", "content": reply})
+                break
+
+
+def _handle_tool_turn(
+    client: openai.OpenAI,
+    model: str,
+    messages: list[dict],
+    delivery_system: str,
+    fake_conn: SimpleNamespace,
+    tool_call: dict,
+) -> None:
+    """Append tool-call + tool-result messages; print a status line."""
+    tool_name = tool_call["name"]
+    print(f"\n  [TOOL CALL → {tool_name}({json.dumps(tool_call['arguments'], ensure_ascii=False)})]")
+
+    messages.append({
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": tool_call["id"],
+            "type": "function",
+            "function": {
+                "name": tool_name,
+                "arguments": json.dumps(tool_call["arguments"]),
+            },
+        }],
+    })
+
+    tool_content = _dispatch_tool_call(tool_call, fake_conn)
+
+    messages.append({
+        "role": "tool",
+        "tool_call_id": tool_call["id"],
+        "content": tool_content,
+    })
 
 
 # ─────────────────────────────────────────────────────────────────────────────

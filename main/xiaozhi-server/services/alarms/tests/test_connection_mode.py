@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from core.connection import ConnectionHandler, ModeRuntimeState, FollowupState
 from services.session_context import models as session_models
 
@@ -178,6 +180,86 @@ def test_apply_mode_session_settings_scheduled_conversation_omits_missing_fields
     assert "[COMPLETION SIGNAL]" in instr
 
 
+# ---------------------------------------------------------------------------
+# V1.1 — followup_max driven by priority
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("priority,expected_max", [
+    ("critical", 3),
+    ("high",     2),
+    ("medium",   1),
+    ("low",      0),
+])
+def test_scheduled_conversation_followup_max_driven_by_priority(monkeypatch, priority, expected_max):
+    conn = _build_scheduled_conn(
+        {
+            "mode": "scheduled_conversation",
+            "priority": priority,
+            "typeHint": "habit",
+            "emotionalContext": "test",
+            "completionSignal": "Done: confirmed.",
+        },
+        monkeypatch,
+    )
+
+    ConnectionHandler._apply_mode_session_settings(conn)
+
+    assert conn.followup_max == expected_max
+
+
+def test_scheduled_conversation_missing_priority_defaults_to_medium(monkeypatch):
+    """No priority field → treated as 'medium' → followup_max == 1."""
+    conn = _build_scheduled_conn(
+        {
+            "mode": "scheduled_conversation",
+            # priority intentionally absent
+            "typeHint": "habit",
+        },
+        monkeypatch,
+    )
+
+    ConnectionHandler._apply_mode_session_settings(conn)
+
+    assert conn.followup_max == 1
+
+
+def test_scheduled_conversation_unknown_priority_leaves_config_default(monkeypatch):
+    """Unrecognized priority value → no override → MODE_CONFIG default of 1."""
+    conn = _build_scheduled_conn(
+        {
+            "mode": "scheduled_conversation",
+            "priority": "urgent",  # not in PRIORITY_FOLLOWUP_MAX
+            "typeHint": "habit",
+        },
+        monkeypatch,
+    )
+
+    ConnectionHandler._apply_mode_session_settings(conn)
+
+    assert conn.followup_max == 1  # MODE_CONFIG["scheduled_conversation"]["followup_max"]
+
+
+def test_morning_alarm_followup_max_unaffected_by_priority_logic(monkeypatch):
+    """morning_alarm mode must not be affected by the priority override path."""
+    conn = _build_conn(
+        {
+            "instructions": "WAKE UP",
+            "server_initiate_chat": True,
+            "followup_enabled": True,
+            "followup_max": 1,
+        },
+        monkeypatch,
+    )
+    conn.mode_session.session_config = {
+        "mode": "morning_alarm",
+        "priority": "critical",  # should be ignored for morning_alarm
+    }
+
+    ConnectionHandler._apply_mode_session_settings(conn)
+
+    assert conn.followup_max == 1
+
+
 def test_apply_mode_session_settings_morning_alarm_regression(monkeypatch):
     """Legacy morning_alarm path must be completely unaffected by the new branch."""
     conn = _build_conn(
@@ -200,4 +282,43 @@ def test_apply_mode_session_settings_morning_alarm_regression(monkeypatch):
     assert "[CONVERSATION OUTLINE]" not in instr
     assert "WAKE UP LEGACY" in instr
     assert 'The user asked to be reminded about: "take vitamins".' in instr
+
+
+def test_scheduled_conversation_instructions_include_snooze_section(monkeypatch):
+    """Delivery instructions must include [SNOOZE INSTRUCTION] with embedded schedule_conversation guidance."""
+    alarm_id = "alarm-snooze-test-99"
+    conn = _build_scheduled_conn(
+        {
+            "mode": "scheduled_conversation",
+            "alarmId": alarm_id,
+            "typeHint": "habit",
+            "priority": "medium",
+            "emotionalContext": "user is tired",
+            "completionSignal": "Done: confirmed. Snoozed: asks for later.",
+        },
+        monkeypatch,
+    )
+
+    ConnectionHandler._apply_mode_session_settings(conn)
+
+    instr = conn.mode_specific_instructions
+    assert "[SNOOZE INSTRUCTION]" in instr
+    assert "schedule_conversation" in instr
+
+
+def test_morning_alarm_instructions_do_not_include_snooze_section(monkeypatch):
+    """morning_alarm delivery must NOT inject the snooze instruction."""
+    conn = _build_conn(
+        {
+            "instructions": "WAKE UP",
+            "server_initiate_chat": True,
+            "followup_enabled": True,
+        },
+        monkeypatch,
+    )
+    conn.mode_session.session_config = {"mode": "morning_alarm"}
+
+    ConnectionHandler._apply_mode_session_settings(conn)
+
+    assert "[SNOOZE INSTRUCTION]" not in conn.mode_specific_instructions
 

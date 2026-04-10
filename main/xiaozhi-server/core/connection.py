@@ -2001,7 +2001,29 @@ Return ONLY the JSON array, no other explanation."""
                 parts.append(f"[CONVERSATION OUTLINE]\n{conversation_outline}")
             if completion_signal:
                 parts.append(f"[COMPLETION SIGNAL]\n{completion_signal}")
+
+            parts.append(
+                "[SNOOZE INSTRUCTION]\n"
+                "If the user wants to delay this reminder (matches 'Snoozed' in the completion "
+                "signal above), call schedule_conversation with:\n"
+                "- time_expression: the new time they specified (e.g. 'in 10 minutes', 'at 9pm')\n"
+                "- all other fields (content, type_hint, priority, conversation_outline, "
+                "character_reminder, completion_signal, delivery_preference) reused exactly "
+                "from the context above\n"
+                "- emotional_context: reuse from above but append a note, e.g. "
+                "\"Note: user snoozed by 10 minutes.\"\n"
+                "- recurrence: omit (snooze is always one-time)"
+            )
+
             instructions = "\n\n".join(parts)
+
+            # Override followup_max from priority so critical reminders nudge more
+            # and low-priority ones don't nudge at all.
+            from services.alarms.config import PRIORITY_FOLLOWUP_MAX
+            priority_key = (session_config.get("priority") or "medium").strip().lower()
+            priority_max = PRIORITY_FOLLOWUP_MAX.get(priority_key)
+            if priority_max is not None:
+                config["followup_max"] = priority_max
 
         else:
             # Legacy path — morning_alarm and any future file-based modes.

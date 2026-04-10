@@ -11,6 +11,13 @@ ALARM_TIMING = {
 
 # Default mode configuration for server-owned proactive sessions.
 # These values are referenced by the runtime when no per-session overrides exist.
+PRIORITY_FOLLOWUP_MAX: Dict[str, int] = {
+    "critical": 3,  # must-not-miss (e.g. medication) — persist with 3 nudges
+    "high":     2,  # important — 2 nudges
+    "medium":   1,  # default — 1 nudge (same as V0 hardcoded value)
+    "low":      0,  # nice-to-have — fire once, no nudges
+}
+
 MODE_CONFIG: Dict[str, Dict[str, Any]] = {
     "morning_alarm": {
         "instructions_file": "services/alarms/mode_instructions/morning_alarm.txt",
