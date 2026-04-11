@@ -57,11 +57,7 @@ export PYTHONUNBUFFERED=1
 export CHAT_STORE_BACKEND="supabase"   # sqlite | supabase
 
 # Supabase chat logging (required when CHAT_STORE_BACKEND=supabase)
-<<<<<<< HEAD
 export SUPABASE_URL="https://nartdhkcmwpzfecmsswf.supabase.co"
-=======
-export SUPABASE_URL="https://<project-ref>.supabase.co"
->>>>>>> origin/main
 export SUPABASE_SERVICE_ROLE_KEY="<service-role-key>"
 
 # Optional tuning
@@ -69,10 +65,6 @@ export SUPABASE_TIMEOUT_SECONDS=10
 export SUPABASE_USERS_TABLE="users"
 export SUPABASE_SESSIONS_TABLE="sessions"
 export SUPABASE_TURNS_TABLE="turns"
-<<<<<<< HEAD
-=======
-export SUPABASE_MEMORY_READ_MODEL_TABLE="memory_read_model"
->>>>>>> origin/main
 ```
 
 ---
