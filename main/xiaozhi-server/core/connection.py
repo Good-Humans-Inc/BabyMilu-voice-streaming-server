@@ -1157,6 +1157,25 @@ Return ONLY the JSON array, no other explanation."""
                                     log_msg += f"\n  - Action: {task.get('task_action')} (ID: {task.get('task_id')}): {task.get('match_reason')}"
                             
                             self.logger.bind(tag=TAG).info(log_msg)
+
+                            # Print full turn-by-turn conversation transcript
+                            transcript_lines = [
+                                f"=== SESSION TRANSCRIPT [{self.session_id}] ==="
+                            ]
+                            for i, msg in enumerate(conversation, 1):
+                                role = msg.get("role", "?").upper()
+                                content = msg.get("content", "")
+                                if isinstance(content, list):
+                                    # Handle multi-part content (e.g. vision/tool messages)
+                                    content = " ".join(
+                                        part.get("text", "") if isinstance(part, dict) else str(part)
+                                        for part in content
+                                    )
+                                transcript_lines.append(f"[{i}] {role}: {content}")
+                            transcript_lines.append(
+                                f"=== END TRANSCRIPT [{self.session_id}] ==="
+                            )
+                            self.logger.bind(tag=TAG).info("\n".join(transcript_lines))
                     except Exception as e:
                         self.logger.bind(tag=TAG).warning(f"获取对话摘要失败: {e}")
                 threading.Thread(target=complete_task_task, daemon=True).start()
