@@ -1,17 +1,19 @@
 from __future__ import annotations
 
-import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
+from google.cloud import firestore
 
 from services.logging import setup_logging
-from services.alarms import scheduler, tasks
+from services.alarms import reminder_push_job, scheduler, tasks
 from services.messaging.mqtt import publish_ws_start
 from services.alarms.config import ALARM_TIMING
+from core.utils.mac import normalize_mac
 
 TAG = __name__
 logger = setup_logging()
+_db = firestore.Client()
 
 
 def scan_due_alarms(request) -> Dict[str, Any]:
@@ -23,9 +25,43 @@ def scan_due_alarms(request) -> Dict[str, Any]:
     triggered = 0
     results: List[Dict[str, Any]] = []
     for wake_request in wake_requests:
+        if not _is_device_allowed(wake_request.target.device_id):
+            logger.bind(tag=TAG).info(
+                f"Skipping wake for filtered device {wake_request.target.device_id}"
+            )
+            try:
+                scheduler.rollback_wake_request(wake_request)
+            except Exception as exc:
+                logger.bind(tag=TAG).warning(
+                    f"Failed to rollback filtered wake request for {wake_request.target.device_id}: {exc}"
+                )
+            results.append(
+                {
+                    "alarmId": wake_request.alarm.alarm_id,
+                    "label": wake_request.alarm.label,
+                    "deviceId": wake_request.target.device_id,
+                    "mode": wake_request.target.mode,
+                    "fired": False,
+                    "skipped": "device_filter",
+                }
+            )
+            continue
         fired = _wake_device(wake_request)
         if fired:
             triggered += 1
+            try:
+                scheduler.finalize_wake_request(wake_request, now=now)
+            except Exception as exc:
+                logger.bind(tag=TAG).warning(
+                    f"Failed to finalize alarm {wake_request.alarm.alarm_id}: {exc}"
+                )
+        else:
+            try:
+                scheduler.rollback_wake_request(wake_request)
+            except Exception as exc:
+                logger.bind(tag=TAG).warning(
+                    f"Failed to rollback wake request for {wake_request.target.device_id}: {exc}"
+                )
         results.append(
             {
                 "alarmId": wake_request.alarm.alarm_id,
@@ -72,3 +108,82 @@ def _resolve_ws_url() -> str:
 def _resolve_broker_url() -> str:
     return os.environ.get("ALARM_MQTT_URL") or os.environ.get("MQTT_URL", "")
 
+
+def _is_device_allowed(device_id: str) -> bool:
+    allowed = _parse_device_set(os.environ.get("ALARM_DEVICE_ALLOWLIST", ""))
+    denied = _parse_device_set(os.environ.get("ALARM_DEVICE_DENYLIST", ""))
+    try:
+        normalized = normalize_mac(device_id)
+    except Exception:
+        normalized = (device_id or "").lower()
+    if normalized in denied:
+        return False
+    if not allowed:
+        return True
+    return normalized in allowed
+
+
+def _parse_device_set(raw: str) -> set[str]:
+    tokens = set()
+    for token in (raw or "").split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            tokens.add(normalize_mac(token))
+        except Exception:
+            tokens.add(token.lower())
+    return tokens
+
+
+def scan_due_scheduled_items(request) -> Dict[str, Any]:
+    """
+    Unified Cloud Scheduler entrypoint for alarms + reminders.
+
+    Reminders use the same flow as babymilu-backend sendReminderPush (query due
+    by nextOccurrenceUTC <= now, Expo or FCM, sentLogs, then advance / turn off).
+
+    Phase-1 default: REMINDER_EXECUTE=false dry-runs without sends or writes.
+    """
+    now = datetime.now(timezone.utc)
+
+    alarms_result = scan_due_alarms(request)
+
+    include_reminders = _env_bool("INCLUDE_REMINDERS_IN_UNIFIED_SCAN", True)
+    if include_reminders:
+        reminders_execute = _env_bool("REMINDER_EXECUTE", False)
+        reminders_result = reminder_push_job.run_send_reminder_push_job(
+            execute=reminders_execute,
+            now=now,
+        )
+    else:
+        reminders_result = {
+            "ok": True,
+            "count": 0,
+            "triggered": 0,
+            "skipped": 0,
+            "execute": False,
+            "results": [],
+            "errors": [],
+            "disabled": True,
+        }
+
+    return {
+        "ok": bool(alarms_result.get("ok")) and bool(reminders_result.get("ok")),
+        "timestamp": now.isoformat(),
+        "alarms": alarms_result,
+        "reminders": reminders_result,
+        "totals": {
+            "count": int(alarms_result.get("count", 0))
+            + int(reminders_result.get("count", 0)),
+            "triggered": int(alarms_result.get("triggered", 0))
+            + int(reminders_result.get("triggered", 0)),
+        },
+    }
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}

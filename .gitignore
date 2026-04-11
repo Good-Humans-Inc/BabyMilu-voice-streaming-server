@@ -1,5 +1,4 @@
-PAT.txt
-
+.notes
 # Byte-compiled / optimized / DLL files
 __pycache__/
 .idea/
@@ -200,3 +199,9 @@ _build_alarms/
 *.db
 *.db-wal
 *.db-shm
+
+# Local Docker Compose overrides for environment-specific paths
+/docker-compose.override.yml
+/docker-compose.local.yml
+/compose.override.yml
+/compose.local.yml

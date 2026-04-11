@@ -43,3 +43,7 @@ class LLMProviderBase(ABC):
         This should be overridden by providers that support structured output
         """
         pass
+
+    def release_conversation(self, session_id: str):
+        """Optional cleanup hook for provider-side per-session conversation maps."""
+        return

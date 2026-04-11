@@ -8,14 +8,14 @@ minimal changes.
 
 from . import models  # noqa: F401
 from . import firestore_client  # noqa: F401
+from . import reminder_scheduler  # noqa: F401
 from . import scheduler  # noqa: F401
 from . import tool_handlers  # noqa: F401
 
 __all__ = [
     "models",
     "firestore_client",
+    "reminder_scheduler",
     "scheduler",
     "tool_handlers",
 ]
-
-

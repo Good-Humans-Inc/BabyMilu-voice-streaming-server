@@ -107,6 +107,10 @@ wakeup_words:
 # MCP接入点地址，地址格式为：ws://你的mcp接入点ip或者域名:端口号/mcp/?token=你的token
 # 详细教程 https://github.com/xinnan-tech/xiaozhi-esp32-server/blob/main/docs/mcp-endpoint-integration.md
 mcp_endpoint: 你的接入点 websocket地址
+# 彩蛋配置
+easter_eggs:
+  # English bedtime intent phrases trigger this cue; WAV chosen for the current BabyMilu setup
+  bedtime_sound_path: "config/assets/goodnight.wav"
 # 插件的基础配置
 plugins:
   # 获取天气插件的配置，这里填写你的api_key
@@ -230,6 +234,8 @@ Intent:
       - change_role
       - get_weather
       - play_music
+      - set_alarm
+      - set_reminder
       - get_capabilities
       - self_introduction
       - lookup_recipe
@@ -431,7 +437,7 @@ VAD:
     threshold: 0.5
     threshold_low: 0.3
     model_dir: models/snakers4_silero-vad
-    min_silence_duration_ms: 200  # 如果说话停顿比较长，可以把这个值设置大一些
+    min_silence_duration_ms: 400  # 如果说话停顿比较长，可以把这个值设置大一些
 
 LLM:
   # 所有openai类型均可以修改超参，以AliLLM为例

@@ -4,6 +4,7 @@ This project can now write conversation logs to Supabase using `CHAT_STORE_BACKE
 
 ## 1) Create Tables in Supabase SQL Editor
 
+<<<<<<< HEAD
 Run this SQL in your Supabase project:
 
 ```sql
@@ -71,6 +72,12 @@ create index if not exists idx_sessions_user_created_at on public.sessions(user_
 create index if not exists idx_turns_session_created_at on public.turns(session_id, created_at);
 create index if not exists idx_user_memory_events_user_created_at on public.user_memory_events(user_id, created_at desc);
 create index if not exists idx_memory_jobs_status_created_at on public.memory_jobs(status, created_at);
+=======
+Run the schema bootstrap SQL from [scripts/bootstrap_memory_schema.sql](/Users/yan/Desktop/BabyMilu/BabyMilu-voice-streaming-server/scripts/bootstrap_memory_schema.sql), or run the backfill script with `--bootstrap-only`.
+
+```sql
+-- See scripts/bootstrap_memory_schema.sql for the complete authoritative schema.
+>>>>>>> origin/main
 ```
 
 ## 2) Set Server Environment Variables
@@ -87,6 +94,10 @@ SUPABASE_TIMEOUT_SECONDS=10
 SUPABASE_USERS_TABLE=users
 SUPABASE_SESSIONS_TABLE=sessions
 SUPABASE_TURNS_TABLE=turns
+<<<<<<< HEAD
+=======
+SUPABASE_MEMORY_READ_MODEL_TABLE=memory_read_model
+>>>>>>> origin/main
 ```
 
 ## 3) Restart the Python Server
@@ -100,8 +111,13 @@ Look for startup/store logs and then check rows in:
 - `public.users`
 - `public.sessions`
 - `public.turns`
+<<<<<<< HEAD
 - `public.user_memory_events`
 - `public.user_memory_model`
+=======
+- `public.memory_events`
+- `public.memory_read_model`
+>>>>>>> origin/main
 - `public.memory_jobs`
 
 A new device conversation should create one session row and multiple turn rows.
@@ -109,7 +125,41 @@ A new device conversation should create one session row and multiple turn rows.
 Current runtime write path is:
 
 - writes: `users`, `sessions`, `turns`
+<<<<<<< HEAD
 - not yet written by runtime: `user_memory_events`, `user_memory_model`, `memory_jobs`
+=======
+- bootstraps on first user/session: `memory_read_model`
+- not yet written by runtime: `memory_events`, `memory_jobs`
+
+The current schema used by the ported chat store expects:
+
+- `sessions.memory_status`
+- `sessions.turns` as a JSON array
+- `memory_read_model.profile`
+- `memory_read_model.active_context`
+- `memory_read_model.modality_digests`
+- `memory_read_model.prompt_pack`
+- `memory_read_model.stats`
+
+If you already created the older schema, rerun the bootstrap SQL. It uses `add column if not exists` so it will repair the missing columns.
+
+## 5) Optional Bootstrap / Backfill Commands
+
+Bootstrap the schema only:
+
+```bash
+DATABASE_URL=postgresql://... \
+python3 scripts/backfill_memory_from_sqlite.py --bootstrap-only
+```
+
+Bootstrap and backfill from the legacy local SQLite DB:
+
+```bash
+DATABASE_URL=postgresql://... \
+python3 scripts/backfill_memory_from_sqlite.py \
+  --sqlite-path /opt/xiaozhi-esp32-server/data/conversations.db
+```
+>>>>>>> origin/main
 
 ## Notes
 

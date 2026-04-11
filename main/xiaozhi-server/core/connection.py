@@ -71,12 +71,14 @@ class ModeRuntimeState:
     """In-memory state for a mode session (e.g. morning_alarm)."""
     active_mode: Optional[str] = None
     instructions: str = ""
+    persistent_instructions: str = ""
     server_initiate_chat: bool = False
     greeting_scheduled: bool = False
 
     def reset(self) -> None:
         self.active_mode = None
         self.instructions = ""
+        self.persistent_instructions = ""
         self.server_initiate_chat = False
         self.greeting_scheduled = False
 
@@ -158,6 +160,8 @@ class ConnectionHandler:
         self.followup_exit_after = 120  # seconds since last speech before exit
         self.last_tts_stop_ms = 0
         self.last_stt_activity_ms = 0
+        self.tts_stop_watchdog_task = None
+        self.tts_stop_watchdog_seq = 0
 
         # 线程/任务
         self.loop = asyncio.get_event_loop()
@@ -171,15 +175,29 @@ class ConnectionHandler:
         self.report_tts_enable = self.read_config_from_api
 
         # 组件
+        # VAD and ASR are stateless processors — safe to share across connections.
+        # LLM is keyed by unique session_id — sharing is a P1 memory-leak but not
+        # a correctness issue.
+        # Memory, Task, and Intent carry per-device mutable state (role_id,
+        # short_memory, cached prompts).  Storing the server-level references here
+        # ONLY as fallback templates; _ensure_per_connection_providers() replaces
+        # them with fresh per-connection instances before any device-specific
+        # mutation happens.
         self.vad = None
         self.asr = None
         self.tts = None
         self._asr = _asr
         self._vad = _vad
         self.llm = _llm
-        self.memory = _memory
-        self.task = _task
-        self.intent = _intent
+        # IMPORTANT: Set to None so no code can accidentally mutate the shared
+        # server-level provider before _ensure_per_connection_providers() runs.
+        # The shared references are kept as _server_* for config introspection only.
+        self._server_memory = _memory
+        self._server_task = _task
+        self._server_intent = _intent
+        self.memory = None
+        self.task = None
+        self.intent = None
 
         # 声纹识别
         self.voiceprint_provider = None
@@ -202,6 +220,11 @@ class ConnectionHandler:
         self.device_conversation_ttl = self._derive_conversation_ttl()
         self.current_conversation_id: Optional[str] = None
         self.use_mode_conversation = False
+        self.current_character_id: Optional[str] = None
+        self._profile_refresh_lock = threading.RLock()
+        self._last_profile_refresh_ms = 0
+        self._profile_refresh_interval_ms = 3000
+        self._llm_conversation_released = False
 
         # 组件初始化事件
         self.components_initialized = asyncio.Event()
@@ -256,6 +279,14 @@ class ConnectionHandler:
     @mode_specific_instructions.setter
     def mode_specific_instructions(self, value: str) -> None:
         self._mode_state.instructions = value or ""
+
+    @property
+    def persistent_mode_specific_instructions(self) -> str:
+        return self._mode_state.persistent_instructions
+
+    @persistent_mode_specific_instructions.setter
+    def persistent_mode_specific_instructions(self, value: str) -> None:
+        self._mode_state.persistent_instructions = value or ""
 
     @property
     def server_initiate_chat(self) -> bool:
@@ -333,6 +364,154 @@ class ConnectionHandler:
     def followup_max(self, value: int) -> None:
         if value is not None:
             self._followup_state.max = int(value)
+
+    def _refresh_character_binding_if_needed(self, force: bool = False):
+        """Refresh character-bound runtime fields (voice/prompt) on active connections.
+
+        Users can switch characters while a websocket is still connected.
+        Without this refresh, conn.voice_id and prompt remain bound to the
+        previous character until reconnect.
+        """
+        if not self.device_id:
+            return
+
+        now_ms = int(time.time() * 1000)
+        if (
+            not force
+            and self._last_profile_refresh_ms > 0
+            and (now_ms - self._last_profile_refresh_ms) < self._profile_refresh_interval_ms
+        ):
+            return
+
+        with self._profile_refresh_lock:
+            now_ms = int(time.time() * 1000)
+            if (
+                not force
+                and self._last_profile_refresh_ms > 0
+                and (now_ms - self._last_profile_refresh_ms)
+                < self._profile_refresh_interval_ms
+            ):
+                return
+
+            char_id = get_active_character_for_device(self.device_id)
+            if not char_id:
+                char_id = get_most_recent_character_via_user_for_device(self.device_id)
+            if not char_id:
+                self._last_profile_refresh_ms = now_ms
+                return
+
+            if not force and self.current_character_id == char_id:
+                self._last_profile_refresh_ms = now_ms
+                return
+
+            # Character changed (or forced refresh): update voice + prompt and invalidate cache
+            old_char = self.current_character_id
+            old_voice = self.voice_id
+            self.current_character_id = char_id
+
+            fields = {}
+            try:
+                char_doc = get_character_profile(char_id)
+                fields = extract_character_profile_fields(char_doc or {})
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(
+                    f"Failed to refresh character profile for {self.device_id}: {e}"
+                )
+
+            if fields.get("voice"):
+                self.voice_id = str(fields.get("voice"))
+
+            # Invalidate prompt cache for this device then rebuild prompt with latest character.
+            try:
+                invalidated = self.prompt_manager.invalidate_device_prompt_cache(
+                    self.device_id
+                )
+                self.logger.bind(tag=TAG).info(
+                    f"Prompt cache invalidated for {self.device_id}: {invalidated} entries"
+                )
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(
+                    f"Failed to invalidate prompt cache for {self.device_id}: {e}"
+                )
+
+            base_prompt = self.common_config.get("prompt", self.config.get("prompt", ""))
+            refreshed_prompt = base_prompt
+
+            profile_parts = []
+            for label, key in (
+                ("Your Name", "name"),
+                ("Your Age", "age"),
+                ("Your Pronouns", "pronouns"),
+                ("Your Relationship with the user", "relationship"),
+                ("You like calling the user", "callMe"),
+            ):
+                val = fields.get(key)
+                if val:
+                    profile_parts.append(f"{label}: {val}")
+            if profile_parts:
+                refreshed_prompt += "\n# About you:\n" + "\n- ".join(profile_parts)
+            if fields.get("bio"):
+                refreshed_prompt += f"\nUser's description of you: {fields['bio']}"
+
+            # Re-append user profile/task context, same as initial handshake behavior.
+            try:
+                owner_phone = get_owner_phone_for_device(self.device_id)
+                if owner_phone:
+                    user_doc = get_user_profile_by_phone(owner_phone)
+                    user_fields = extract_user_profile_fields(user_doc or {})
+                    user_parts = []
+                    for label, key in (
+                        ("User's name", "name"),
+                        ("User's Birthday", "birthday"),
+                        ("User's Pronouns", "pronouns"),
+                    ):
+                        val = user_fields.get(key)
+                        if val:
+                            user_parts.append(f"{label}: {val}")
+                    if user_parts:
+                        refreshed_prompt += "\nUser profile:\n" + "\n- ".join(user_parts)
+
+                    task_str = query_task(
+                        owner_phone,
+                        fields.get("name") if isinstance(fields, dict) else None,
+                        user_fields.get("name")
+                        if isinstance(user_fields, dict)
+                        else None,
+                    )
+                    if task_str:
+                        display_name = user_fields.get("name") or "User"
+                        refreshed_prompt += (
+                            f"\n{display_name} might be trying to accomplish these tasks:\n {task_str}"
+                        )
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(
+                    f"Failed to rebuild user profile context after character switch: {e}"
+                )
+
+            self.config["prompt"] = refreshed_prompt
+            try:
+                quick = self.prompt_manager.get_quick_prompt(
+                    refreshed_prompt, device_id=self.device_id
+                )
+                self.change_system_prompt(quick, prompt_label="quick_character_switch")
+                enhanced = self.prompt_manager.build_enhanced_prompt(
+                    refreshed_prompt, self.device_id, self.client_ip
+                )
+                if enhanced:
+                    self.change_system_prompt(
+                        enhanced, prompt_label="enhanced_character_switch"
+                    )
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(
+                    f"Failed to rebuild prompt after character switch: {e}"
+                )
+
+            self.logger.bind(tag=TAG).info(
+                f"Character binding refreshed for {self.device_id}: "
+                f"char {old_char} -> {self.current_character_id}, "
+                f"voice {old_voice} -> {self.voice_id}"
+            )
+            self._last_profile_refresh_ms = now_ms
 
 
 
@@ -415,6 +594,10 @@ class ConnectionHandler:
             device_token = log_context.set_device_id(self.device_id)
             self.logger = self.logger.bind(device_id=self.device_id)
 
+            # Enforce single active WebSocket per device_id.
+            # If another connection for this device already exists, supersede it.
+            if self.server and self.device_id:
+                await self.server.claim_device(self.device_id, self)
 
             # NOTE: Do not hardcode device_id in staging/production.
             # 检查是否来自MQTT连接
@@ -431,7 +614,7 @@ class ConnectionHandler:
             new_prompt = self.config.get("prompt", "")
 
             cached_enhanced_prompt = self.prompt_manager.get_cached_enhanced_prompt(
-                self.device_id
+                self.device_id, prompt_text=self.config.get("prompt")
             )
             if cached_enhanced_prompt:
                 # Important: prompt caching must NOT skip Firestore fetches that
@@ -632,11 +815,15 @@ class ConnectionHandler:
             # 获取差异化配置
             self._initialize_private_config()
 
+            # Hydrate any active server-owned mode session (e.g., alarm) so
+            # hello handling can correctly trigger server-initiated greeting.
+            self._hydrate_mode_session()
+
             # 同步构建首轮系统提示词（包含增强）
             try:
                 base_prompt = self.config.get("prompt")
                 if base_prompt is not None:
-                    quick = self.prompt_manager.get_quick_prompt(base_prompt)
+                    quick = self.prompt_manager.get_quick_prompt(base_prompt, device_id=self.device_id)
                     self.change_system_prompt(quick, prompt_label="quick")
                     self.prompt_manager.update_context_info(self, self.client_ip)
                     enhanced = self.prompt_manager.build_enhanced_prompt(
@@ -696,6 +883,12 @@ class ConnectionHandler:
                         f"强制关闭连接时出错: {close_error}"
                     )
             finally:
+                # Release device claim so the next connection can proceed
+                if self.server and self.device_id:
+                    try:
+                        await self.server.release_device(self.device_id, self)
+                    except Exception:
+                        pass
                 if device_token is not None:
                     try:
                         log_context.reset_device_id(device_token)
@@ -1131,10 +1324,15 @@ Return ONLY the JSON array, no other explanation."""
                             ai_summary = self.generate_ai_conversation_summary()
                             
                             # 检查任务匹配
+                            use_task_provider = bool(
+                                self.memory
+                                and self.task
+                                and hasattr(self.task, "detect_task")
+                            )
                             matched_tasks = []
                             try:
                                 # 获取用户ID (使用owner_phone作为user_id)
-                                if self.device_id:
+                                if self.device_id and not use_task_provider:
                                     owner_phone = get_owner_phone_for_device(self.device_id)
                                     if owner_phone:
                                         matched_tasks = self.check_conversation_against_tasks(owner_phone)
@@ -1379,7 +1577,7 @@ Return ONLY the JSON array, no other explanation."""
 
             if self.config.get("prompt") is not None:
                 user_prompt = self.config["prompt"]
-                prompt = self.prompt_manager.get_quick_prompt(user_prompt)
+                prompt = self.prompt_manager.get_quick_prompt(user_prompt, device_id=self.device_id)
                 self.change_system_prompt(prompt, prompt_label="quick_init")
                 self.logger.bind(tag=TAG).info(
                     "快速初始化组件: prompt渲染完成"
@@ -1604,6 +1802,96 @@ Return ONLY the JSON array, no other explanation."""
         if modules.get("memory") is not None:
             self.memory = modules["memory"]
 
+    def _ensure_per_connection_providers(self):
+        """Create fresh Memory/Task/Intent instances so connections don't share mutable state.
+
+        WebSocketServer creates one global instance of each provider.  Those instances
+        carry per-device mutable fields (role_id, short_memory, cached prompts, etc.).
+        Sharing them across concurrent connections causes cross-user memory/voice/intent
+        leakage.  This method creates fresh per-connection instances from config.
+
+        If per-connection creation fails for any provider and the server-level fallback
+        exists, we use copy.deepcopy() on it as a last resort (still isolated from other
+        connections).
+        """
+        try:
+            from core.utils import memory as memory_factory
+            from core.utils import task as task_factory
+            from core.utils import intent as intent_factory
+
+            selected = self.config.get("selected_module", {})
+
+            # ---- Fresh memory instance ----
+            mem_name = selected.get("Memory")
+            if mem_name and self.config.get("Memory", {}).get(mem_name):
+                mem_cfg = self.config["Memory"][mem_name]
+                mem_type = mem_cfg.get("type", mem_name)
+                try:
+                    self.memory = memory_factory.create_instance(
+                        mem_type, mem_cfg, None
+                    )
+                    self.logger.bind(tag=TAG).debug(
+                        f"Created per-connection memory provider: {mem_type}"
+                    )
+                except Exception as e:
+                    self.logger.bind(tag=TAG).warning(
+                        f"Failed to create per-connection memory: {e}; "
+                        f"falling back to deepcopy of server instance"
+                    )
+                    if self._server_memory is not None:
+                        self.memory = copy.deepcopy(self._server_memory)
+            elif self._server_memory is not None:
+                # Config doesn't have memory module info (e.g. simplified install)
+                # but server created one at startup — deepcopy it
+                self.memory = copy.deepcopy(self._server_memory)
+
+            # ---- Fresh task instance ----
+            task_name = selected.get("Task")
+            if task_name and self.config.get("Task", {}).get(task_name):
+                task_cfg = self.config["Task"][task_name]
+                task_type = task_cfg.get("type", task_name)
+                try:
+                    self.task = task_factory.create_instance(task_type, task_cfg)
+                    self.logger.bind(tag=TAG).debug(
+                        f"Created per-connection task provider: {task_type}"
+                    )
+                except Exception as e:
+                    self.logger.bind(tag=TAG).warning(
+                        f"Failed to create per-connection task: {e}; "
+                        f"falling back to deepcopy of server instance"
+                    )
+                    if self._server_task is not None:
+                        self.task = copy.deepcopy(self._server_task)
+            elif self._server_task is not None:
+                self.task = copy.deepcopy(self._server_task)
+
+            # ---- Fresh intent instance (caches function-list prompt per connection) ----
+            intent_name = selected.get("Intent")
+            if intent_name and self.config.get("Intent", {}).get(intent_name):
+                intent_cfg = self.config["Intent"][intent_name]
+                intent_type = intent_cfg.get("type", intent_name)
+                try:
+                    self.intent = intent_factory.create_instance(
+                        intent_type, intent_cfg
+                    )
+                    self.logger.bind(tag=TAG).debug(
+                        f"Created per-connection intent provider: {intent_type}"
+                    )
+                except Exception as e:
+                    self.logger.bind(tag=TAG).warning(
+                        f"Failed to create per-connection intent: {e}; "
+                        f"falling back to deepcopy of server instance"
+                    )
+                    if self._server_intent is not None:
+                        self.intent = copy.deepcopy(self._server_intent)
+            elif self._server_intent is not None:
+                self.intent = copy.deepcopy(self._server_intent)
+
+        except Exception as e:
+            self.logger.bind(tag=TAG).error(
+                f"Per-connection provider creation failed: {e}"
+            )
+
     def _initialize_memory(self):
         if self.memory is None:
             return
@@ -1673,6 +1961,12 @@ Return ONLY the JSON array, no other explanation."""
             role_id=self.device_id,
             llm=self.llm,
         )
+        # Initialize task module (guard: Task provider may not be configured)
+        if self.task:
+            self.task.init_task(
+                role_id=self.device_id,
+                llm=self.llm,
+            )
         # 获取记忆总结配置
         memory_config = self.config["Memory"]
         memory_type = memory_config[self.config["selected_module"]["Memory"]].get("type", "nomem")
@@ -1799,6 +2093,21 @@ Return ONLY the JSON array, no other explanation."""
                 self.logger.bind(tag=TAG).warning(
                     f"Failed to load mode instructions from {instructions_file}: {exc}"
                 )
+
+        reminder_context = session_config.get("context")
+        if isinstance(reminder_context, str):
+            reminder_context = reminder_context.strip()
+        else:
+            reminder_context = ""
+        if reminder_context:
+            # Make reminder purpose explicit in first-turn prompt guidance so
+            # server-initiated alarm speech consistently mentions the reason.
+            context_block = (
+                "\n\nReminder context:\n"
+                f"- The user asked to be reminded about: \"{reminder_context}\".\n"
+                "- Mention this reason explicitly in your very first sentence."
+            )
+            instructions = (instructions or "") + context_block
 
         self.mode_specific_instructions = instructions
         self.server_initiate_chat = config.get("server_initiate_chat", False)
@@ -2099,6 +2408,16 @@ Return ONLY the JSON array, no other explanation."""
         self.llm_finish_task = False
         chat_start_perf = time.perf_counter()
 
+        # For active websocket sessions, re-check character binding on user turns.
+        # This ensures voice_id/prompt switch quickly after app-side character changes.
+        if depth == 0 and is_user_input:
+            try:
+                self._refresh_character_binding_if_needed(force=False)
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(
+                    f"Runtime character refresh failed (non-fatal): {e}"
+                )
+
         # Genuine user input cancels any pending follow-up
         if query and is_user_input:
             self.followup_user_has_responded = True
@@ -2246,6 +2565,8 @@ Return ONLY the JSON array, no other explanation."""
                 current_input = [{"role": "user", "content": query}]
 
             instructions = ""
+            if self.persistent_mode_specific_instructions:
+                instructions += self.persistent_mode_specific_instructions
             if self.mode_specific_instructions:
                 instructions += self.mode_specific_instructions
                 self.mode_specific_instructions = ""
@@ -2478,14 +2799,17 @@ Return ONLY the JSON array, no other explanation."""
                     speaker="assistant",
                     text=text_buff
                 )
-                if depth == 0:
-                    self.tts.tts_text_queue.put(
-                        TTSMessageDTO(
-                            sentence_id=self.sentence_id,
-                            sentence_type=SentenceType.LAST,
-                            content_type=ContentType.ACTION,
-                        )
+            # Always enqueue LAST marker for a completed assistant response.
+            # Function-call follow-up responses run at depth>0; gating on depth==0
+            # can skip LAST and leave firmware waiting without a tts:stop signal.
+            if text_buff.strip():
+                self.tts.tts_text_queue.put(
+                    TTSMessageDTO(
+                        sentence_id=self.sentence_id,
+                        sentence_type=SentenceType.LAST,
+                        content_type=ContentType.ACTION,
                     )
+                )
             
             # ✅ Send LLM response to frontend websocket for display
             if self.websocket and text_buff.strip():
@@ -2643,6 +2967,20 @@ Return ONLY the JSON array, no other explanation."""
 
     async def close(self, ws=None):
         try:
+            if (
+                not self._llm_conversation_released
+                and self.llm is not None
+                and hasattr(self.llm, "release_conversation")
+            ):
+                try:
+                    self.llm.release_conversation(self.session_id)
+                except Exception as llm_release_error:
+                    self.logger.bind(tag=TAG).warning(
+                        f"Failed to release LLM conversation mapping: {llm_release_error}"
+                    )
+                finally:
+                    self._llm_conversation_released = True
+
             if hasattr(self, "audio_buffer"):
                 self.audio_buffer.clear()
 
@@ -2653,6 +2991,10 @@ Return ONLY the JSON array, no other explanation."""
                 except asyncio.CancelledError:
                     pass
                 self.timeout_task = None
+
+            if self.tts_stop_watchdog_task and not self.tts_stop_watchdog_task.done():
+                self.tts_stop_watchdog_task.cancel()
+                self.tts_stop_watchdog_task = None
 
             if hasattr(self, "func_handler") and self.func_handler:
                 try:
