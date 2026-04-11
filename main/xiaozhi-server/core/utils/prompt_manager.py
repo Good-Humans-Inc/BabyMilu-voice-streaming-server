@@ -47,7 +47,7 @@ class PromptManager:
         self.cache_manager = cache_manager
         self.CacheType = CacheType
 
-    def _get_enhanced_prompt_cache_key(self, device_id: str) -> str:
+    def _get_enhanced_prompt_cache_key(self, device_id: str, prompt_text: str = None) -> str:
         #return f"enhanced_prompt:{device_id}"
         """
         This prevents stale prompt reuse after character switch:
