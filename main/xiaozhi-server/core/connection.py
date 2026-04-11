@@ -763,8 +763,6 @@ class ConnectionHandler:
                 self.logger.bind(tag=TAG).error(
                     f"❌ Failed to fetch/apply character profile: {e}"
                 )
-                import traceback
-
                 self.logger.bind(tag=TAG).error(
                     f"Traceback: {traceback.format_exc()}"
                 )
