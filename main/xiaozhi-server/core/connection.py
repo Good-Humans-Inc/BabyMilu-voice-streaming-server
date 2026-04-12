@@ -1891,9 +1891,6 @@ Return ONLY the JSON array, no other explanation."""
             )
 
     def _initialize_memory(self):
-        if self.memory is None:
-            return
-
         summary_memory_block = ""
         try:
             summary_memory_block = self.chat_store.get_system_memory_block(
@@ -1948,12 +1945,13 @@ Return ONLY the JSON array, no other explanation."""
                 f"Failed loading Memory_prompt from character_memory_model: {e}"
             )
 
-        self.memory.init_memory(
-            role_id=self.device_id,
-            user_id=getattr(self, "user_id", None),
-            llm=self.llm,
-            summary_memory=summary_memory_block,
-        )
+        if self.memory is not None:
+            self.memory.init_memory(
+                role_id=self.device_id,
+                user_id=getattr(self, "user_id", None),
+                llm=self.llm,
+                summary_memory=summary_memory_block,
+            )
         """初始化任务模块"""
         self.task.init_task(
             role_id=self.device_id,
