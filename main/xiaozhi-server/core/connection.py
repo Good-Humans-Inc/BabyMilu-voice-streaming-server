@@ -2466,7 +2466,17 @@ Return ONLY the JSON array, no other explanation."""
                                     combined_seed = seed_text
                                     if char_profile:
                                         combined_seed = combined_seed + "\n\nCharacter Profile:\n" + char_profile
-                                    self.llm.ensure_conversation_with_system(self.session_id, combined_seed)
+                                    new_conv_id = self.llm.ensure_conversation_with_system(self.session_id, combined_seed)
+                                    if new_conv_id:
+                                        self.current_conversation_id = new_conv_id
+                                        update_conversation_state_for_device(
+                                            self.device_id,
+                                            conversation_id=new_conv_id,
+                                            last_used=datetime.now(timezone.utc).isoformat(),
+                                        )
+                                        self.logger.bind(tag=TAG).info(
+                                            f"Character override: created fresh conversation {new_conv_id} for device {self.device_id}"
+                                        )
                                 except Exception:
                                     pass
                         except Exception:
