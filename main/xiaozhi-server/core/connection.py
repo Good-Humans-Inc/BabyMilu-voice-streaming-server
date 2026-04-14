@@ -1,6 +1,13 @@
 import os
 import sys
 import copy
+
+def _load_base_prompt() -> str:
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "agent-base-prompt.txt")
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+_BASE_PROMPT = _load_base_prompt()
 import json
 import uuid
 import time
@@ -434,8 +441,7 @@ class ConnectionHandler:
                     f"Failed to invalidate prompt cache for {self.device_id}: {e}"
                 )
 
-            base_prompt = self.common_config.get("prompt", self.config.get("prompt", ""))
-            refreshed_prompt = base_prompt
+            refreshed_prompt = _BASE_PROMPT
 
             profile_parts = []
             for label, key in (
@@ -563,7 +569,7 @@ class ConnectionHandler:
             # ---- SAFE DEFAULTS ----
             user_id = f"device:{self.device_id}"
             user_name = "Unknown User"
-            new_prompt = self.config.get("prompt", "")
+            new_prompt = _BASE_PROMPT
 
             cached_enhanced_prompt = self.prompt_manager.get_cached_enhanced_prompt(
                 self.device_id, prompt_text=self.config.get("prompt")
@@ -2052,6 +2058,8 @@ Return ONLY the JSON array, no other explanation."""
         self.current_conversation_id = new_conv_id
 
     def _ensure_device_scoped_conversation(self):
+        # [TESTING] Uncomment to force a fresh conversation every session:
+        # return
         state = get_conversation_state_for_device(self.device_id)
         conv_id = state.get("id") if state else None
         if state and self._device_conversation_expired(state.get("last_used")):
