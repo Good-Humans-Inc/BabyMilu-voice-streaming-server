@@ -332,8 +332,6 @@ def test_voice_id_stale_on_switch():
     c._profile_refresh_lock = threading.RLock()
     c._last_profile_refresh_ms = 0
     c._profile_refresh_interval_ms = 0
-    c.change_system_prompt = lambda prompt, prompt_label=None: None
-
     FAKE_FIRESTORE["devices"]["device_aaa"]["activeCharacterId"] = "char_bob"
     conn_mod.ConnectionHandler._refresh_character_binding_if_needed(c, force=True)
     FAKE_FIRESTORE["devices"]["device_aaa"]["activeCharacterId"] = "char_alice"

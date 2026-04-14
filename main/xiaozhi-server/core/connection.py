@@ -453,58 +453,10 @@ class ConnectionHandler:
             if fields.get("bio"):
                 refreshed_prompt += f"\nUser's description of you: {fields['bio']}"
 
-            # Re-append user profile/task context, same as initial handshake behavior.
-            try:
-                owner_phone = get_owner_phone_for_device(self.device_id)
-                if owner_phone:
-                    user_doc = get_user_profile_by_phone(owner_phone)
-                    user_fields = extract_user_profile_fields(user_doc or {})
-                    user_parts = []
-                    for label, key in (
-                        ("User's name", "name"),
-                        ("User's Birthday", "birthday"),
-                        ("User's Pronouns", "pronouns"),
-                    ):
-                        val = user_fields.get(key)
-                        if val:
-                            user_parts.append(f"{label}: {val}")
-                    if user_parts:
-                        refreshed_prompt += "\nUser profile:\n" + "\n- ".join(user_parts)
-
-                    task_str = query_task(
-                        owner_phone,
-                        fields.get("name") if isinstance(fields, dict) else None,
-                        user_fields.get("name")
-                        if isinstance(user_fields, dict)
-                        else None,
-                    )
-                    if task_str:
-                        display_name = user_fields.get("name") or "User"
-                        refreshed_prompt += (
-                            f"\n{display_name} might be trying to accomplish these tasks:\n {task_str}"
-                        )
-            except Exception as e:
-                self.logger.bind(tag=TAG).warning(
-                    f"Failed to rebuild user profile context after character switch: {e}"
-                )
 
             self.config["prompt"] = refreshed_prompt
-            try:
-                quick = self.prompt_manager.get_quick_prompt(
-                    refreshed_prompt, device_id=self.device_id
-                )
-                self.change_system_prompt(quick, prompt_label="quick_character_switch")
-                enhanced = self.prompt_manager.build_enhanced_prompt(
-                    refreshed_prompt, self.device_id, self.client_ip
-                )
-                if enhanced:
-                    self.change_system_prompt(
-                        enhanced, prompt_label="enhanced_character_switch"
-                    )
-            except Exception as e:
-                self.logger.bind(tag=TAG).warning(
-                    f"Failed to rebuild prompt after character switch: {e}"
-                )
+            self.prompt = refreshed_prompt
+            self.dialogue.update_system_message(refreshed_prompt)
 
             self.logger.bind(tag=TAG).info(
                 f"Character binding refreshed for {self.device_id}: "
@@ -720,40 +672,6 @@ class ConnectionHandler:
                     user_name = user_fields.get("name") or owner_phone
                     self.logger.bind(tag=TAG).info(f"👤 User name: {user_name}")
 
-                    user_parts = []
-                    for label, key in (
-                        ("User's name", "name"),
-                        ("User's Birthday", "birthday"),
-                        ("User's Pronouns", "pronouns"),
-                    ):
-                        val = user_fields.get(key)
-                        if val:
-                            user_parts.append(f"{label}: {val}")
-                    if user_parts:
-                        new_prompt += "\nUser profile:\n" + "\n- ".join(
-                            user_parts
-                        )
-
-                    # 使用未完成任务的记忆
-                    try:
-                        task_str = query_task(
-                            owner_phone,
-                            fields.get("name")
-                            if isinstance(fields, dict)
-                            else None,
-                            user_fields.get("name")
-                            if isinstance(user_fields, dict)
-                            else None,
-                        )
-                        if task_str:
-                            display_name = user_fields.get("name") or "User"
-                            new_prompt += (
-                                f"\n{display_name} might be trying to accomplish these tasks:\n {task_str}"
-                            )
-                    except Exception as task_err:
-                        self.logger.bind(tag=TAG).warning(
-                            f"Failed to query tasks for prompt injection: {task_err}"
-                        )
                 else:
                     self.logger.bind(tag=TAG).warning(
                         f"❌ No owner phone found for device {self.device_id}, using fallback user_id: {user_id}"
@@ -798,11 +716,9 @@ class ConnectionHandler:
                     f"✅ Session created: {self.session_id} user={self.user_id}"
                 )
 
-            prompt_build_start = time.perf_counter()
             # ---- PROMPT UPDATE (SAFE) ----
             if new_prompt != self.config.get("prompt", ""):
                 self.config["prompt"] = new_prompt
-                self.change_system_prompt(new_prompt, prompt_label="base")
 
             # 启动超时检查任务
             self.timeout_task = asyncio.create_task(self._check_timeout())
@@ -816,27 +732,6 @@ class ConnectionHandler:
             # Hydrate any active server-owned mode session (e.g., alarm) so
             # hello handling can correctly trigger server-initiated greeting.
             self._hydrate_mode_session()
-
-            # 同步构建首轮系统提示词（包含增强）
-            try:
-                base_prompt = self.config.get("prompt")
-                if base_prompt is not None:
-                    quick = self.prompt_manager.get_quick_prompt(base_prompt, device_id=self.device_id)
-                    self.change_system_prompt(quick, prompt_label="quick")
-                    self.prompt_manager.update_context_info(self, self.client_ip)
-                    enhanced = self.prompt_manager.build_enhanced_prompt(
-                        self.config["prompt"], self.device_id, self.client_ip
-                    )
-                    if enhanced:
-                        self.change_system_prompt(enhanced, prompt_label="enhanced")
-                        self.logger.bind(tag=TAG).info("同步构建增强系统提示词完成")
-            except Exception as e:
-                self.logger.bind(tag=TAG).warning(f"同步构建系统提示词失败: {e}")
-            finally:
-                prompt_build_ms = int((time.perf_counter() - prompt_build_start) * 1000)
-                self.logger.bind(tag=TAG).info(
-                    f"[latency] prompt_build_ms={prompt_build_ms}"
-                )
 
             # 初始化会话绑定（mode-scoped 或 device-scoped）
             self._initialize_conversation_binding()
@@ -1573,14 +1468,6 @@ Return ONLY the JSON array, no other explanation."""
                 self.selected_module_str, device_id=self.device_id
             )
 
-            if self.config.get("prompt") is not None:
-                user_prompt = self.config["prompt"]
-                prompt = self.prompt_manager.get_quick_prompt(user_prompt, device_id=self.device_id)
-                self.change_system_prompt(prompt, prompt_label="quick_init")
-                self.logger.bind(tag=TAG).info(
-                    "快速初始化组件: prompt渲染完成"
-                )
-
             if self.vad is None:
                 self.vad = self._vad
             if self.asr is None:
@@ -1620,16 +1507,7 @@ Return ONLY the JSON array, no other explanation."""
             self.loop.call_soon_threadsafe(self.components_initialized.set)
 
     def _init_prompt_enhancement(self):
-        self.prompt_manager.update_context_info(self, self.client_ip)
-        enhanced_prompt = self.prompt_manager.build_enhanced_prompt(
-            self.config["prompt"], self.device_id, self.client_ip
-        )
-        if enhanced_prompt:
-            character_memory_prompt = getattr(self, "character_memory_prompt", "") or ""
-            if character_memory_prompt:
-                enhanced_prompt = enhanced_prompt + "\n\n" + character_memory_prompt
-            self.change_system_prompt(enhanced_prompt, prompt_label="enhanced_refresh")
-            self.logger.bind(tag=TAG).info("系统提示词已增强更新")
+        pass
 
     def _init_report_threads(self):
         if not self.read_config_from_api or self.need_bind:
@@ -1760,8 +1638,6 @@ Return ONLY the JSON array, no other explanation."""
                     "functions"
                 ] = plugin_from_server.keys()
 
-        if private_config.get("prompt") is not None:
-            self.config["prompt"] = private_config["prompt"]
         if private_config.get("voiceprint") is not None:
             self.config["voiceprint"] = private_config["voiceprint"]
         if private_config.get("device_max_output_size") is not None:
@@ -2022,11 +1898,7 @@ Return ONLY the JSON array, no other explanation."""
                 self.func_handler._initialize(), self.loop
             )
 
-    def change_system_prompt(self, prompt, prompt_label: Optional[str] = None):
-        self.prompt = prompt
-        self.dialogue.update_system_message(self.prompt)
-        label = prompt_label or "system"
-        self.logger.bind(tag=TAG).info(f"{label} prompt rendered")
+
 
     # ------------------------------------------------------------------
     # Mode session + conversation/sessionContext integration
@@ -2575,16 +2447,6 @@ Return ONLY the JSON array, no other explanation."""
             # If we have a character memory prompt, add a high-priority
             # override so older assistant outputs or stored summaries
             # do not conflict with the canonical character profile.
-            char_mem = getattr(self, "character_memory_prompt", "") or ""
-            if char_mem:
-                override = (
-                    "<system_override>\n"
-                    "IMPORTANT: Ignore any previous assistant statements about the character's\n"
-                    "identity, appearance, or other canonical attributes. The character\n"
-                    "profile provided in the memory block below is authoritative for this\n"
-                    "conversation.\n</system_override>\n\n"
-                )
-                instructions = override + instructions
 
             if memory_str:
                 instructions += f"\n\n<memory>\n{memory_str}\n</memory>"
