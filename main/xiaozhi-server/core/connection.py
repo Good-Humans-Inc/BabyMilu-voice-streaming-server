@@ -2515,6 +2515,12 @@ Return ONLY the JSON array, no other explanation."""
 
         try:
             memory_str = None
+            # Always load the authoritative memory blocks regardless of whether
+            # the memory provider is active. This ensures system_memory_block
+            # (which contains user facts like friend names) always reaches the LLM.
+            sys_mem = getattr(self, "system_memory_block", "") or ""
+            char_mem_base = getattr(self, "character_memory_prompt", "") or ""
+
             if self.memory is not None:
                 try:
                     # Detect first genuine user turn in this conversation.
@@ -2525,34 +2531,23 @@ Return ONLY the JSON array, no other explanation."""
                     is_first_turn = len(prior_non_system) == 1 and prior_non_system[-1].role == "user"
 
                     if is_first_turn:
-                        # Build a minimal memory for the memory-agent: only the
-                        # system memory block (from user memory model) and the
-                        # character memory prompt. This avoids mixing in other
-                        # ephemeral or contextual memories at conversation start.
-                        sys_mem = getattr(self, "system_memory_block", "") or ""
-                        char_mem = getattr(self, "character_memory_prompt", "") or ""
-                        combined = sys_mem
-                        if char_mem:
-                            if combined:
-                                combined = combined + "\n\n" + char_mem
-                            else:
-                                combined = char_mem
-                        memory_str = combined or ""
+                        prefix_parts = [p for p in [sys_mem, char_mem_base] if p]
+                        memory_str = "\n\n".join(prefix_parts) or ""
                     else:
                         future = asyncio.run_coroutine_threadsafe(
                             self.memory.query_memory(query), self.loop
                         )
                         queried = future.result(timeout=5.0)
-                        # Always prepend the authoritative system memory block so
-                        # structured user facts (location, identity, etc.) are
-                        # available on every turn, not just the first.
-                        sys_mem = getattr(self, "system_memory_block", "") or ""
-                        char_mem_str = getattr(self, "character_memory_prompt", "") or ""
-                        prefix_parts = [p for p in [sys_mem, char_mem_str] if p]
+                        prefix_parts = [p for p in [sys_mem, char_mem_base] if p]
                         prefix = "\n\n".join(prefix_parts)
                         memory_str = (prefix + "\n\n" + queried).strip() if prefix else queried
                 except Exception as e:
                     self.logger.bind(tag=TAG).warning(f"记忆查询失败或超时: {e}")
+
+            # If memory provider is absent or failed, still inject the static blocks.
+            if memory_str is None:
+                prefix_parts = [p for p in [sys_mem, char_mem_base] if p]
+                memory_str = "\n\n".join(prefix_parts) or None
 
             use_full_history = True
             try:
