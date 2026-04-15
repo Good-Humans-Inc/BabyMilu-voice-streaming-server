@@ -2356,13 +2356,13 @@ Return ONLY the JSON array, no other explanation."""
 
         # For active websocket sessions, re-check character binding on user turns.
         # This ensures voice_id/prompt switch quickly after app-side character changes.
-        if depth == 0 and is_user_input:
-            try:
-                self._refresh_character_binding_if_needed(force=False)
-            except Exception as e:
-                self.logger.bind(tag=TAG).warning(
-                    f"Runtime character refresh failed (non-fatal): {e}"
-                )
+        # if depth == 0 and is_user_input:
+        #     try:
+        #         self._refresh_character_binding_if_needed(force=False)
+        #     except Exception as e:
+        #         self.logger.bind(tag=TAG).warning(
+        #             f"Runtime character refresh failed (non-fatal): {e}"
+        #         )
 
         # Genuine user input cancels any pending follow-up
         if query and is_user_input:
