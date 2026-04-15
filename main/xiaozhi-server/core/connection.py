@@ -1976,30 +1976,81 @@ Return ONLY the JSON array, no other explanation."""
         )
 
         instructions = config.get("instructions", "")
-        instructions_file = config.get("instructions_file")
-        if instructions_file:
-            try:
-                with open(instructions_file, "r", encoding="utf-8") as fp:
-                    instructions = fp.read().strip()
-            except Exception as exc:
-                self.logger.bind(tag=TAG).warning(
-                    f"Failed to load mode instructions from {instructions_file}: {exc}"
-                )
 
-        reminder_context = session_config.get("context")
-        if isinstance(reminder_context, str):
-            reminder_context = reminder_context.strip()
-        else:
-            reminder_context = ""
-        if reminder_context:
-            # Make reminder purpose explicit in first-turn prompt guidance so
-            # server-initiated alarm speech consistently mentions the reason.
-            context_block = (
-                "\n\nReminder context:\n"
-                f"- The user asked to be reminded about: \"{reminder_context}\".\n"
-                "- Mention this reason explicitly in your very first sentence."
+        if mode == "scheduled_conversation":
+            # Dynamic assembly from LLM-generated intake fields stored in session_config.
+            # No static instructions file — each conversation is unique.
+            character_reminder    = (session_config.get("characterReminder") or "").strip()
+            emotional_context     = (session_config.get("emotionalContext") or "").strip()
+            delivery_pref         = (session_config.get("deliveryPreference") or "none stated").strip()
+            type_hint             = (session_config.get("typeHint") or "").strip()
+            priority              = (session_config.get("priority") or "").strip()
+            conversation_outline  = (session_config.get("conversationOutline") or "").strip()
+            completion_signal     = (session_config.get("completionSignal") or "").strip()
+
+            parts = []
+            if character_reminder:
+                parts.append(f"[CHARACTER REMINDER]\n{character_reminder}")
+            parts.append(
+                f"[CONTEXT FOR THIS CONVERSATION]\n"
+                f"Emotional context: {emotional_context}\n"
+                f"Delivery preference: {delivery_pref}\n"
+                f"Type: {type_hint} | Priority: {priority}"
             )
-            instructions = (instructions or "") + context_block
+            if conversation_outline:
+                parts.append(f"[CONVERSATION OUTLINE]\n{conversation_outline}")
+            if completion_signal:
+                parts.append(f"[COMPLETION SIGNAL]\n{completion_signal}")
+
+            parts.append(
+                "[SNOOZE INSTRUCTION]\n"
+                "If the user wants to delay this reminder (matches 'Snoozed' in the completion "
+                "signal above), call schedule_conversation with:\n"
+                "- time_expression: the new time they specified (e.g. 'in 10 minutes', 'at 9pm')\n"
+                "- all other fields (content, type_hint, priority, conversation_outline, "
+                "character_reminder, completion_signal, delivery_preference) reused exactly "
+                "from the context above\n"
+                "- emotional_context: reuse from above but append a note, e.g. "
+                "\"Note: user snoozed by 10 minutes.\"\n"
+                "- recurrence: omit (snooze is always one-time)"
+            )
+
+            instructions = "\n\n".join(parts)
+
+            # Override followup_max from priority so critical reminders nudge more
+            # and low-priority ones don't nudge at all.
+            from services.alarms.config import PRIORITY_FOLLOWUP_MAX
+            priority_key = (session_config.get("priority") or "medium").strip().lower()
+            priority_max = PRIORITY_FOLLOWUP_MAX.get(priority_key)
+            if priority_max is not None:
+                config["followup_max"] = priority_max
+
+        else:
+            # Legacy path — morning_alarm and any future file-based modes.
+            instructions_file = config.get("instructions_file")
+            if instructions_file:
+                try:
+                    with open(instructions_file, "r", encoding="utf-8") as fp:
+                        instructions = fp.read().strip()
+                except Exception as exc:
+                    self.logger.bind(tag=TAG).warning(
+                        f"Failed to load mode instructions from {instructions_file}: {exc}"
+                    )
+
+            reminder_context = session_config.get("context")
+            if isinstance(reminder_context, str):
+                reminder_context = reminder_context.strip()
+            else:
+                reminder_context = ""
+            if reminder_context:
+                # Make reminder purpose explicit in first-turn prompt guidance so
+                # server-initiated alarm speech consistently mentions the reason.
+                context_block = (
+                    "\n\nReminder context:\n"
+                    f"- The user asked to be reminded about: \"{reminder_context}\".\n"
+                    "- Mention this reason explicitly in your very first sentence."
+                )
+                instructions = (instructions or "") + context_block
 
         self.mode_specific_instructions = instructions
         self.server_initiate_chat = config.get("server_initiate_chat", False)

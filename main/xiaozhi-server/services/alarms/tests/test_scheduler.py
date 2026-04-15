@@ -54,7 +54,7 @@ def _make_alarm(
     schedule = models.AlarmSchedule(
         repeat=repeat,
         time_local=time_local,
-        days=days or ["Mon"],
+        days=days if days is not None else ["Mon"],
     )
     target = models.AlarmTarget(device_id=device_id, mode=mode)
     raw_payload = {}
@@ -93,7 +93,6 @@ def test_prepare_wake_requests_creates_session(monkeypatch):
         ]
 
     monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
-    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_reminders", lambda now, lookahead: [])
 
     now = datetime.now(timezone.utc)
     wake_requests = scheduler.prepare_wake_requests(now, lookahead=timedelta(minutes=1))
@@ -102,13 +101,21 @@ def test_prepare_wake_requests_creates_session(monkeypatch):
     request = wake_requests[0]
     assert request.target.device_id == "DEV123"
     assert request.session is fake_store.sessions["DEV123"]
-    assert fake_store.sessions["DEV123"].session_config == {
-        "mode": "morning_alarm",
-        "alarmId": "alarm-123",
-        "userId": "user-xyz",
-        "label": "Morning Wake",
-        "context": None,
-    }
+    cfg = fake_store.sessions["DEV123"].session_config
+    assert cfg["mode"] == "morning_alarm"
+    assert cfg["alarmId"] == "alarm-123"
+    assert cfg["userId"] == "user-xyz"
+    assert cfg["label"] == "Morning Wake"
+    assert cfg["context"] is None
+    # V0 fields are None for morning_alarm docs that don't have them
+    assert cfg["content"] is None
+    assert cfg["typeHint"] is None
+    assert cfg["priority"] is None
+    assert cfg["conversationOutline"] is None
+    assert cfg["characterReminder"] is None
+    assert cfg["emotionalContext"] is None
+    assert cfg["completionSignal"] is None
+    assert cfg["deliveryPreference"] is None
 
 
 def test_prepare_wake_requests_skips_existing_session(monkeypatch):
@@ -127,7 +134,6 @@ def test_prepare_wake_requests_skips_existing_session(monkeypatch):
         return [_make_alarm("DEV123", "morning_alarm")]
 
     monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
-    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_reminders", lambda now, lookahead: [])
     wake_requests = scheduler.prepare_wake_requests(
         datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
     )
@@ -153,7 +159,6 @@ def test_prepare_wake_requests_skips_when_last_processed_matches(monkeypatch):
         ]
 
     monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
-    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_reminders", lambda now, lookahead: [])
     wake_requests = scheduler.prepare_wake_requests(
         datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
     )
@@ -239,7 +244,6 @@ def test_prepare_wake_requests_one_time_uses_short_session_ttl(monkeypatch):
         ]
 
     monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
-    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_reminders", lambda now, lookahead: [])
 
     wake_requests = scheduler.prepare_wake_requests(
         datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
@@ -279,6 +283,38 @@ def test_compute_next_occurrence_uses_timezone_and_local_time():
     next_dt = scheduler.compute_next_occurrence(alarm, now=reference)
 
     assert next_dt == datetime(2024, 1, 2, 15, 30, tzinfo=timezone.utc)
+
+
+def test_compute_next_occurrence_daily_all_days_advances_one_day():
+    """Daily alarm (all 7 days) — next occurrence is exactly 24 hours later."""
+    reference = datetime(2024, 1, 1, 7, tzinfo=timezone.utc)  # Monday 07:00 UTC
+    alarm = _make_alarm(
+        "DEV1",
+        "mode",
+        days=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+        next_occurrence=reference,
+        time_local="07:00",
+    )
+
+    next_dt = scheduler.compute_next_occurrence(alarm, now=reference)
+
+    assert next_dt == reference + timedelta(days=1)
+
+
+def test_compute_next_occurrence_daily_empty_days_defaults_to_all():
+    """Empty days list is treated as all 7 days — advances one day."""
+    reference = datetime(2024, 1, 1, 7, tzinfo=timezone.utc)  # Monday 07:00 UTC
+    alarm = _make_alarm(
+        "DEV1",
+        "mode",
+        days=[],
+        next_occurrence=reference,
+        time_local="07:00",
+    )
+
+    next_dt = scheduler.compute_next_occurrence(alarm, now=reference)
+
+    assert next_dt == reference + timedelta(days=1)
 
 
 def test_compute_next_occurrence_requires_timezone():

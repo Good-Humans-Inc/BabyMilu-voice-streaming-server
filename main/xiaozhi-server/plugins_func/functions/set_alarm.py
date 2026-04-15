@@ -10,16 +10,20 @@ from config.logger import setup_logging
 TAG = __name__
 logger = setup_logging()
 
+
+def _format_local_datetime(dt: datetime) -> str:
+    return f"{dt.strftime('%A, %B')} {dt.day} at {dt.strftime('%I:%M %p').lstrip('0')}"
+
 SET_ALARM_FUNCTION_DESC = {
     "type": "function",
     "function": {
         "name": "set_alarm",
         "description": (
-            "Set a reminder or alarm for the user. "
-            "Trigger when the user wants to be reminded of something at a specific time. "
-            "You MUST have both a time expression and a reason before calling — ask the user if either is missing. "
-            "Pass the time exactly as the user said it (e.g. 'in 5 minutes', 'tomorrow morning', 'Friday at 9pm'). "
-            "The server will resolve it to an absolute time."
+            "[DEPRECATED — use schedule_conversation instead] "
+            "Set a basic alarm for the user. "
+            "For any new reminder, habit, check-in, or emotional support request, "
+            "use schedule_conversation — it supports richer context and better delivery. "
+            "Only use set_alarm if schedule_conversation is unavailable."
         ),
         "parameters": {
             "type": "object",
@@ -53,16 +57,19 @@ def set_alarm(conn, time_expression: str, reason: str) -> ActionResponse:
     tz = ZoneInfo(tz_str)
     now = datetime.now(tz)
 
-    # Parse the natural language time expression relative to "now"
-    resolved = dateparser.parse(
-        time_expression,
-        settings={
-            "PREFER_DATES_FROM": "future",
-            "RELATIVE_BASE": now,
-            "TIMEZONE": tz_str,
-            "RETURN_AS_TIMEZONE_AWARE": True,
-        },
-    )
+    _parse_settings = {
+        "PREFER_DATES_FROM": "future",
+        "RELATIVE_BASE": now,
+        "TIMEZONE": tz_str,
+        "RETURN_AS_TIMEZONE_AWARE": True,
+    }
+
+    # Parse the natural language time expression relative to "now".
+    # Retry with "today at" prefix for bare times like "8 am" that dateparser
+    # cannot resolve without a date anchor.
+    resolved = dateparser.parse(time_expression, languages=["en"], settings=_parse_settings)
+    if resolved is None:
+        resolved = dateparser.parse(f"today at {time_expression}", languages=["en"], settings=_parse_settings)
 
     if resolved is None:
         logger.bind(tag=TAG).warning(
@@ -98,6 +105,6 @@ def set_alarm(conn, time_expression: str, reason: str) -> ActionResponse:
 
     return ActionResponse(
         action=Action.REQLLM,
-        result=f"Alarm set: '{reason}' on {resolved.strftime('%A, %B %-d at %-I:%M %p')} ({tz_str}).",
+        result=f"Alarm set: '{reason}' on {_format_local_datetime(resolved)} ({tz_str}).",
         response=None,
     )
