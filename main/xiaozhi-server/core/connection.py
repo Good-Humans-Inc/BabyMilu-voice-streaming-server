@@ -443,21 +443,21 @@ class ConnectionHandler:
 
             refreshed_prompt = _BASE_PROMPT
 
-            profile_parts = []
-            for label, key in (
-                ("Your Name", "name"),
-                ("Your Age", "age"),
-                ("Your Pronouns", "pronouns"),
-                ("Your Relationship with the user", "relationship"),
-                ("You like calling the user", "callMe"),
-            ):
-                val = fields.get(key)
-                if val:
-                    profile_parts.append(f"{label}: {val}")
-            if profile_parts:
-                refreshed_prompt += "\n# About you:\n" + "\n- ".join(profile_parts)
-            if fields.get("bio"):
-                refreshed_prompt += f"\nUser's description of you: {fields['bio']}"
+            # profile_parts = []
+            # for label, key in (
+            #     ("Your Name", "name"),
+            #     ("Your Age", "age"),
+            #     ("Your Pronouns", "pronouns"),
+            #     ("Your Relationship with the user", "relationship"),
+            #     ("You like calling the user", "callMe"),
+            # ):
+            #     val = fields.get(key)
+            #     if val:
+            #         profile_parts.append(f"{label}: {val}")
+            # if profile_parts:
+            #     refreshed_prompt += "\n# About you:\n" + "\n- ".join(profile_parts)
+            # if fields.get("bio"):
+            #     refreshed_prompt += f"\nUser's description of you: {fields['bio']}"
 
 
             self.config["prompt"] = refreshed_prompt
@@ -623,27 +623,27 @@ class ConnectionHandler:
                             "No voice resolved from Firestore character profile; TTS may fall back to default_voice_id"
                         )
 
-                    profile_parts = []
-                    for label, key in (
-                        ("Your Name", "name"),
-                        ("Your Age", "age"),
-                        ("Your Pronouns", "pronouns"),
-                        ("Your Relationship with the user", "relationship"),
-                        ("You like calling the user", "callMe"),
-                    ):
-                        val = fields.get(key)
-                        if val:
-                            profile_parts.append(f"{label}: {val}")
+                    # profile_parts = []
+                    # for label, key in (
+                    #     ("Your Name", "name"),
+                    #     ("Your Age", "age"),
+                    #     ("Your Pronouns", "pronouns"),
+                    #     ("Your Relationship with the user", "relationship"),
+                    #     ("You like calling the user", "callMe"),
+                    # ):
+                    #     val = fields.get(key)
+                    #     if val:
+                    #         profile_parts.append(f"{label}: {val}")
 
-                    if profile_parts:
-                        new_prompt += "\n# About you:\n" + "\n- ".join(
-                            profile_parts
-                        )
+                    # if profile_parts:
+                    #     new_prompt += "\n# About you:\n" + "\n- ".join(
+                    #         profile_parts
+                    #     )
 
-                    if fields.get("bio"):
-                        new_prompt += (
-                            f"\nUser's description of you: {fields['bio']}"
-                        )
+                    # if fields.get("bio"):
+                    #     new_prompt += (
+                    #         f"\nUser's description of you: {fields['bio']}"
+                    #     )
                 else:
                     # ensure attribute is explicit when missing
                     self.active_character_id = None
@@ -738,6 +738,12 @@ class ConnectionHandler:
             # Hydrate any active server-owned mode session (e.g., alarm) so
             # hello handling can correctly trigger server-initiated greeting.
             self._hydrate_mode_session()
+
+            # Commit the assembled prompt so _create_llm_conversation seeds
+            # the OpenAI conversation with only Part 1 (agent-base-prompt.txt).
+            # Part 3 (character_memory_prompt) is appended later once loaded.
+            self.config["prompt"] = new_prompt
+            self.prompt = new_prompt
 
             # 初始化会话绑定（mode-scoped 或 device-scoped）
             self._initialize_conversation_binding()
