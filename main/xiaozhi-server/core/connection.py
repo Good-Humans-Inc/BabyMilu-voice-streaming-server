@@ -2058,8 +2058,8 @@ Return ONLY the JSON array, no other explanation."""
         self.current_conversation_id = new_conv_id
 
     def _ensure_device_scoped_conversation(self):
-        # [TESTING] Uncomment to force a fresh conversation every session:
-        # return
+        # [TESTING] Comment out to resume existing conversation:
+        return
         state = get_conversation_state_for_device(self.device_id)
         conv_id = state.get("id") if state else None
         if state and self._device_conversation_expired(state.get("last_used")):
