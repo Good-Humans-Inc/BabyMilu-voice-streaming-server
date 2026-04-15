@@ -427,17 +427,17 @@ class ConnectionHandler:
                 self.voice_id = str(fields.get("voice"))
 
             # Invalidate prompt cache for this device then rebuild prompt with latest character.
-            try:
-                invalidated = self.prompt_manager.invalidate_device_prompt_cache(
-                    self.device_id
-                )
-                self.logger.bind(tag=TAG).info(
-                    f"Prompt cache invalidated for {self.device_id}: {invalidated} entries"
-                )
-            except Exception as e:
-                self.logger.bind(tag=TAG).warning(
-                    f"Failed to invalidate prompt cache for {self.device_id}: {e}"
-                )
+            # try:
+            #     invalidated = self.prompt_manager.invalidate_device_prompt_cache(
+            #         self.device_id
+            #     )
+            #     self.logger.bind(tag=TAG).info(
+            #         f"Prompt cache invalidated for {self.device_id}: {invalidated} entries"
+            #     )
+            # except Exception as e:
+            #     self.logger.bind(tag=TAG).warning(
+            #     f"Failed to invalidate prompt cache for {self.device_id}: {e}"
+            # )
 
             base_prompt = self.common_config.get("prompt", self.config.get("prompt", ""))
             refreshed_prompt = base_prompt
@@ -613,17 +613,14 @@ class ConnectionHandler:
             user_name = "Unknown User"
             new_prompt = self.config.get("prompt", "")
 
-            cached_enhanced_prompt = self.prompt_manager.get_cached_enhanced_prompt(
-                self.device_id, prompt_text=self.config.get("prompt")
-            )
-            if cached_enhanced_prompt:
-                # Important: prompt caching must NOT skip Firestore fetches that
-                # resolve per-user settings (e.g., voice_id). Otherwise we fall back
-                # to provider defaults (often "Caleb" on ElevenLabs).
-                self.logger.bind(tag=TAG).info(
-                    f"Enhanced prompt cache hit for device {self.device_id} (prompt cached); "
-                    "still fetching Firestore profile for voice/user binding"
-                )
+            # cached_enhanced_prompt = self.prompt_manager.get_cached_enhanced_prompt(
+            #     self.device_id, prompt_text=self.config.get("prompt")
+            # )
+            # if cached_enhanced_prompt:
+            #     self.logger.bind(tag=TAG).info(
+            #         f"Enhanced prompt cache hit for device {self.device_id} (prompt cached); "
+            #         "still fetching Firestore profile for voice/user binding"
+            #     )
 
             # 从云端获取角色配置（voice, bio 等），并应用到本次会话
             fields = {}
