@@ -264,6 +264,7 @@ def run_send_reminder_push_job(
         reminder_id = reminder_doc.id
         try:
             reminder_data = reminder_doc.to_dict() or {}
+            
             uid = _resolve_uid_from_reminder_doc(reminder_doc, reminder_data)
             if not uid or uid == "+14444444444":
                 skipped += 1
@@ -275,7 +276,17 @@ def run_send_reminder_push_job(
                     }
                 )
                 continue
-
+            if "app" not in reminder_data.get("deliveryChannel", []):
+                skipped += 1
+                results.append(
+                    {
+                        "reminderId": reminder_id,
+                        "userId": uid,
+                        "processed": False,
+                        "skipped": "not_app_delivery_channel",
+                    }
+                )
+                continue
             if uid not in user_cache:
                 user_snap = client.collection("users").document(uid).get()
                 if not user_snap.exists:
