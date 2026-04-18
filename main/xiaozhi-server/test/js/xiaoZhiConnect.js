@@ -18,7 +18,7 @@ export async function webSocketConnect(otaUrl,wsUrl,config){
     // 添加认证参数
     connUrl.searchParams.append('device-id', config.deviceId);
     connUrl.searchParams.append('client-id', config.clientId);
-    log(`正在连接: ${connUrl.toString()}`, 'info');
+    log(`Connecting to: ${connUrl.toString()}`, 'info');
 
     return new WebSocket(connUrl.toString());
 }
@@ -26,11 +26,11 @@ export async function webSocketConnect(otaUrl,wsUrl,config){
 // 验证配置
 function validateConfig(config) {
     if (!config.deviceMac) {
-        log('设备MAC地址不能为空', 'error');
+        log('Device MAC address is required', 'error');
         return false;
     }
     if (!config.clientId) {
-        log('客户端ID不能为空', 'error');
+        log('Client ID is required', 'error');
         return false;
     }
     return true;
@@ -41,7 +41,7 @@ function validateWsUrl(wsUrl){
     if (wsUrl === '') return false;
     // 检查URL格式
     if (!wsUrl.startsWith('ws://') && !wsUrl.startsWith('wss://')) {
-        log('URL格式错误，必须以ws://或wss://开头', 'error');
+        log('Invalid URL format. The address must start with ws:// or wss://', 'error');
         return false;
     }
     return true
@@ -62,16 +62,16 @@ async function sendOTA(otaUrl, config) {
                 version: 0,
                 uuid: '',
                 application: {
-                    name: 'xiaozhi-web-test',
+                    name: 'babymilu-special-web-console',
                     version: '1.0.0',
                     compile_time: '2025-04-16 10:00:00',
                     idf_version: '4.4.3',
                     elf_sha256: '1234567890abcdef1234567890abcdef1234567890abcdef'
                 },
-                ota: { label: 'xiaozhi-web-test' },
+                ota: { label: 'babymilu-special-web-console' },
                 board: {
-                    type: 'xiaozhi-web-test',
-                    ssid: 'xiaozhi-web-test',
+                    type: 'babymilu-special-web-console',
+                    ssid: 'babymilu-special-web-console',
                     rssi: 0,
                     channel: 0,
                     ip: '192.168.1.1',
@@ -96,8 +96,6 @@ async function sendOTA(otaUrl, config) {
         return false; // 失败
     }
 }
-
-
 
 
 

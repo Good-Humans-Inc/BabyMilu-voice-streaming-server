@@ -14,10 +14,10 @@ let visualizerCanvas = document.getElementById('audioVisualizer');
 // ota 是否连接成功，修改成对应的样式
 export function otaStatusStyle (flan) {
     if(flan){
-        document.getElementById('otaStatus').textContent = 'ota已连接';
+        document.getElementById('otaStatus').textContent = 'connected';
         document.getElementById('otaStatus').style.color = 'green';
     }else{
-        document.getElementById('otaStatus').textContent = 'ota未连接';
+        document.getElementById('otaStatus').textContent = 'offline';
         document.getElementById('otaStatus').style.color = 'red';
     }
 }
@@ -46,4 +46,3 @@ export function addMessage(text, isUser = false) {
     conversationDiv.appendChild(messageDiv);
     conversationDiv.scrollTop = conversationDiv.scrollHeight;
 }
-

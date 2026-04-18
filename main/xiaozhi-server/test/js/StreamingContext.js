@@ -57,10 +57,10 @@ export class StreamingContext {
     // 将Opus数据解码为PCM
     async decodeOpusFrames() {
         if (!this.opusDecoder) {
-            log('Opus解码器未初始化，无法解码', 'error');
+            log('Opus decoder is not initialized, so decoding cannot start', 'error');
             return;
         } else {
-            log('Opus解码器启动', 'info');
+            log('Opus decoder started', 'info');
         }
 
         while (true) {
@@ -78,7 +78,7 @@ export class StreamingContext {
                         }
                     }
                 } catch (error) {
-                    log("Opus解码失败: " + error.message, 'error');
+                    log("Opus decoding failed: " + error.message, 'error');
                 }
             }
 
@@ -89,7 +89,7 @@ export class StreamingContext {
                 }
                 this.totalSamples += decodedSamples.length;
             } else {
-                log('没有成功解码的样本', 'warning');
+                log('No decodable samples were produced', 'warning');
             }
             await this.getPendingAudioBufferQueue();
         }
@@ -135,7 +135,7 @@ export class StreamingContext {
                 gainNode.connect(this.audioContext.destination);
 
                 this.lastPlayTime = this.audioContext.currentTime;
-                log(`开始播放 ${currentSamples.length} 个样本，约 ${(currentSamples.length / this.sampleRate).toFixed(2)} 秒`, 'info');
+                log(`Starting playback for ${currentSamples.length} samples, about ${(currentSamples.length / this.sampleRate).toFixed(2)} seconds`, 'info');
                 this.source.start();
             }
             await this.getQueue(minSamples);
