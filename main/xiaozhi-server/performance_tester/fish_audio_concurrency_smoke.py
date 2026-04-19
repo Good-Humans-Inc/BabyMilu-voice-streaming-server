@@ -1,15 +1,17 @@
 import argparse
 import asyncio
 import json
+import queue
 import statistics
+import threading
 import time
+import traceback
+from types import SimpleNamespace
 from typing import Any, Dict, List
 
-import aiohttp
-import ormsgpack
-
 from config.settings import load_config
-from core.providers.tts.fishspeech import ServeTTSRequest
+from core.providers.tts.dto.dto import SentenceType
+from core.providers.tts.fish_audio import TTSProvider, close_shared_resources
 
 
 DEFAULT_PROMPTS = [
@@ -46,68 +48,46 @@ async def _run_one(
     idx: int,
     prompt_name: str,
     text: str,
-    api_url: str,
-    api_key: str,
     reference_id: str,
-    chunk_length: int,
-    normalize: bool,
-    top_p: float,
-    temperature: float,
-    repetition_penalty: float,
-    session: aiohttp.ClientSession,
+    provider_config: Dict[str, Any],
     stagger_ms: int,
 ) -> Dict[str, Any]:
     if stagger_ms > 0:
         await asyncio.sleep(((idx - 1) * stagger_ms) / 1000)
 
-    request_data = ServeTTSRequest(
-        text=text,
-        reference_id=reference_id,
-        format="pcm",
-        normalize=normalize,
-        chunk_length=chunk_length,
-        top_p=top_p,
-        temperature=temperature,
-        repetition_penalty=repetition_penalty,
-        streaming=True,
+    started = time.perf_counter()
+    first_audio_ms = None
+    total_bytes = 0
+    opus_packet_count = 0
+    sentence_start_count = 0
+
+    provider = TTSProvider(dict(provider_config), delete_audio_file=True)
+    provider.conn = SimpleNamespace(
+        stop_event=threading.Event(),
+        client_abort=False,
+        voice_id=reference_id,
     )
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/msgpack",
-    }
-
-    started = time.perf_counter()
-    first_chunk_ms = None
-    total_bytes = 0
-    chunk_count = 0
-
     try:
-        async with session.post(
-            api_url,
-            data=ormsgpack.packb(
-                request_data, option=ormsgpack.OPT_SERIALIZE_PYDANTIC
-            ),
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=90),
-        ) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                return {
-                    "worker": idx,
-                    "user": prompt_name,
-                    "status": resp.status,
-                    "ok": False,
-                    "error": body[:300],
-                }
+        await provider.text_to_speak(text)
 
-            async for chunk in resp.content.iter_chunked(4096):
-                if not chunk:
-                    continue
-                if first_chunk_ms is None:
-                    first_chunk_ms = (time.perf_counter() - started) * 1000
-                total_bytes += len(chunk)
-                chunk_count += 1
+        while True:
+            try:
+                sentence_type, payload, _segment_text = provider.tts_audio_queue.get_nowait()
+            except queue.Empty:
+                break
+            if sentence_type == SentenceType.FIRST:
+                sentence_start_count += 1
+            elif sentence_type == SentenceType.MIDDLE and isinstance(
+                payload, (bytes, bytearray)
+            ):
+                if first_audio_ms is None:
+                    first_audio_ms = (time.perf_counter() - started) * 1000
+                total_bytes += len(payload)
+                opus_packet_count += 1
+
+        if opus_packet_count == 0 or total_bytes == 0:
+            raise RuntimeError("No Opus audio packets were produced")
 
         total_ms = (time.perf_counter() - started) * 1000
         return {
@@ -115,19 +95,29 @@ async def _run_one(
             "user": prompt_name,
             "status": 200,
             "ok": True,
-            "first_chunk_ms": round(first_chunk_ms or total_ms, 1),
+            "first_chunk_ms": round(first_audio_ms or total_ms, 1),
             "total_ms": round(total_ms, 1),
-            "chunk_count": chunk_count,
+            "chunk_count": opus_packet_count,
             "bytes": total_bytes,
+            "sentence_starts": sentence_start_count,
         }
     except Exception as exc:
+        status = None
+        exc_text = str(exc)
+        if "429" in exc_text:
+            status = 429
+        if not exc_text:
+            exc_text = f"{type(exc).__name__}: {repr(exc)}"
         return {
             "worker": idx,
             "user": prompt_name,
-            "status": None,
+            "status": status,
             "ok": False,
-            "error": str(exc),
+            "error": exc_text,
+            "traceback": traceback.format_exc(limit=5),
         }
+    finally:
+        await provider.close()
 
 
 async def main() -> None:
@@ -143,36 +133,34 @@ async def main() -> None:
     config = load_config()
     fish_config = (config.get("TTS") or {}).get("FishAudio") or {}
 
-    api_url = args.api_url or fish_config.get("api_url", "https://api.fish.audio/v1/tts")
     api_key = args.api_key or fish_config.get("api_key")
     if not api_key:
         raise ValueError("Missing Fish Audio api_key")
+
+    provider_config = dict(fish_config)
+    if args.api_url:
+        provider_config["api_url"] = args.api_url
+    if args.api_key:
+        provider_config["api_key"] = args.api_key
+    provider_config["reference_id"] = args.reference_id
 
     prompts: List[tuple[str, str]] = []
     for index in range(args.count):
         name, text = DEFAULT_PROMPTS[index % len(DEFAULT_PROMPTS)]
         prompts.append((f"{name}-{index + 1}", f"{args.text_prefix}{text}"))
 
-    async with aiohttp.ClientSession() as session:
-        tasks = [
-            _run_one(
-                idx=index + 1,
-                prompt_name=name,
-                text=text,
-                api_url=api_url,
-                api_key=api_key,
-                reference_id=args.reference_id,
-                chunk_length=int(fish_config.get("chunk_length", 100)),
-                normalize=bool(fish_config.get("normalize", True)),
-                top_p=float(fish_config.get("top_p", 0.7)),
-                temperature=float(fish_config.get("temperature", 0.7)),
-                repetition_penalty=float(fish_config.get("repetition_penalty", 1.2)),
-                session=session,
-                stagger_ms=args.stagger_ms,
-            )
-            for index, (name, text) in enumerate(prompts)
-        ]
-        results = await asyncio.gather(*tasks)
+    tasks = [
+        _run_one(
+            idx=index + 1,
+            prompt_name=name,
+            text=text,
+            reference_id=args.reference_id,
+            provider_config=provider_config,
+            stagger_ms=args.stagger_ms,
+        )
+        for index, (name, text) in enumerate(prompts)
+    ]
+    results = await asyncio.gather(*tasks)
 
     ok_results = [result for result in results if result.get("ok")]
     first_chunk_values = [result["first_chunk_ms"] for result in ok_results]
@@ -203,6 +191,7 @@ async def main() -> None:
     }
 
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+    await close_shared_resources()
 
 
 if __name__ == "__main__":

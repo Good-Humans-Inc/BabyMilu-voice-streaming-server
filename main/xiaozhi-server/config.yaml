@@ -700,6 +700,11 @@ TTS:
     top_p: 0.7
     temperature: 0.7
     repetition_penalty: 1.2
+    max_concurrent_requests: 3
+    retry_429_attempts: 1
+    retry_429_backoff_ms: 500
+    connect_timeout_seconds: 8
+    total_timeout_seconds: 60
   GPT_SOVITS_V2:
     # 定义TTS API类型
     #启动tts方法：

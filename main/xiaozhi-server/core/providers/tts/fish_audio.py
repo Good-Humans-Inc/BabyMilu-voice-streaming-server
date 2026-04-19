@@ -1,6 +1,8 @@
 import asyncio
 import os
 import queue
+import threading
+import time
 import traceback
 
 import aiohttp
@@ -19,6 +21,75 @@ logger = setup_logging()
 
 FISH_AUDIO_SAMPLE_RATE = 44100
 OPUS_SAMPLE_RATE = 16000
+DEFAULT_MAX_CONCURRENT_REQUESTS = 3
+DEFAULT_RETRY_429_ATTEMPTS = 1
+DEFAULT_RETRY_429_BACKOFF_MS = 500
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 8
+DEFAULT_TOTAL_TIMEOUT_SECONDS = 60
+
+_REQUEST_LIMITER = None
+_REQUEST_LIMITER_CAPACITY = None
+_REQUEST_LIMITER_LOCK = threading.Lock()
+_SHARED_CONNECTORS = {}
+_SHARED_CONNECTORS_LOCK = threading.Lock()
+
+
+class _FishRequestLimiter:
+    def __init__(self, capacity: int):
+        self.capacity = capacity
+        self._semaphore = threading.BoundedSemaphore(capacity)
+        self._lock = threading.Lock()
+        self._in_flight = 0
+
+    def acquire(self):
+        started = time.perf_counter()
+        self._semaphore.acquire()
+        wait_ms = (time.perf_counter() - started) * 1000
+        with self._lock:
+            self._in_flight += 1
+            in_flight = self._in_flight
+        return wait_ms, in_flight
+
+    def release(self):
+        with self._lock:
+            self._in_flight -= 1
+            in_flight = self._in_flight
+        self._semaphore.release()
+        return in_flight
+
+
+def _get_request_limiter(capacity: int):
+    global _REQUEST_LIMITER, _REQUEST_LIMITER_CAPACITY
+    with _REQUEST_LIMITER_LOCK:
+        if _REQUEST_LIMITER is None or _REQUEST_LIMITER_CAPACITY != capacity:
+            _REQUEST_LIMITER = _FishRequestLimiter(capacity)
+            _REQUEST_LIMITER_CAPACITY = capacity
+        return _REQUEST_LIMITER
+
+
+def _get_shared_connector():
+    loop = asyncio.get_running_loop()
+    with _SHARED_CONNECTORS_LOCK:
+        connector = _SHARED_CONNECTORS.get(loop)
+        if connector is None or connector.closed:
+            connector = aiohttp.TCPConnector(
+                limit=0,
+                ttl_dns_cache=300,
+                use_dns_cache=True,
+            )
+            _SHARED_CONNECTORS[loop] = connector
+        return connector
+
+
+async def close_shared_resources():
+    with _SHARED_CONNECTORS_LOCK:
+        connectors = list(_SHARED_CONNECTORS.values())
+        _SHARED_CONNECTORS.clear()
+
+    for connector in connectors:
+        close_result = connector.close()
+        if asyncio.iscoroutine(close_result):
+            await close_result
 
 
 class _StreamingPcmResampler:
@@ -96,6 +167,35 @@ class TTSProvider(TTSProviderBase):
         self.repetition_penalty = (
             float(repetition_penalty) if repetition_penalty else 1.2
         )
+        self.max_concurrent_requests = max(
+            1,
+            int(
+                config.get(
+                    "max_concurrent_requests", DEFAULT_MAX_CONCURRENT_REQUESTS
+                )
+            ),
+        )
+        self.retry_429_attempts = max(
+            0,
+            int(config.get("retry_429_attempts", DEFAULT_RETRY_429_ATTEMPTS)),
+        )
+        self.retry_429_backoff_ms = max(
+            0,
+            int(config.get("retry_429_backoff_ms", DEFAULT_RETRY_429_BACKOFF_MS)),
+        )
+        self.connect_timeout_seconds = max(
+            1,
+            int(
+                config.get(
+                    "connect_timeout_seconds", DEFAULT_CONNECT_TIMEOUT_SECONDS
+                )
+            ),
+        )
+        self.total_timeout_seconds = max(
+            self.connect_timeout_seconds,
+            int(config.get("total_timeout_seconds", DEFAULT_TOTAL_TIMEOUT_SECONDS)),
+        )
+        self.request_limiter = _get_request_limiter(self.max_concurrent_requests)
 
         model_key_msg = check_model_key("FishAudio TTS", self.api_key)
         if model_key_msg:
@@ -209,44 +309,101 @@ class TTSProvider(TTSProviderBase):
         self.resampler.reset()
         pcm_carry = b""
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                self.api_url,
-                data=ormsgpack.packb(
-                    request_data, option=ormsgpack.OPT_SERIALIZE_PYDANTIC
-                ),
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as resp:
-                if resp.status != 200:
-                    body = await resp.text()
-                    raise Exception(f"Fish Audio TTS failed: {resp.status} - {body}")
+        max_attempts = self.retry_429_attempts + 1
+        last_error = None
+        timeout = aiohttp.ClientTimeout(
+            total=self.total_timeout_seconds,
+            connect=self.connect_timeout_seconds,
+            sock_connect=self.connect_timeout_seconds,
+        )
 
-                self.tts_audio_queue.put((SentenceType.FIRST, [], text))
+        for attempt in range(1, max_attempts + 1):
+            wait_ms, in_flight = await asyncio.to_thread(self.request_limiter.acquire)
+            if wait_ms >= 25:
+                logger.bind(tag=TAG).info(
+                    f"Fish Audio request queued for {wait_ms:.1f}ms "
+                    f"(attempt {attempt}/{max_attempts}, in_flight={in_flight}/{self.max_concurrent_requests})"
+                )
 
-                async for chunk in resp.content.iter_chunked(4096):
-                    if self.conn and self.conn.client_abort:
-                        logger.bind(tag=TAG).info("TTS interrupted by client")
-                        return
-                    if not chunk:
-                        continue
+            try:
+                async with aiohttp.ClientSession(
+                    connector=_get_shared_connector(),
+                    connector_owner=False,
+                    timeout=timeout,
+                ) as session:
+                    async with session.post(
+                        self.api_url,
+                        data=ormsgpack.packb(
+                            request_data, option=ormsgpack.OPT_SERIALIZE_PYDANTIC
+                        ),
+                        headers=headers,
+                    ) as resp:
+                        if resp.status == 429 and attempt < max_attempts:
+                            body = await resp.text()
+                            last_error = Exception(
+                                f"Fish Audio TTS failed: {resp.status} - {body}"
+                            )
+                            backoff_ms = self.retry_429_backoff_ms * attempt
+                            logger.bind(tag=TAG).warning(
+                                f"Fish Audio rate limited on attempt {attempt}/{max_attempts}; "
+                                f"retrying in {backoff_ms}ms"
+                            )
+                            if backoff_ms > 0:
+                                await asyncio.sleep(backoff_ms / 1000)
+                            continue
 
-                    chunk = pcm_carry + chunk
-                    if len(chunk) % 2:
-                        pcm_carry = chunk[-1:]
-                        chunk = chunk[:-1]
-                    else:
-                        pcm_carry = b""
+                        if resp.status != 200:
+                            body = await resp.text()
+                            raise Exception(f"Fish Audio TTS failed: {resp.status} - {body}")
 
-                    resampled = self.resampler.process(chunk)
-                    if not resampled:
-                        continue
+                        self.tts_audio_queue.put((SentenceType.FIRST, [], text))
 
-                    self.opus_encoder.encode_pcm_to_opus_stream(
-                        resampled,
-                        end_of_stream=False,
-                        callback=self.handle_opus,
+                        async for chunk in resp.content.iter_chunked(4096):
+                            if self.conn and self.conn.client_abort:
+                                logger.bind(tag=TAG).info("TTS interrupted by client")
+                                return
+                            if not chunk:
+                                continue
+
+                            chunk = pcm_carry + chunk
+                            if len(chunk) % 2:
+                                pcm_carry = chunk[-1:]
+                                chunk = chunk[:-1]
+                            else:
+                                pcm_carry = b""
+
+                            resampled = self.resampler.process(chunk)
+                            if not resampled:
+                                continue
+
+                            self.opus_encoder.encode_pcm_to_opus_stream(
+                                resampled,
+                                end_of_stream=False,
+                                callback=self.handle_opus,
+                            )
+                        break
+            except Exception as exc:
+                last_error = exc
+                should_retry = "429" in str(exc) or isinstance(
+                    exc, (asyncio.TimeoutError, aiohttp.ClientConnectionError)
+                )
+                if should_retry and attempt < max_attempts:
+                    backoff_ms = self.retry_429_backoff_ms * attempt
+                    logger.bind(tag=TAG).warning(
+                        f"Fish Audio retrying after exception on attempt {attempt}/{max_attempts}: {exc}"
                     )
+                    if backoff_ms > 0:
+                        await asyncio.sleep(backoff_ms / 1000)
+                    continue
+                raise
+            finally:
+                remaining_in_flight = self.request_limiter.release()
+                logger.bind(tag=TAG).debug(
+                    f"Fish Audio request finished (attempt {attempt}/{max_attempts}); "
+                    f"in_flight={remaining_in_flight}/{self.max_concurrent_requests}"
+                )
+        else:
+            raise last_error or Exception("Fish Audio TTS failed without a response")
 
         self.opus_encoder.encode_pcm_to_opus_stream(
             b"", end_of_stream=True, callback=self.handle_opus
