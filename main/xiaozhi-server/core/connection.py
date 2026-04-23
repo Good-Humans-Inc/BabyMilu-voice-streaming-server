@@ -51,6 +51,7 @@ from core.utils.firestore_client import (
     update_conversation_state_for_device,
     get_most_recent_character_via_user_for_device,
 )
+from core.utils.next_starter_client import get_ready_next_starter
 
 from services.session_context import store as session_context_store
 from services.alarms.config import MODE_CONFIG
@@ -203,6 +204,9 @@ class ConnectionHandler:
         self.sentence_id = None
         self.voice_id = None
         self.tts_MessageText = ""
+        self.active_character_id = None
+        self.next_starter_payload: Optional[Dict[str, Any]] = None
+        self.next_starter_scheduled = False
 
         # IOT/MCP
         self.iot_descriptors = {}
@@ -394,6 +398,7 @@ class ConnectionHandler:
                             )
                             char_id = fallback_id
                 if char_id:
+                    self.active_character_id = str(char_id)
                     self.logger.info(f"char_id={char_id!r}")
                     char_doc = get_character_profile(char_id)
                     self.logger.info(f"char_doc_keys={list((char_doc or {}).keys())}")
@@ -450,6 +455,16 @@ class ConnectionHandler:
                         self.change_system_prompt(new_prompt)
                         self.logger.bind(tag=TAG).info(
                             f"Applied character profile from Firestore, prompt={self.config.get('prompt')}"
+                        )
+                    try:
+                        self.next_starter_payload = get_ready_next_starter(self.active_character_id)
+                        if self.next_starter_payload:
+                            self.logger.bind(tag=TAG).info(
+                                f"Loaded ready next_starter for character_id={self.active_character_id}"
+                            )
+                    except Exception as starter_error:
+                        self.logger.bind(tag=TAG).warning(
+                            f"Failed to load next_starter for character_id={self.active_character_id}: {starter_error}"
                         )
                 else:
                     self.logger.bind(tag=TAG, device_id=self.device_id).error(
