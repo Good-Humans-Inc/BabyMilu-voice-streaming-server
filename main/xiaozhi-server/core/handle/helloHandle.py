@@ -4,10 +4,12 @@ import random
 import asyncio
 from core.utils.dialogue import Message
 from core.utils.util import audio_to_data
+from core.utils.util import audio_bytes_to_data
 from core.providers.tts.dto.dto import SentenceType
 from core.utils.wakeup_word import WakeupWordsConfig
 from core.handle.sendAudioHandle import sendAudioMessage, send_stt_message
 from core.utils.util import remove_punctuation_and_length, opus_datas_to_wav_bytes
+from core.utils.next_starter_client import fetch_next_starter_audio
 from core.providers.tools.device_mcp import (
     MCPClient,
     send_mcp_initialize_message,
@@ -32,6 +34,38 @@ async def _trigger_server_greeting(conn):
         conn.executor.submit(conn.chat, "", 0, None, False)
     else:
         conn.logger.bind(tag=TAG).warning("Cannot trigger greeting: llm_finish_task is False")
+
+
+async def _trigger_next_starter(conn):
+    """Wait for components init, then stream a pre-generated next_starter if available."""
+    try:
+        await asyncio.wait_for(conn.components_initialized.wait(), timeout=60.0)
+    except asyncio.TimeoutError:
+        conn.logger.bind(tag=TAG).warning("Components not initialized after 60s, cannot trigger next_starter")
+        conn.next_starter_scheduled = False
+        return
+
+    payload = getattr(conn, "next_starter_payload", None) or {}
+    audio_url = payload.get("audioUrl")
+    starter_text = payload.get("text") or ""
+    if not audio_url:
+        conn.next_starter_scheduled = False
+        return
+
+    try:
+        audio_bytes = await asyncio.to_thread(fetch_next_starter_audio, audio_url)
+        opus_packets = await asyncio.to_thread(audio_bytes_to_data, audio_bytes, "mp3", True)
+        await sendAudioMessage(conn, SentenceType.FIRST, opus_packets, starter_text)
+        await sendAudioMessage(conn, SentenceType.LAST, [], None)
+        if starter_text:
+            conn.dialogue.put(Message(role="assistant", content=starter_text))
+        conn.logger.bind(tag=TAG).info(
+            f"Played next_starter for character_id={getattr(conn, 'active_character_id', None)}"
+        )
+    except Exception as exc:
+        conn.logger.bind(tag=TAG).warning(f"Failed to play next_starter, falling back to existing flow: {exc}")
+    finally:
+        conn.next_starter_scheduled = False
 
 WAKEUP_CONFIG = {
     "refresh_time": 5,
@@ -66,7 +100,10 @@ async def handleHelloMessage(conn, msg_json):
             # 发送mcp消息，获取tools列表
             asyncio.create_task(send_mcp_tools_list_request(conn))
 
-    if getattr(conn, "server_initiate_chat", False) and not getattr(
+    if getattr(conn, "next_starter_payload", None) and not getattr(conn, "next_starter_scheduled", False):
+        conn.next_starter_scheduled = True
+        asyncio.create_task(_trigger_next_starter(conn))
+    elif getattr(conn, "server_initiate_chat", False) and not getattr(
         conn, "_server_greeting_scheduled", False
     ):
         conn._server_greeting_scheduled = True
