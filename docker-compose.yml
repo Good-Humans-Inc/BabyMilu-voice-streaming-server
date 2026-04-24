@@ -10,7 +10,7 @@ services:
     restart: unless-stopped
     volumes:
       - type: bind
-        source: ./mosquitto.conf
+        source: /srv/dev/current/mosquitto.conf
         target: /mosquitto/config/mosquitto.conf
         read_only: true
         bind:
@@ -18,7 +18,7 @@ services:
 
   server:
     build:
-      context: .
+      context: /srv/dev/current
       dockerfile: Dockerfile-server
 
     command: ["python", "app.py"]
@@ -29,6 +29,7 @@ services:
       GOOGLE_APPLICATION_CREDENTIALS: /opt/secrets/gcp/sa.json
       GOOGLE_CLOUD_PROJECT: composed-augury-469200-g6
       MQTT_ENDPOINT: 35.188.112.96
+      
       MQTT_URL: mqtt://mqtt:1883
       SERVER_EXTERNAL_IP: 35.188.112.96
       OTA_MANIFEST_URL: https://storage.googleapis.com/milu-public/OTA_MIAO/ota_manifest.json
@@ -40,6 +41,10 @@ services:
       SUPABASE_USERS_TABLE: ${SUPABASE_USERS_TABLE:-users}
       SUPABASE_SESSIONS_TABLE: ${SUPABASE_SESSIONS_TABLE:-sessions}
       SUPABASE_TURNS_TABLE: ${SUPABASE_TURNS_TABLE:-turns}
+      SUPABASE_MEMORY_READ_MODEL_TABLE: ${SUPABASE_MEMORY_READ_MODEL_TABLE:-memory_read_model}
+      NEXT_STARTER_FETCH_TIMEOUT_SECONDS: ${NEXT_STARTER_FETCH_TIMEOUT_SECONDS:-0.2}
+      NEXT_STARTER_DB_TIMEOUT_SECONDS: ${NEXT_STARTER_DB_TIMEOUT_SECONDS:-2.0}
+      NEXT_STARTER_MAX_AGE_DAYS: ${NEXT_STARTER_MAX_AGE_DAYS:-7}
       PYTHONUNBUFFERED: "1"
       TZ: America/Los_Angeles
 
@@ -52,23 +57,20 @@ services:
       default: null
 
     volumes:
-      # 1) Source code (so code changes apply without rebuild)
       - type: bind
-        source: ./main/xiaozhi-server
+        source: /srv/dev/current/main/xiaozhi-server
         target: /opt/xiaozhi-esp32-server
         bind:
           create_host_path: true
 
-      # 2) Runtime config & data
       - type: bind
-        source: ./data
+        source: /srv/dev/current/data
         target: /opt/xiaozhi-esp32-server/data
         bind:
           create_host_path: true
 
-      # 3) GCP Service Account
       - type: bind
-        source: ./data/.gcp/sa.json
+        source: /srv/dev/current/data/.gcp/sa.json
         target: /opt/secrets/gcp/sa.json
         read_only: true
         
