@@ -246,22 +246,30 @@ def test_finalize_wake_request_marks_reminder_complete(monkeypatch):
     )
     wake_request = scheduler.tasks.WakeRequest(alarm=reminder, target=target, session=fake_session)
 
-    completed = {}
-    mark_processed_called = False
+    apply_called: dict = {}
 
-    def fake_complete(alarm, *, last_processed):
-        completed["alarm_id"] = alarm.alarm_id
-        completed["last_processed"] = last_processed
+    def fake_apply(doc_path, channel, occurrence_utc, *, user_timezone, client=None):
+        apply_called["doc_path"] = doc_path
+        apply_called["channel"] = channel
+        apply_called["occurrence_utc"] = occurrence_utc
+        apply_called["user_timezone"] = user_timezone
+
+    mark_processed_called = False
 
     def fake_mark(*args, **kwargs):
         nonlocal mark_processed_called
         mark_processed_called = True
 
-    monkeypatch.setattr(scheduler.firestore_client, "mark_one_time_alarm_complete", fake_complete)
+    monkeypatch.setattr(
+        scheduler.firestore_client,
+        "reminder_apply_channel_delivered_and_maybe_advance",
+        fake_apply,
+    )
     monkeypatch.setattr(scheduler.firestore_client, "mark_alarm_processed", fake_mark)
 
     scheduler.finalize_wake_request(wake_request, now=datetime.now(timezone.utc))
 
-    assert completed["alarm_id"] == "reminder-004"
-    assert completed["last_processed"] == next_occurrence
-    assert mark_processed_called is False  # must NOT call recurring path
+    assert apply_called.get("doc_path", "").endswith("reminders/reminder-004")
+    assert apply_called.get("channel") == "plushie"
+    assert apply_called.get("occurrence_utc") == next_occurrence
+    assert mark_processed_called is False  # must NOT call alarm recurring path

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Set
 
 from services.logging import setup_logging
 from services.alarms import reminder_push_job, scheduler, tasks
@@ -134,6 +134,21 @@ def _parse_device_set(raw: str) -> set[str]:
     return tokens
 
 
+def _parse_phone_set(raw: str) -> Set[str]:
+    tokens: Set[str] = set()
+    for token in (raw or "").split(","):
+        token = token.strip()
+        if token:
+            tokens.add(token)
+    return tokens
+
+
+def _parse_phone_allowlist(raw: str) -> Optional[Set[str]]:
+    """Non-empty comma list → restrict reminder job to those user ids; else no filter."""
+    tokens = _parse_phone_set(raw)
+    return tokens if tokens else None
+
+
 def scan_due_scheduled_items(request) -> Dict[str, Any]:
     """
     Unified Cloud Scheduler entrypoint for alarms + reminders.
@@ -142,6 +157,13 @@ def scan_due_scheduled_items(request) -> Dict[str, Any]:
     by nextOccurrenceUTC <= now, Expo or FCM, sentLogs, then advance / turn off).
 
     Phase-1 default: REMINDER_EXECUTE=false dry-runs without sends or writes.
+
+    Optional ALLOW_PHONENUMBERS: comma-separated list of user ids (E.164
+    phone numbers as stored in Firestore). When non-empty, only those users'
+    reminders are considered; others are skipped with skipped=phone_filter.
+
+    Optional NOT_ALLOWED_PHONENUMBERS: comma-separated denylist of the same ids.
+    Deny is applied before the allowlist.
     """
     now = datetime.now(timezone.utc)
 
@@ -150,9 +172,17 @@ def scan_due_scheduled_items(request) -> Dict[str, Any]:
     include_reminders = _env_bool("INCLUDE_REMINDERS_IN_UNIFIED_SCAN", True)
     if include_reminders:
         reminders_execute = _env_bool("REMINDER_EXECUTE", False)
+        reminder_allow_phones = _parse_phone_allowlist(
+            os.environ.get("ALLOW_PHONENUMBERS", "")
+        )
+        reminder_deny_phones = _parse_phone_set(
+            os.environ.get("NOT_ALLOWED_PHONENUMBERS", "")
+        )
         reminders_result = reminder_push_job.run_send_reminder_push_job(
             execute=reminders_execute,
             now=now,
+            allow_phonenumbers=reminder_allow_phones,
+            not_allowed_phonenumbers=reminder_deny_phones,
         )
     else:
         reminders_result = {

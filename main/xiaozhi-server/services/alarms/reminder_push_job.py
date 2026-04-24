@@ -9,7 +9,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import AbstractSet, Any, Dict, List, Optional
 
 from google.cloud import firestore
 from google.cloud.firestore_v1 import FieldFilter
@@ -22,7 +22,7 @@ from exponent_server_sdk import (
 
 from openai import APIError, OpenAI
 
-from services.alarms import reminder_advancement
+from services.alarms import firestore_client
 from services.logging import setup_logging
 
 TAG = __name__
@@ -224,17 +224,13 @@ def _resolve_uid_from_reminder_doc(
     return str(uid).strip() if uid else ""
 
 
-def _format_occurrence_iso(dt: datetime) -> str:
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
 def run_send_reminder_push_job(
     *,
     execute: bool = False,
     now: Optional[datetime] = None,
     client: Optional[firestore.Client] = None,
+    allow_phonenumbers: Optional[AbstractSet[str]] = None,
+    not_allowed_phonenumbers: AbstractSet[str] = frozenset(),
 ) -> Dict[str, Any]:
     """
     Port of sendReminderPush: query due reminders, optional Expo/FCM send,
@@ -266,13 +262,25 @@ def run_send_reminder_push_job(
             reminder_data = reminder_doc.to_dict() or {}
             
             uid = _resolve_uid_from_reminder_doc(reminder_doc, reminder_data)
-            if not uid or uid == "+14444444444":
+            if uid in not_allowed_phonenumbers:
                 skipped += 1
                 results.append(
                     {
                         "reminderId": reminder_id,
+                        "userId": uid,
                         "processed": False,
-                        "skipped": "no_uid",
+                        "skipped": "not_allowed_phone",
+                    }
+                )
+                continue
+            if allow_phonenumbers is not None and uid not in allow_phonenumbers:
+                skipped += 1
+                results.append(
+                    {
+                        "reminderId": reminder_id,
+                        "userId": uid,
+                        "processed": False,
+                        "skipped": "phone_filter",
                     }
                 )
                 continue
@@ -314,6 +322,30 @@ def run_send_reminder_push_job(
                     }
                 )
                 continue
+
+            next_iso = reminder_data.get("nextOccurrenceUTC")
+            if next_iso:
+                try:
+                    due_for_skip = datetime.fromisoformat(
+                        str(next_iso).replace("Z", "+00:00")
+                    )
+                    if due_for_skip.tzinfo is None:
+                        due_for_skip = due_for_skip.replace(tzinfo=timezone.utc)
+                except Exception:
+                    due_for_skip = None
+                if due_for_skip and firestore_client.reminder_app_already_recorded_for_occurrence(
+                    reminder_data, due_for_skip
+                ):
+                    skipped += 1
+                    results.append(
+                        {
+                            "reminderId": reminder_id,
+                            "userId": uid,
+                            "processed": False,
+                            "skipped": "app_already_recorded_for_occurrence",
+                        }
+                    )
+                    continue
 
             character_ids = user_data.get("characterIds") or []
             character_data: Dict[str, Any] = {}
@@ -508,41 +540,14 @@ def run_send_reminder_push_job(
                     )
                     if due.tzinfo is None:
                         due = due.replace(tzinfo=timezone.utc)
-                    repeat = reminder_data.get("schedule", {}).get("repeat")
-                    reminder_ref = reminder_doc.reference
-                    if repeat == "none":
-                        reminder_ref.update(
-                            {"status": "off", "updatedAt": now_iso}
-                        )
-                    else:
-                        user_timezone = user_data.get(
-                            "timezone", "America/Los_Angeles"
-                        )
-                        advanced = reminder_advancement.compute_advance_after_firing(
-                            reminder_data,
-                            str(user_timezone),
-                            due_occurrence_utc=due,
-                            now_utc=now,
-                        )
-                        if advanced is None:
-                            logger.bind(tag=TAG).warning(
-                                f"Could not advance recurring reminder {reminder_id}"
-                            )
-                        else:
-                            next_occ, next_trig = advanced
-                            reminder_ref.update(
-                                {
-                                    "nextOccurrenceUTC": _format_occurrence_iso(
-                                        next_occ
-                                    ),
-                                    "nextTriggerUTC": _format_occurrence_iso(
-                                        next_trig
-                                    ),
-                                    "updatedAt": now_iso,
-                                    "lastAction": None,
-                                    "lastActionAt": None,
-                                }
-                            )
+                    user_timezone = user_data.get("timezone", "America/Los_Angeles")
+                    firestore_client.reminder_apply_channel_delivered_and_maybe_advance(
+                        reminder_doc.reference.path,
+                        "app",
+                        due,
+                        user_timezone=str(user_timezone),
+                        client=client,
+                    )
                 except Exception as reschedule_error:
                     logger.bind(tag=TAG).warning(
                         f"Reminder update failed {reminder_id}: {reschedule_error}"

@@ -12,9 +12,15 @@ from google.cloud.firestore_v1 import FieldFilter
 from config.settings import get_gcp_credentials_path
 from services.logging import setup_logging
 from core.utils.mac import normalize_mac
-from services.alarms import models
+from services.alarms import models, reminder_advancement
 
 TAG = __name__
+
+# Filled when a channel has finished delivery for the current nextOccurrenceUTC;
+# advance/off only after both are set to the same canonical occurrence when
+# deliveryChannel includes both "plushie" and "app".
+FIELD_PLUSHIE_DELIVERED = "plushieDeliveredForOccurrenceUTC"
+FIELD_APP_DELIVERED = "appPushDeliveredForOccurrenceUTC"
 logger = setup_logging()
 
 _REPEAT_ALIASES = {
@@ -520,6 +526,189 @@ def fetch_due_reminders(
 
     logger.bind(tag=TAG).info(f"Fetched {len(docs)} due reminders")
     return docs
+
+
+def _canon_next_occurrence_str(value: object) -> Optional[str]:
+    """Normalize Firestore/ISO nextOccurrence strings for reliable equality."""
+    if value is None:
+        return None
+    dt = _parse_datetime(
+        value if isinstance(value, (str, datetime)) else str(value)
+    )
+    if dt is None:
+        return None
+    return _format_datetime(dt)
+
+
+def _delivery_channel_list(data: Dict[str, Any]) -> List[str]:
+    raw = data.get("deliveryChannel")
+    if not raw:
+        return ["plushie"]
+    if not isinstance(raw, list):
+        return ["plushie"]
+    return [str(x) for x in raw]
+
+
+def reminder_both_channels_pending(data: Dict[str, Any]) -> bool:
+    ch = _delivery_channel_list(data)
+    return "plushie" in ch and "app" in ch
+
+
+def reminder_plushie_already_recorded_for_occurrence(
+    data: Dict[str, Any], next_occurrence_utc: datetime
+) -> bool:
+    """Plushie path already finalized for this nextOccurrence; skip re-wake."""
+    if not reminder_both_channels_pending(data):
+        return False
+    want = _canon_next_occurrence_str(next_occurrence_utc)
+    got = _canon_next_occurrence_str(data.get(FIELD_PLUSHIE_DELIVERED))
+    return bool(want and got and want == got)
+
+
+def reminder_app_already_recorded_for_occurrence(
+    data: Dict[str, Any], next_occurrence_utc: datetime
+) -> bool:
+    """App push path already applied for this nextOccurrence; skip duplicate send."""
+    want = _canon_next_occurrence_str(next_occurrence_utc)
+    got = _canon_next_occurrence_str(data.get(FIELD_APP_DELIVERED))
+    return bool(want and got and want == got)
+
+
+def reminder_apply_channel_delivered_and_maybe_advance(
+    doc_path: str,
+    channel: str,
+    occurrence_utc: datetime,
+    *,
+    user_timezone: str,
+    client: Optional[firestore.Client] = None,
+) -> None:
+    """
+    Mark plushie or app as delivered for the current nextOccurrence. If the
+    reminder is configured for a single channel, advance/turn off immediately.
+    If both "plushie" and "app" are in deliveryChannel, only advance/turn off
+    when both have recorded the same canonical occurrence.
+    """
+    if channel not in ("plushie", "app"):
+        raise ValueError(f"Invalid channel: {channel}")
+    client = client or _build_client()
+    doc_ref = client.document(doc_path)
+    snap = doc_ref.get()
+    if not snap.exists:
+        logger.bind(tag=TAG).warning(
+            f"reminder_apply_channel: missing doc {doc_path}"
+        )
+        return
+    data: Dict[str, Any] = dict(snap.to_dict() or {})
+    n_raw = data.get("nextOccurrenceUTC")
+    n_dt = _parse_datetime(
+        n_raw if isinstance(n_raw, (str, datetime)) else str(n_raw)
+    )
+    if n_dt is None:
+        logger.bind(tag=TAG).warning(
+            f"reminder_apply_channel: no nextOccurrenceUTC in {doc_path}"
+        )
+        return
+    n_key = _canon_next_occurrence_str(n_raw)
+    occ_key = _canon_next_occurrence_str(occurrence_utc)
+    if n_key is None or occ_key is None or n_key != occ_key:
+        logger.bind(tag=TAG).info(
+            f"reminder_apply_channel: occurrence mismatch, skip (doc {doc_path})"
+        )
+        return
+
+    ch = _delivery_channel_list(data)
+    has_p = "plushie" in ch
+    has_a = "app" in ch
+    wants_both = has_p and has_a
+
+    p_done = _canon_next_occurrence_str(data.get(FIELD_PLUSHIE_DELIVERED))
+    a_done = _canon_next_occurrence_str(data.get(FIELD_APP_DELIVERED))
+    if channel == "plushie":
+        p_done = n_key
+    else:
+        a_done = n_key
+
+    should_advance = False
+    if wants_both:
+        should_advance = p_done == n_key and a_done == n_key
+    elif has_p and not has_a:
+        should_advance = channel == "plushie"
+    elif has_a and not has_p:
+        should_advance = channel == "app"
+    else:
+        should_advance = False
+
+    now = datetime.now(timezone.utc)
+    now_iso = _format_datetime(now)
+
+    if not should_advance:
+        upd: Dict[str, Any] = {
+            (FIELD_PLUSHIE_DELIVERED if channel == "plushie" else FIELD_APP_DELIVERED): n_key,
+            "updatedAt": now_iso,
+        }
+        doc_ref.set(upd, merge=True)
+        logger.bind(tag=TAG).info(
+            f"Reminder {doc_path}: channel={channel} recorded for {n_key}; "
+            f"not advancing (both pending={wants_both})"
+        )
+        return
+
+    schedule = data.get("schedule")
+    if not isinstance(schedule, dict):
+        logger.bind(tag=TAG).warning("reminder advance: bad schedule; skip")
+        return
+    repeat = str(schedule.get("repeat", "")).lower()
+
+    if repeat in ("", "none", "once", "one_time", "one-time", "no_repeat"):
+        doc_ref.set(
+            {
+                "status": models.AlarmStatus.OFF.value,
+                "lastProcessedUTC": n_key,
+                FIELD_PLUSHIE_DELIVERED: None,
+                FIELD_APP_DELIVERED: None,
+                "updatedAt": now_iso,
+            },
+            merge=True,
+        )
+        logger.bind(tag=TAG).info(
+            f"One-time reminder {doc_path} completed after channel={channel} "
+            f"(both channels as required)"
+        )
+        return
+
+    tz = (user_timezone or "America/Los_Angeles").strip() or "America/Los_Angeles"
+    n_dt_aware = n_dt
+    if n_dt_aware.tzinfo is None:
+        n_dt_aware = n_dt_aware.replace(tzinfo=timezone.utc)
+    advanced = reminder_advancement.compute_advance_after_firing(
+        data,
+        tz,
+        due_occurrence_utc=n_dt_aware,
+        now_utc=now,
+    )
+    if advanced is None:
+        logger.bind(tag=TAG).warning(
+            f"reminder advance: compute_advance failed for {doc_path}"
+        )
+        return
+    next_occ, next_trig = advanced
+    doc_ref.set(
+        {
+            "nextOccurrenceUTC": _format_datetime(next_occ),
+            "nextTriggerUTC": _format_datetime(next_trig),
+            "lastProcessedUTC": n_key,
+            FIELD_PLUSHIE_DELIVERED: None,
+            FIELD_APP_DELIVERED: None,
+            "lastAction": None,
+            "lastActionAt": None,
+            "updatedAt": now_iso,
+        },
+        merge=True,
+    )
+    logger.bind(tag=TAG).info(
+        f"Recurring reminder {doc_path} advanced after both channels; "
+        f"next nextOccurrenceUTC={_format_datetime(next_occ)}"
+    )
 
 
 def mark_one_time_alarm_complete(

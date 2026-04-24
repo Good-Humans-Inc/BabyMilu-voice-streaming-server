@@ -199,10 +199,19 @@ def test_scan_due_scheduled_items_combines_alarm_and_reminder_results(monkeypatc
     )
     captured = {}
 
-    def fake_run_send_reminder_push_job(*, execute=False, now=None, client=None):
+    def fake_run_send_reminder_push_job(
+        *,
+        execute=False,
+        now=None,
+        client=None,
+        allow_phonenumbers=None,
+        not_allowed_phonenumbers=frozenset(),
+    ):
         captured["execute"] = execute
         captured["now"] = now
         captured["client"] = client
+        captured["allow_phonenumbers"] = allow_phonenumbers
+        captured["not_allowed_phonenumbers"] = not_allowed_phonenumbers
         return {
             "ok": True,
             "count": 3,
@@ -230,6 +239,15 @@ def test_scan_due_scheduled_items_combines_alarm_and_reminder_results(monkeypatc
     assert response["totals"]["triggered"] == 3
     assert captured["execute"] is False
     assert captured["now"] is not None
+    assert captured["allow_phonenumbers"] is None
+    assert captured["not_allowed_phonenumbers"] == set()
+
+    monkeypatch.setenv("ALLOW_PHONENUMBERS", "+1000,+1001")
+    monkeypatch.setenv("NOT_ALLOWED_PHONENUMBERS", "+1999")
+    response2 = cloud_functions.scan_due_scheduled_items(request={})  # type: ignore[arg-type]
+    assert response2["ok"] is True
+    assert captured["allow_phonenumbers"] == {"+1000", "+1001"}
+    assert captured["not_allowed_phonenumbers"] == {"+1999"}
 
 
 def test_scan_due_scheduled_items_can_disable_reminders(monkeypatch):

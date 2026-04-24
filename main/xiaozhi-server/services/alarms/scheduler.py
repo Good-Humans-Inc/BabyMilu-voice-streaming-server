@@ -33,6 +33,19 @@ def prepare_wake_requests(
                 f"Alarm {alarm.alarm_id} missing next_occurrence_utc; skipping"
             )
             continue
+        raw = alarm.raw or {}
+        if (
+            alarm.doc_path
+            and "/reminders/" in alarm.doc_path
+            and firestore_client.reminder_plushie_already_recorded_for_occurrence(
+                raw, alarm.next_occurrence_utc
+            )
+        ):
+            logger.bind(tag=TAG).info(
+                f"Skipping reminder {alarm.alarm_id}: plushie already delivered for "
+                f"{alarm.next_occurrence_utc.isoformat()}; wait for app channel"
+            )
+            continue
         if (
             alarm.last_processed_utc
             and alarm.last_processed_utc >= alarm.next_occurrence_utc
@@ -85,11 +98,34 @@ def prepare_wake_requests(
     return wake_requests
 
 
+def _reminder_user_timezone_for_finalize(alarm: models.AlarmDoc) -> str:
+    raw = alarm.raw or {}
+    u = raw.get("user")
+    if isinstance(u, dict) and u.get("timezone"):
+        return str(u["timezone"])
+    t = raw.get("timezone")
+    if t:
+        return str(t)
+    return "America/Los_Angeles"
+
+
 def finalize_wake_request(
     wake_request: tasks.WakeRequest, *, now: Optional[datetime] = None
 ) -> None:
     """Advance/complete alarm only after wake publish succeeds."""
     alarm = wake_request.alarm
+    if (
+        alarm.doc_path
+        and "/reminders/" in (alarm.doc_path or "")
+    ):
+        tz = _reminder_user_timezone_for_finalize(alarm)
+        firestore_client.reminder_apply_channel_delivered_and_maybe_advance(
+            alarm.doc_path,
+            "plushie",
+            alarm.next_occurrence_utc,
+            user_timezone=tz,
+        )
+        return
     if alarm.schedule.repeat == models.AlarmRepeat.NONE:
         firestore_client.mark_one_time_alarm_complete(
             alarm,

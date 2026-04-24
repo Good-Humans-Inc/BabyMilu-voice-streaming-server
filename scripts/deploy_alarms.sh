@@ -3,7 +3,7 @@ set -e
 
 # Usage check
 if [ -z "$1" ]; then
-    echo "❌ Usage: ./deploy_alarms.sh [dev|staging|prod]"
+    echo "❌ Usage: ./deploy_alarms.sh [dev|test|staging|prod]"
     exit 1
 fi
 
@@ -18,6 +18,10 @@ REGION="us-central1"
 
 # Environment-specific configuration
 case "$ENV" in
+    test)
+        FUNCTION_NAME="scan-due-alarms-test"
+        ENV_FILE="env.test.yaml"
+        ;;
     dev)
         FUNCTION_NAME="scan-due-alarms-dev"
         ENV_FILE="env.dev.yaml"
