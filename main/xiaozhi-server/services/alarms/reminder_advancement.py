@@ -6,6 +6,7 @@ Uses zoneinfo.ZoneInfo instead of pytz to avoid an extra dependency.
 """
 from __future__ import annotations
 
+import calendar
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -98,6 +99,28 @@ def get_next_occurrence_utc(
         if candidate.astimezone(timezone.utc) <= from_date:
             candidate += timedelta(days=1)
         return candidate.astimezone(timezone.utc)
+
+    if repeat == "monthly":
+        days = schedule.get("days", [])
+        if not days or not isinstance(days, list):
+            raise ValueError("Missing or invalid 'days' for monthly reminder")
+        target_day = int(days[0])
+        from_local = from_date.astimezone(tz)
+        # Iterate up to 13 months forward to find the next valid occurrence.
+        # Clamp to the last day of the month for short months (e.g. day 31 → April 30).
+        for month_offset in range(13):
+            total_months = (from_local.year * 12 + from_local.month - 1) + month_offset
+            year = total_months // 12
+            month = total_months % 12 + 1
+            last_day = calendar.monthrange(year, month)[1]
+            actual_day = min(target_day, last_day)
+            try:
+                candidate = datetime(year, month, actual_day, hour, minute, tzinfo=tz)
+                if candidate.astimezone(timezone.utc) > from_date:
+                    return candidate.astimezone(timezone.utc)
+            except ValueError:
+                continue
+        raise ValueError("Failed to find next monthly occurrence")
 
     if repeat == "weekly":
         days = schedule.get("days", [])

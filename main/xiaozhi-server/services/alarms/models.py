@@ -13,6 +13,7 @@ logger = setup_logging()
 class AlarmRepeat(str, Enum):
     WEEKLY = "weekly"
     DAILY = "daily"
+    MONTHLY = "monthly"  # fires on a specific day of the month
     NONE = "none"  # one-time; fires once then status -> off
 
 
@@ -28,16 +29,20 @@ DAY_NAMES: Sequence[str] = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 class AlarmSchedule:
     repeat: AlarmRepeat
     time_local: str
-    days: List[str] = field(default_factory=list)
+    # List[str] of weekday abbreviations for weekly/daily, List[int] of day-of-month for monthly
+    days: List = field(default_factory=list)
 
     def __post_init__(self):
-        normalized_days: List[str] = []
-        for day in self.days:
-            if day in DAY_NAMES:
-                normalized_days.append(day)
-            else:
-                logger.warning(f"Invalid alarm day '{day}' encountered; dropping")
-        self.days = normalized_days
+        if self.repeat == AlarmRepeat.MONTHLY:
+            self.days = [d for d in self.days if isinstance(d, int) and 1 <= d <= 31]
+        else:
+            normalized_days: List[str] = []
+            for day in self.days:
+                if day in DAY_NAMES:
+                    normalized_days.append(day)
+                else:
+                    logger.warning(f"Invalid alarm day '{day}' encountered; dropping")
+            self.days = normalized_days
 
 
 @dataclass
@@ -70,6 +75,7 @@ class AlarmDoc:
     emotional_context: Optional[str] = None
     completion_signal: Optional[str] = None
     delivery_preference: Optional[str] = None
+    delivery_channel: Optional[List[str]] = None
 
 
 @dataclass

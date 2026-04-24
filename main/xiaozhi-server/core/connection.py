@@ -1980,12 +1980,18 @@ Return ONLY the JSON array, no other explanation."""
         if mode == "scheduled_conversation":
             # Dynamic assembly from LLM-generated intake fields stored in session_config.
             # No static instructions file — each conversation is unique.
-            character_reminder    = (session_config.get("characterReminder") or "").strip()
-            emotional_context     = (session_config.get("emotionalContext") or "").strip()
-            delivery_pref         = (session_config.get("deliveryPreference") or "none stated").strip()
+            label                 = (session_config.get("label") or "").strip()
+            character_reminder    = (session_config.get("characterReminder") or
+                "Review your character setting and remind the user in the way your character would."
+            ).strip()
+            emotional_context     = (session_config.get("emotionalContext") or "none").strip()
+            delivery_pref         = (session_config.get("deliveryPreference") or "none").strip()
             type_hint             = (session_config.get("typeHint") or "").strip()
             priority              = (session_config.get("priority") or "").strip()
-            conversation_outline  = (session_config.get("conversationOutline") or "").strip()
+            conversation_outline  = (session_config.get("conversationOutline") or
+                "1. Remind the user — use the reminder title above to understand the topic. "
+                "2. Engage in conversation if the user wants to talk."
+            ).strip()
             completion_signal     = (session_config.get("completionSignal") or "").strip()
 
             parts = []
@@ -1993,6 +1999,7 @@ Return ONLY the JSON array, no other explanation."""
                 parts.append(f"[CHARACTER REMINDER]\n{character_reminder}")
             parts.append(
                 f"[CONTEXT FOR THIS CONVERSATION]\n"
+                f"Reminder title (as titled by the user): \"{label}\"\n"
                 f"Emotional context: {emotional_context}\n"
                 f"Delivery preference: {delivery_pref}\n"
                 f"Type: {type_hint} | Priority: {priority}"

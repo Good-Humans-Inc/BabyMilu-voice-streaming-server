@@ -146,6 +146,7 @@ def test_create_scheduled_conversation_writes_correct_mode_and_fields():
     assert doc["deliveryPreference"] == "be gentle"
     assert doc["status"] == "on"
     assert doc["label"] == "take vitamins"
+    assert doc["deliveryChannel"] == ["app", "plushie"]
 
 
 def test_create_scheduled_conversation_content_defaults_to_label():
@@ -679,4 +680,205 @@ def test_modify_scheduled_conversation_updates_time_fields():
     # non-time fields not present (only updatedAt + time keys)
     assert "content" not in doc
     assert "priority" not in doc
+
+
+# ---------------------------------------------------------------------------
+# deliveryChannel written on create
+# ---------------------------------------------------------------------------
+
+def test_create_scheduled_conversation_writes_delivery_channel():
+    now = datetime(2026, 4, 8, 20, 0, tzinfo=timezone.utc)
+    fake_client = _FakeWriteClient()
+
+    firestore_client.create_scheduled_conversation(
+        uid="15551234567",
+        device_id="aa:bb:cc:dd:ee:ff",
+        resolved_dt=now,
+        label="take vitamins",
+        context="habit",
+        tz_str="UTC",
+        client=fake_client,
+    )
+
+    assert fake_client.written["deliveryChannel"] == ["app", "plushie"]
+
+
+# ---------------------------------------------------------------------------
+# Monthly recurrence — _build_recurrence_fields
+# ---------------------------------------------------------------------------
+
+def test_build_recurrence_fields_monthly_with_explicit_day():
+    days = firestore_client._build_recurrence_fields("monthly:22")
+    assert days == [22]
+
+
+def test_build_recurrence_fields_monthly_day_31():
+    days = firestore_client._build_recurrence_fields("monthly:31")
+    assert days == [31]
+
+
+def test_build_recurrence_fields_monthly_falls_back_to_resolved_local_day():
+    from zoneinfo import ZoneInfo
+    resolved_local = datetime(2026, 4, 15, 9, 0, tzinfo=ZoneInfo("UTC"))
+    days = firestore_client._build_recurrence_fields("monthly", resolved_local)
+    assert days == [15]
+
+
+# ---------------------------------------------------------------------------
+# Monthly recurrence — _build_schedule
+# ---------------------------------------------------------------------------
+
+def test_build_schedule_monthly_parses_integer_day():
+    schedule = firestore_client._build_schedule({
+        "repeat": "monthly",
+        "timeLocal": "09:00",
+        "days": [22],
+    })
+    assert schedule.repeat == firestore_client.models.AlarmRepeat.MONTHLY
+    assert schedule.days == [22]
+    assert schedule.time_local == "09:00"
+
+
+def test_build_schedule_monthly_drops_out_of_range_days():
+    schedule = firestore_client._build_schedule({
+        "repeat": "monthly",
+        "timeLocal": "09:00",
+        "days": [0, 22, 32],
+    })
+    assert schedule.days == [22]
+
+
+# ---------------------------------------------------------------------------
+# Monthly recurrence — create writes repeat field + integer days
+# ---------------------------------------------------------------------------
+
+def test_create_scheduled_conversation_monthly_recurrence_writes_repeat_and_day():
+    now = datetime(2026, 4, 8, 20, 0, tzinfo=timezone.utc)
+    fake_client = _FakeWriteClient()
+
+    firestore_client.create_scheduled_conversation(
+        uid="15551234567",
+        device_id="aa:bb:cc:dd:ee:ff",
+        resolved_dt=now,
+        label="monthly check-in",
+        context="monthly",
+        tz_str="UTC",
+        recurrence="monthly:22",
+        client=fake_client,
+    )
+
+    doc = fake_client.written
+    assert doc["schedule"]["days"] == [22]
+    assert doc["schedule"]["repeat"] == "monthly"
+    assert "dateLocal" not in doc["schedule"]
+
+
+# ---------------------------------------------------------------------------
+# Monthly recurrence — modify writes repeat field
+# ---------------------------------------------------------------------------
+
+def test_modify_scheduled_conversation_monthly_recurrence_writes_repeat_and_day():
+    fake_client = _FakeWriteClient()
+
+    firestore_client.modify_scheduled_conversation(
+        uid="user-1",
+        alarm_id="alarm-42",
+        recurrence="monthly:15",
+        client=fake_client,
+    )
+
+    doc = fake_client.updated
+    assert doc["schedule.days"] == [15]
+    assert doc["schedule.repeat"] == "monthly"
+
+
+def test_modify_scheduled_conversation_switching_from_monthly_clears_repeat():
+    fake_client = _FakeWriteClient()
+
+    firestore_client.modify_scheduled_conversation(
+        uid="user-1",
+        alarm_id="alarm-42",
+        recurrence="daily",
+        client=fake_client,
+    )
+
+    doc = fake_client.updated
+    assert doc["schedule.days"] == list(firestore_client.models.DAY_NAMES)
+    # repeat field is cleared via DELETE_FIELD sentinel when switching away from monthly
+    assert "schedule.repeat" in doc
+
+
+# ---------------------------------------------------------------------------
+# modify — recurrence-only change recomputes nextOccurrenceUTC
+# ---------------------------------------------------------------------------
+
+class _FakeWriteClientWithGet(_FakeWriteClient):
+    """Extends _FakeWriteClient with a .get() that returns a fake snapshot."""
+    def __init__(self, existing_schedule: dict):
+        super().__init__()
+        self._existing_schedule = existing_schedule
+
+    def get(self):
+        schedule_data = self._existing_schedule
+        class _Snap:
+            exists = True
+            def to_dict(self_):
+                return {"schedule": schedule_data}
+        return _Snap()
+
+
+def test_modify_scheduled_conversation_recurrence_only_recomputes_weekly():
+    """Changing recurrence only (no resolved_dt) recomputes nextOccurrenceUTC to next Mon at 08:00 UTC."""
+    fake_client = _FakeWriteClientWithGet({"timeLocal": "08:00"})
+
+    firestore_client.modify_scheduled_conversation(
+        uid="user-1",
+        alarm_id="alarm-42",
+        recurrence="weekly:Mon",
+        tz_str="UTC",
+        client=fake_client,
+    )
+
+    doc = fake_client.updated
+    assert doc is not None
+    assert "nextOccurrenceUTC" in doc
+    parsed = datetime.fromisoformat(doc["nextOccurrenceUTC"].replace("Z", "+00:00"))
+    assert parsed > datetime.now(timezone.utc)
+    assert parsed.weekday() == 0  # Monday
+
+
+def test_modify_scheduled_conversation_recurrence_only_recomputes_monthly():
+    """Changing to monthly:15 only recomputes nextOccurrenceUTC to the 15th at 09:00 UTC."""
+    fake_client = _FakeWriteClientWithGet({"timeLocal": "09:00"})
+
+    firestore_client.modify_scheduled_conversation(
+        uid="user-1",
+        alarm_id="alarm-42",
+        recurrence="monthly:15",
+        tz_str="UTC",
+        client=fake_client,
+    )
+
+    doc = fake_client.updated
+    assert doc is not None
+    assert "nextOccurrenceUTC" in doc
+    parsed = datetime.fromisoformat(doc["nextOccurrenceUTC"].replace("Z", "+00:00"))
+    assert parsed > datetime.now(timezone.utc)
+    assert parsed.day == 15
+
+
+def test_modify_scheduled_conversation_recurrence_once_does_not_recompute():
+    """Setting recurrence to 'once' (empty days) should NOT touch nextOccurrenceUTC."""
+    fake_client = _FakeWriteClientWithGet({"timeLocal": "08:00"})
+
+    firestore_client.modify_scheduled_conversation(
+        uid="user-1",
+        alarm_id="alarm-42",
+        recurrence="once",
+        tz_str="UTC",
+        client=fake_client,
+    )
+
+    doc = fake_client.updated
+    assert "nextOccurrenceUTC" not in doc
 

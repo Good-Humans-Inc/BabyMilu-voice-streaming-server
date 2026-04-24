@@ -13,6 +13,7 @@ from plugins_func.register import Action
 
 _FULL_KWARGS = dict(
     time_expression="tomorrow at 9am",
+    label="Take vitamins daily",
     content="take vitamins",
     type_hint="habit",
     priority="medium",
@@ -71,11 +72,11 @@ def test_schedule_conversation_persists_all_fields_when_uid_exists(monkeypatch):
     result = sc_module.schedule_conversation(conn, **_FULL_KWARGS)
 
     assert result.action == Action.REQLLM
-    assert "take vitamins" in result.result
+    assert "Take vitamins daily" in result.result
     assert recorded["uid"] == "15551234567"
     assert recorded["device_id"] == conn.device_id
     assert recorded["resolved_dt"] == _RESOLVED
-    assert recorded["label"] == "take vitamins"
+    assert recorded["label"] == "Take vitamins daily"
     assert recorded["tz_str"] == "America/Los_Angeles"
     assert recorded["content"] == "take vitamins"
     assert recorded["type_hint"] == "habit"

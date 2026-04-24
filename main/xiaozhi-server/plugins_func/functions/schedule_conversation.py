@@ -26,7 +26,8 @@ SCHEDULE_CONVERSATION_FUNCTION_DESC = {
             "Pass the time as the user expressed it; the server resolves it to UTC. "
             "For conversation_outline, character_reminder, emotional_context, and completion_signal: "
             "generate these NOW using the full conversation context. "
-            "These are your intake notes — be specific and personal, not generic."
+            "These are your intake notes — be specific and personal, not generic. "
+            "Do NOT call this to update or change an existing reminder — use modify_reminder for that."
         ),
         "parameters": {
             "type": "object",
@@ -46,6 +47,13 @@ SCHEDULE_CONVERSATION_FUNCTION_DESC = {
                         "those belong in the recurrence field. "
                         "Example: user says 'every day at 8pm' → "
                         "time_expression='8pm', recurrence='daily'."
+                    ),
+                },
+                "label": {
+                    "type": "string",
+                    "description": (
+                        "Concise title for this reminder, maximum 10 words. "
+                        "Examples: 'Take vitamins', 'Morning run', 'Check in before exam'."
                     ),
                 },
                 "content": {
@@ -75,20 +83,24 @@ SCHEDULE_CONVERSATION_FUNCTION_DESC = {
                 "recurrence": {
                     "type": "string",
                     "description": (
-                        "Controls which days this reminder repeats on. "
+                        "Controls how this reminder repeats. "
                         "— Omit entirely if the user wants a one-time reminder. "
                         "  One-time includes: 'remind me once', 'just this time', "
                         "  'on [specific date]', no mention of repeating. "
                         "— Pass 'daily' if the user says 'every day', 'daily', "
-                        "  'each morning', 'every night', 'every evening', or any "
-                        "  phrase meaning the reminder should repeat every day. "
+                        "  'each morning', 'every night', or any phrase meaning every day. "
                         "— Pass 'weekly:Mon,Wed,Fri' (comma-separated 3-letter "
                         "  abbreviations) if the user names specific weekdays. "
                         "  Use: Mon Tue Wed Thu Fri Sat Sun. "
                         "  Examples: 'every Monday' → 'weekly:Mon', "
                         "  'weekdays' → 'weekly:Mon,Tue,Wed,Thu,Fri', "
                         "  'weekends' → 'weekly:Sat,Sun'. "
-                        "Never pass 'weekly' without specifying the days after the colon."
+                        "  Never pass 'weekly' without specifying the days after the colon. "
+                        "— Pass 'monthly:N' (day of month, 1–31) if the user wants a "
+                        "  reminder on a specific day each month. "
+                        "  Examples: 'every month on the 22nd' → 'monthly:22', "
+                        "  'first of every month' → 'monthly:1'. "
+                        "  Short months clamp automatically (e.g. monthly:31 fires on the 30th in April)."
                     ),
                 },
                 "conversation_outline": {
@@ -142,6 +154,7 @@ SCHEDULE_CONVERSATION_FUNCTION_DESC = {
             },
             "required": [
                 "time_expression",
+                "label",
                 "content",
                 "type_hint",
                 "priority",
@@ -159,6 +172,7 @@ SCHEDULE_CONVERSATION_FUNCTION_DESC = {
 def schedule_conversation(
     conn,
     time_expression: str,
+    label: str,
     content: str,
     type_hint: str,
     priority: str,
@@ -214,7 +228,7 @@ def schedule_conversation(
                 uid=uid,
                 device_id=conn.device_id,
                 resolved_dt=resolved,
-                label=content,
+                label=label,
                 context=content,
                 tz_str=tz_str,
                 recurrence=recurrence,
@@ -244,7 +258,7 @@ def schedule_conversation(
     return ActionResponse(
         action=Action.REQLLM,
         result=(
-            f"Scheduled: '{content}' on {resolved.strftime('%A, %B %-d at %-I:%M %p')} ({tz_str}). "
+            f"Scheduled: '{label}' on {resolved.strftime('%A, %B %-d at %-I:%M %p')} ({tz_str}). "
             f"reminder_id={reminder_id if uid else 'unavailable'}"
         ),
         response=None,

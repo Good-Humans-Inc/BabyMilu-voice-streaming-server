@@ -168,6 +168,7 @@ def _build_alarm_doc(
         emotional_context=data.get("emotionalContext"),
         completion_signal=data.get("completionSignal"),
         delivery_preference=data.get("deliveryPreference"),
+        delivery_channel=data.get("deliveryChannel"),
     )
 
 
@@ -273,6 +274,19 @@ def _build_recurrence_fields(
             days = [resolved_local.strftime("%a")] if resolved_local else []
         return days
 
+    if key.startswith("monthly"):
+        parts = recurrence.split(":", 1)
+        if len(parts) == 2:
+            try:
+                day = int(parts[1].strip())
+                if 1 <= day <= 31:
+                    return [day]
+            except ValueError:
+                pass
+        if resolved_local:
+            return [resolved_local.day]
+        return []
+
     logger.bind(tag=TAG).warning(
         f"Unrecognized recurrence value: {recurrence!r}; treating as once"
     )
@@ -287,6 +301,20 @@ def _parse_repeat(raw_repeat) -> models.AlarmRepeat:
 
 
 def _build_schedule(schedule_payload: Dict[str, Any]) -> models.AlarmSchedule:
+    repeat_raw = schedule_payload.get("repeat", "none")
+    key = str(repeat_raw).strip().lower()
+
+    # Monthly must be detected from the explicit repeat field — integer days can't
+    # be inferred through DAY_NAMES the way weekday abbreviations can.
+    if key == "monthly":
+        days_raw = schedule_payload.get("days") or []
+        day_list = [d for d in days_raw if isinstance(d, int) and 1 <= d <= 31]
+        return models.AlarmSchedule(
+            repeat=models.AlarmRepeat.MONTHLY,
+            time_local=schedule_payload["timeLocal"],
+            days=day_list,
+        )
+
     # New schema: infer repeat from days (non-empty = recurring, empty = one-time).
     # Backward compat: if days is absent/empty, fall back to explicit repeat field.
     days = [d for d in (schedule_payload.get("days") or []) if d in models.DAY_NAMES]
@@ -294,8 +322,6 @@ def _build_schedule(schedule_payload: Dict[str, Any]) -> models.AlarmSchedule:
     if days:
         repeat = models.AlarmRepeat.DAILY
     else:
-        repeat_raw = schedule_payload.get("repeat", "none")
-        key = str(repeat_raw).strip().lower()
         if key in ("daily", "weekly"):
             # Old doc with repeat but empty days — backfill all days
             repeat = models.AlarmRepeat.DAILY
@@ -484,6 +510,10 @@ def create_scheduled_conversation(
     schedule: dict = {"timeLocal": time_local}
     if days:
         schedule["days"] = days
+        # Monthly requires an explicit repeat field — integer days can't be
+        # inferred through DAY_NAMES the way weekday abbreviations can.
+        if recurrence and str(recurrence).strip().lower().startswith("monthly"):
+            schedule["repeat"] = "monthly"
     else:
         schedule["dateLocal"] = date_local
 
@@ -498,6 +528,9 @@ def create_scheduled_conversation(
         "source": "voice",
         "createdAt": _format_datetime(now_utc),
         "updatedAt": _format_datetime(now_utc),
+        # TODO: In the future, deliveryChannel will be user-configurable (e.g. plushie-only
+        # or app-only). For now, voice-created reminders always default to both channels.
+        "deliveryChannel": ["app", "plushie"],
         # V0 scheduled_conversation fields
         "content": content or label,
         "typeHint": type_hint,
@@ -570,6 +603,7 @@ def modify_scheduled_conversation(
     *,
     resolved_dt: Optional[datetime] = None,
     tz_str: Optional[str] = None,
+    label: Optional[str] = None,
     content: Optional[str] = None,
     priority: Optional[str] = None,
     recurrence: Optional[str] = None,
@@ -595,9 +629,13 @@ def modify_scheduled_conversation(
         updates["schedule.timeLocal"] = resolved_local.strftime("%H:%M")
         updates["schedule.dateLocal"] = resolved_local.strftime("%Y-%m-%d")
 
+    if label is not None:
+        updates["label"] = label
     if content is not None:
         updates["content"] = content
-        updates["label"] = content
+        if label is None:
+            # Keep label in sync with content only when label isn't being set explicitly
+            updates["label"] = content
     if priority is not None:
         updates["priority"] = priority
     if recurrence is not None:
@@ -608,8 +646,44 @@ def modify_scheduled_conversation(
         )
         days = _build_recurrence_fields(recurrence, resolved_local_for_days)
         updates["schedule.days"] = days
+        if str(recurrence).strip().lower().startswith("monthly"):
+            updates["schedule.repeat"] = "monthly"
+        else:
+            # Clear any previous monthly repeat marker when switching to weekly/daily/once
+            updates["schedule.repeat"] = firestore.DELETE_FIELD
         if not days and resolved_local_for_days:
             updates["schedule.dateLocal"] = resolved_local_for_days.strftime("%Y-%m-%d")
+
+        # When only recurrence changes (no new resolved_dt), recompute nextOccurrenceUTC
+        # from the existing timeLocal + new schedule so the alarm fires at the right time.
+        if resolved_dt is None and tz_str is not None and days:
+            doc_snap = (
+                client.collection("users")
+                .document(uid)
+                .collection("reminders")
+                .document(alarm_id)
+                .get()
+            )
+            if doc_snap.exists:
+                time_local = ((doc_snap.to_dict() or {}).get("schedule") or {}).get("timeLocal")
+                if time_local:
+                    recurrence_key = str(recurrence).strip().lower()
+                    new_sched: dict = {"timeLocal": time_local, "days": days}
+                    if recurrence_key.startswith("monthly"):
+                        new_sched["repeat"] = "monthly"
+                    elif len(days) == len(models.DAY_NAMES):
+                        new_sched["repeat"] = "daily"
+                    else:
+                        new_sched["repeat"] = "weekly"
+                    try:
+                        from services.alarms.reminder_advancement import get_next_occurrence_utc
+                        next_occ = get_next_occurrence_utc(new_sched, tz_str)
+                        if next_occ:
+                            updates["nextOccurrenceUTC"] = _format_datetime(next_occ)
+                    except (ValueError, TypeError) as exc:
+                        logger.bind(tag=TAG).warning(
+                            f"Could not recompute nextOccurrenceUTC for {alarm_id}: {exc}"
+                        )
     if delivery_preference is not None:
         updates["deliveryPreference"] = delivery_preference
     if conversation_outline is not None:

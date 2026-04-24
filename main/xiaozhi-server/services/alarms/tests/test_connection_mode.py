@@ -158,15 +158,15 @@ def test_apply_mode_session_settings_assembles_scheduled_conversation_instructio
     assert "user confirms okay" in instr
 
 
-def test_apply_mode_session_settings_scheduled_conversation_omits_missing_fields(monkeypatch):
-    """character_reminder and conversation_outline are absent — sections should be skipped."""
+def test_apply_mode_session_settings_scheduled_conversation_completion_signal_still_omitted(monkeypatch):
+    """completionSignal has no fallback — its section is still omitted when absent."""
     conn = _build_scheduled_conn(
         {
             "mode": "scheduled_conversation",
             "typeHint": "habit",
             "priority": "medium",
             "emotionalContext": "User is in a good mood",
-            "completionSignal": "Done: user confirms task complete.",
+            # completionSignal intentionally absent
         },
         monkeypatch,
     )
@@ -174,10 +174,11 @@ def test_apply_mode_session_settings_scheduled_conversation_omits_missing_fields
     ConnectionHandler._apply_mode_session_settings(conn)
 
     instr = conn.mode_specific_instructions
-    assert "[CHARACTER REMINDER]" not in instr
-    assert "[CONVERSATION OUTLINE]" not in instr
     assert "[CONTEXT FOR THIS CONVERSATION]" in instr
-    assert "[COMPLETION SIGNAL]" in instr
+    assert "[COMPLETION SIGNAL]" not in instr
+    # Fallback sections ARE now present even without explicit values
+    assert "[CHARACTER REMINDER]" in instr
+    assert "[CONVERSATION OUTLINE]" in instr
 
 
 # ---------------------------------------------------------------------------
@@ -321,4 +322,89 @@ def test_morning_alarm_instructions_do_not_include_snooze_section(monkeypatch):
     ConnectionHandler._apply_mode_session_settings(conn)
 
     assert "[SNOOZE INSTRUCTION]" not in conn.mode_specific_instructions
+
+
+# ---------------------------------------------------------------------------
+# Fallback instructions for app-created reminders (empty context fields)
+# ---------------------------------------------------------------------------
+
+def test_scheduled_conversation_fallback_character_reminder(monkeypatch):
+    """characterReminder absent → fallback text appears in [CHARACTER REMINDER] block."""
+    conn = _build_scheduled_conn(
+        {"mode": "scheduled_conversation", "label": "Take vitamins"},
+        monkeypatch,
+    )
+    ConnectionHandler._apply_mode_session_settings(conn)
+    instr = conn.mode_specific_instructions
+    assert "[CHARACTER REMINDER]" in instr
+    assert "character setting" in instr
+
+
+def test_scheduled_conversation_fallback_conversation_outline(monkeypatch):
+    """conversationOutline absent → fallback text appears in [CONVERSATION OUTLINE] block."""
+    conn = _build_scheduled_conn(
+        {"mode": "scheduled_conversation", "label": "Morning run"},
+        monkeypatch,
+    )
+    ConnectionHandler._apply_mode_session_settings(conn)
+    instr = conn.mode_specific_instructions
+    assert "[CONVERSATION OUTLINE]" in instr
+    assert "reminder title" in instr
+
+
+def test_scheduled_conversation_fallback_emotional_context_is_none(monkeypatch):
+    """emotionalContext absent → shows 'none' in context block."""
+    conn = _build_scheduled_conn(
+        {"mode": "scheduled_conversation"},
+        monkeypatch,
+    )
+    ConnectionHandler._apply_mode_session_settings(conn)
+    assert "Emotional context: none" in conn.mode_specific_instructions
+
+
+def test_scheduled_conversation_fallback_delivery_preference_is_none(monkeypatch):
+    """deliveryPreference absent → shows 'none' (was 'none stated') in context block."""
+    conn = _build_scheduled_conn(
+        {"mode": "scheduled_conversation"},
+        monkeypatch,
+    )
+    ConnectionHandler._apply_mode_session_settings(conn)
+    assert "Delivery preference: none" in conn.mode_specific_instructions
+
+
+def test_scheduled_conversation_explicit_fields_override_fallbacks(monkeypatch):
+    """When all fields are provided, explicit values replace fallbacks throughout."""
+    conn = _build_scheduled_conn(
+        {
+            "mode": "scheduled_conversation",
+            "label": "Gym session",
+            "characterReminder": "Custom character note",
+            "emotionalContext": "User is pumped up",
+            "deliveryPreference": "be energetic",
+            "conversationOutline": "1. Fire them up. 2. Done when they leave.",
+            "completionSignal": "Done: user heads to gym.",
+        },
+        monkeypatch,
+    )
+    ConnectionHandler._apply_mode_session_settings(conn)
+    instr = conn.mode_specific_instructions
+    assert "Custom character note" in instr
+    assert "character setting" not in instr
+    assert "User is pumped up" in instr
+    assert "Emotional context: none" not in instr
+    assert "be energetic" in instr
+    assert "Delivery preference: none" not in instr
+    assert "Fire them up" in instr
+    assert "reminder title" not in instr
+    assert "Done: user heads to gym." in instr
+
+
+def test_scheduled_conversation_label_appears_in_context_block(monkeypatch):
+    """label is always written into the context block regardless of other fields."""
+    conn = _build_scheduled_conn(
+        {"mode": "scheduled_conversation", "label": "Evening meditation"},
+        monkeypatch,
+    )
+    ConnectionHandler._apply_mode_session_settings(conn)
+    assert 'Reminder title (as titled by the user): "Evening meditation"' in conn.mode_specific_instructions
 

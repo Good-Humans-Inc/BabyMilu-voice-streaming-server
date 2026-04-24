@@ -328,3 +328,79 @@ def test_compute_next_occurrence_requires_timezone():
 
     with pytest.raises(ValueError):
         scheduler.compute_next_occurrence(alarm, now=reference)
+
+
+def test_compute_next_occurrence_monthly_advances_to_next_month():
+    """Monthly alarm on day 15 — after firing on Jan 15, next is Feb 15."""
+    reference = datetime(2024, 1, 15, 9, 0, tzinfo=timezone.utc)
+    alarm = models.AlarmDoc(
+        alarm_id="alarm-monthly",
+        user_id="user-xyz",
+        uid="user-xyz",
+        label="Monthly check-in",
+        schedule=models.AlarmSchedule(
+            repeat=models.AlarmRepeat.MONTHLY,
+            time_local="09:00",
+            days=[15],
+        ),
+        status=models.AlarmStatus.ON,
+        next_occurrence_utc=reference,
+        targets=[models.AlarmTarget(device_id="DEV1", mode="scheduled_conversation")],
+        raw={"timezone": "UTC"},
+        doc_path="users/user-xyz/alarms/alarm-monthly",
+    )
+
+    next_dt = scheduler.compute_next_occurrence(alarm, now=reference)
+
+    assert next_dt == datetime(2024, 2, 15, 9, 0, tzinfo=timezone.utc)
+
+
+def test_compute_next_occurrence_monthly_clamps_day_31_in_april():
+    """Monthly alarm on day 31 — April only has 30 days, so fires on Apr 30."""
+    reference = datetime(2024, 3, 31, 9, 0, tzinfo=timezone.utc)
+    alarm = models.AlarmDoc(
+        alarm_id="alarm-monthly",
+        user_id="user-xyz",
+        uid="user-xyz",
+        label="Monthly check-in",
+        schedule=models.AlarmSchedule(
+            repeat=models.AlarmRepeat.MONTHLY,
+            time_local="09:00",
+            days=[31],
+        ),
+        status=models.AlarmStatus.ON,
+        next_occurrence_utc=reference,
+        targets=[models.AlarmTarget(device_id="DEV1", mode="scheduled_conversation")],
+        raw={"timezone": "UTC"},
+        doc_path="users/user-xyz/alarms/alarm-monthly",
+    )
+
+    next_dt = scheduler.compute_next_occurrence(alarm, now=reference)
+
+    assert next_dt == datetime(2024, 4, 30, 9, 0, tzinfo=timezone.utc)
+
+
+def test_compute_next_occurrence_monthly_clamps_day_31_in_february():
+    """Monthly alarm on day 31 — February clamps to Feb 29 in a leap year."""
+    reference = datetime(2024, 1, 31, 9, 0, tzinfo=timezone.utc)
+    alarm = models.AlarmDoc(
+        alarm_id="alarm-monthly",
+        user_id="user-xyz",
+        uid="user-xyz",
+        label="Monthly check-in",
+        schedule=models.AlarmSchedule(
+            repeat=models.AlarmRepeat.MONTHLY,
+            time_local="09:00",
+            days=[31],
+        ),
+        status=models.AlarmStatus.ON,
+        next_occurrence_utc=reference,
+        targets=[models.AlarmTarget(device_id="DEV1", mode="scheduled_conversation")],
+        raw={"timezone": "UTC"},
+        doc_path="users/user-xyz/alarms/alarm-monthly",
+    )
+
+    next_dt = scheduler.compute_next_occurrence(alarm, now=reference)
+
+    # 2024 is a leap year → Feb 29
+    assert next_dt == datetime(2024, 2, 29, 9, 0, tzinfo=timezone.utc)

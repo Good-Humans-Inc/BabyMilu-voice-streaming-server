@@ -44,6 +44,10 @@ MODIFY_REMINDER_FUNCTION_DESC = {
                         "Omit if time is not changing."
                     ),
                 },
+                "label": {
+                    "type": "string",
+                    "description": "New concise title for this reminder, maximum 10 words. Omit if not changing.",
+                },
                 "content": {
                     "type": "string",
                     "description": "New user-facing label (e.g. 'take vitamins'). Omit if not changing.",
@@ -56,8 +60,10 @@ MODIFY_REMINDER_FUNCTION_DESC = {
                 "recurrence": {
                     "type": "string",
                     "description": (
-                        "New recurrence setting. "
-                        "'once' for one-time, 'daily' for every day, 'weekly' for every week. "
+                        "New recurrence setting. Use the same formats as schedule_conversation: "
+                        "'once' for one-time, 'daily' for every day, "
+                        "'weekly:Mon,Wed,Fri' (comma-separated 3-letter abbreviations) for specific weekdays, "
+                        "'monthly:N' (day of month, 1–31) for a specific day each month. "
                         "Omit if not changing."
                     ),
                 },
@@ -105,6 +111,7 @@ def modify_reminder(
     conn,
     alarm_id: str,
     time_expression: str = None,
+    label: str = None,
     content: str = None,
     priority: str = None,
     recurrence: str = None,
@@ -159,7 +166,8 @@ def modify_reminder(
             uid=uid,
             alarm_id=alarm_id,
             resolved_dt=resolved,
-            tz_str=tz_str if resolved is not None else None,
+            tz_str=tz_str,
+            label=label,
             content=content,
             priority=priority,
             recurrence=recurrence,
@@ -181,6 +189,8 @@ def modify_reminder(
     changes = []
     if resolved is not None:
         changes.append(f"time → {resolved.strftime('%A, %B %-d at %-I:%M %p')} ({tz_str})")
+    if label is not None:
+        changes.append(f"label → '{label}'")
     if content is not None:
         changes.append(f"content → '{content}'")
     if priority is not None:

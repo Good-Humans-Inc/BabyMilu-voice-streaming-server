@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from zoneinfo import ZoneInfo
@@ -120,13 +121,42 @@ def compute_next_occurrence(
     ) -> datetime:
     tzinfo = ZoneInfo(_resolve_timezone(alarm))
     alarm_time = datetime.strptime(alarm.schedule.time_local, "%H:%M").time()
-    allowed_days = sorted({_DAY_TO_INDEX[day] for day in alarm.schedule.days})
-    if not allowed_days:
-        allowed_days = list(range(7))
 
     now_utc = now or datetime.now(timezone.utc)
     start_utc = max(alarm.next_occurrence_utc or now_utc, now_utc)
     start_local = start_utc.astimezone(tzinfo)
+
+    if alarm.schedule.repeat == models.AlarmRepeat.MONTHLY:
+        target_day = alarm.schedule.days[0] if alarm.schedule.days else start_local.day
+        # Iterate up to 13 months forward to find the next valid occurrence.
+        # Clamp to the last day of the month for short months (e.g. day 31 → April 30).
+        for month_offset in range(13):
+            total_months = (start_local.year * 12 + start_local.month - 1) + month_offset
+            year = total_months // 12
+            month = total_months % 12 + 1
+            last_day = calendar.monthrange(year, month)[1]
+            actual_day = min(target_day, last_day)
+            try:
+                candidate_local = datetime(
+                    year, month, actual_day, alarm_time.hour, alarm_time.minute, tzinfo=tzinfo
+                )
+                if candidate_local > start_local:
+                    result = candidate_local.astimezone(timezone.utc)
+                    logger.bind(tag=TAG).info(
+                        f"Next occurrence for alarm {alarm.alarm_id} (user={alarm.user_id}, "
+                        f"tz={tzinfo.key}, local={candidate_local.isoformat()}) "
+                        f"is {result.isoformat()} UTC"
+                    )
+                    return result
+            except ValueError:
+                continue
+        raise ValueError(
+            f"Failed to find next monthly occurrence for alarm {alarm.alarm_id}"
+        )
+
+    allowed_days = sorted({_DAY_TO_INDEX[day] for day in alarm.schedule.days})
+    if not allowed_days:
+        allowed_days = list(range(7))
 
     for delta in range(0, 8):
         candidate_date = start_local.date() + timedelta(days=delta)

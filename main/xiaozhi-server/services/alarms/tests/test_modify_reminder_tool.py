@@ -141,3 +141,36 @@ def test_modify_reminder_with_context_regeneration(monkeypatch):
     assert calls[0]["character_reminder"] == "Be calm."
     assert calls[0]["emotional_context"] == "User is stressed."
     assert calls[0]["completion_signal"] == "Done: user says they're relaxed."
+
+
+def test_modify_reminder_recurrence_only_forwards_tz_str(monkeypatch):
+    """tz_str must be forwarded even when no time_expression is given — needed for next-occurrence recompute."""
+    calls = []
+    _patch_device(monkeypatch, tz="America/Los_Angeles")
+    monkeypatch.setattr(
+        "plugins_func.functions.modify_reminder.modify_scheduled_conversation",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    modify_reminder(_make_conn(), alarm_id="alarm-42", recurrence="weekly:Mon")
+
+    assert len(calls) == 1
+    assert calls[0]["tz_str"] == "America/Los_Angeles"
+    assert calls[0]["resolved_dt"] is None
+
+
+def test_modify_reminder_label_only(monkeypatch):
+    """Passing label updates the title without touching content or time fields."""
+    calls = []
+    _patch_device(monkeypatch)
+    monkeypatch.setattr(
+        "plugins_func.functions.modify_reminder.modify_scheduled_conversation",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    response = modify_reminder(_make_conn(), alarm_id="alarm-42", label="Evening Walk")
+
+    assert response.action == Action.REQLLM
+    assert "label → 'Evening Walk'" in response.result
+    assert calls[0]["label"] == "Evening Walk"
+    assert calls[0]["content"] is None
