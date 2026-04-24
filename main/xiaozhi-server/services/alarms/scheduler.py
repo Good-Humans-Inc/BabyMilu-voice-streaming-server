@@ -9,12 +9,36 @@ from services.logging import setup_logging
 from services.alarms import firestore_client, models, tasks
 from services.alarms.config import ALARM_TIMING
 from services.session_context import store as session_context_store
+from services.session_context.models import ModeSession
 
 TAG = __name__
 logger = setup_logging()
 SESSION_TYPE = "alarm"
 SESSION_TTL = ALARM_TIMING["session_ttl"]
 ONE_TIME_SESSION_TTL = ALARM_TIMING["one_time_session_ttl"]
+
+
+def _on_session_expire(session: ModeSession) -> None:
+    """Write lastOutcome='ignored' when a delivery session expires with no user response."""
+    session_config = session.session_config or {}
+    if session_config.get("mode") != "scheduled_conversation":
+        return
+    alarm_id = session_config.get("alarmId")
+    uid = session_config.get("userId")
+    if not alarm_id or not uid:
+        return
+    try:
+        firestore_client.write_alarm_outcome(uid, alarm_id, "ignored")
+        logger.bind(tag=TAG).info(
+            f"Wrote outcome='ignored' for alarm {alarm_id} (uid={uid}) on session expiry"
+        )
+    except Exception as exc:
+        logger.bind(tag=TAG).warning(
+            f"Failed to write ignored outcome for alarm {alarm_id}: {exc}"
+        )
+
+
+session_context_store.set_expiry_callback(_on_session_expire)
 
 _DAY_TO_INDEX = {name: idx for idx, name in enumerate(models.DAY_NAMES)}
 

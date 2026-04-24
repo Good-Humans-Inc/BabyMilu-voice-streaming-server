@@ -221,6 +221,10 @@ def schedule_conversation(
         f"at {resolved.isoformat()} (from '{time_expression}')"
     )
 
+    # If called during a scheduled_conversation delivery, the user is snoozing.
+    # Write the snoozed outcome to the original alarm before creating the new one.
+    _maybe_write_snoozed_outcome(conn)
+
     uid = get_owner_phone_for_device(conn.device_id)
     if uid:
         try:
@@ -263,3 +267,23 @@ def schedule_conversation(
         ),
         response=None,
     )
+
+
+def _maybe_write_snoozed_outcome(conn) -> None:
+    """If the tool is called during a delivery session, write lastOutcome='snoozed'."""
+    try:
+        mode_session = getattr(conn, "mode_session", None)
+        session_config = getattr(mode_session, "session_config", None) or {}
+        if session_config.get("mode") != "scheduled_conversation":
+            return
+        alarm_id = session_config.get("alarmId")
+        uid = session_config.get("userId")
+        if not alarm_id or not uid:
+            return
+        from services.alarms.firestore_client import write_alarm_outcome
+        write_alarm_outcome(uid, alarm_id, "snoozed")
+        logger.bind(tag=TAG).info(
+            f"Wrote outcome='snoozed' for alarm {alarm_id} (device={conn.device_id})"
+        )
+    except Exception as exc:
+        logger.bind(tag=TAG).warning(f"Could not write snoozed outcome: {exc}")

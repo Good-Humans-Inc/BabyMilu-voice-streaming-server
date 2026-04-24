@@ -707,6 +707,34 @@ def modify_scheduled_conversation(
     )
 
 
+_VALID_OUTCOMES = frozenset({"done", "snoozed", "resisting", "ignored"})
+
+
+def write_alarm_outcome(
+    uid: str,
+    alarm_id: str,
+    outcome: str,
+    *,
+    now: Optional[datetime] = None,
+    client: Optional[firestore.Client] = None,
+) -> None:
+    if outcome not in _VALID_OUTCOMES:
+        raise ValueError(f"Invalid outcome {outcome!r}; must be one of {sorted(_VALID_OUTCOMES)}")
+    if client is None:
+        client = _build_client()
+    ts = now or datetime.now(timezone.utc)
+    (
+        client.collection("users")
+        .document(uid)
+        .collection("reminders")
+        .document(alarm_id)
+        .update({"lastOutcome": outcome, "lastOutcomeAt": _format_datetime(ts)})
+    )
+    logger.bind(tag=TAG).info(
+        f"Wrote outcome={outcome!r} for alarm {alarm_id} (uid={uid})"
+    )
+
+
 def cancel_scheduled_conversation(
     uid: str,
     alarm_id: str,

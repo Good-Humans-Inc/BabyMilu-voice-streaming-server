@@ -2022,6 +2022,18 @@ Return ONLY the JSON array, no other explanation."""
                 "- recurrence: omit (snooze is always one-time)"
             )
 
+            parts.append(
+                "[OUTCOME INSTRUCTION]\n"
+                "When this conversation has reached its natural end, call complete_reminder "
+                "with the final outcome:\n"
+                "- 'done': user confirmed they completed the task, or meaningfully acknowledged "
+                "the reminder (even if they initially resisted but ultimately complied).\n"
+                "- 'resisting': the conversation ended with the user still refusing or avoiding "
+                "(they never came around).\n"
+                "Do NOT call this for snooze — use schedule_conversation instead. "
+                "Do NOT call this if the conversation is still ongoing."
+            )
+
             instructions = "\n\n".join(parts)
 
             # Override followup_max from priority so critical reminders nudge more
@@ -2367,12 +2379,22 @@ Return ONLY the JSON array, no other explanation."""
                     f"Runtime character refresh failed (non-fatal): {e}"
                 )
 
-        # Genuine user input cancels any pending follow-up
+        # Genuine user input cancels any pending follow-up and marks the session as engaged
         if query and is_user_input:
             self.followup_user_has_responded = True
             if self.followup_task and not self.followup_task.done():
                 self.followup_task.cancel()
                 self.logger.bind(tag=TAG).info("User responded - cancelling follow-up")
+            # Mark has_user_response on the session doc (for ignored-outcome detection).
+            # Only needs to fire once; subsequent calls are cheap set(merge=True) no-ops.
+            if getattr(self, "mode_session", None) is not None:
+                try:
+                    from services.session_context.store import mark_user_responded
+                    mark_user_responded(self.device_id)
+                except Exception as _e:
+                    self.logger.bind(tag=TAG).warning(
+                        f"mark_user_responded failed (non-fatal): {_e}"
+                    )
 
         if depth == 0:
             self.sentence_id = str(uuid.uuid4().hex)

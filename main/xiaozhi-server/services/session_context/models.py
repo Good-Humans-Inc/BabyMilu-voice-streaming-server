@@ -19,6 +19,7 @@ class ModeSession:
     session_config: Dict[str, Any] = field(default_factory=dict)
     conversation: Dict[str, Any] = field(default_factory=dict)
     is_snooze_follow_up: bool = False
+    has_user_response: bool = False
 
     def __post_init__(self) -> None:
         if self.expires_at is None and self.ttl_seconds:
@@ -40,6 +41,7 @@ class ModeSession:
             "sessionConfig": self.session_config,
             "conversation": self.conversation,
             "isSnoozeFollowUp": self.is_snooze_follow_up,
+            "hasUserResponse": self.has_user_response,
         }
 
 
