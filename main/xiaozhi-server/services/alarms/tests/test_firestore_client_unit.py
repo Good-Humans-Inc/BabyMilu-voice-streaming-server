@@ -640,7 +640,8 @@ def test_modify_scheduled_conversation_recurrence_change_writes_days():
 
     doc = fake_client.updated
     assert doc["schedule.days"] == ["Mon", "Thu"]
-    assert "schedule.repeat" not in doc
+    # DELETE_FIELD sentinel is written to clear any previous monthly marker
+    assert doc["schedule.repeat"] is firestore_client.firestore.DELETE_FIELD
 
 
 def test_modify_scheduled_conversation_recurrence_to_none_clears_days():
