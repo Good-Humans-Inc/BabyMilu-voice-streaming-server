@@ -273,6 +273,64 @@ def test_reminder_allowlist_filters_non_test_user(monkeypatch):
     assert result["results"][0]["skipped"] == "user_filtered"
 
 
+def test_reminder_lateness_cap_skips_old_occurrence(monkeypatch):
+    now = datetime(2026, 4, 25, 8, 0, tzinfo=timezone.utc)
+    client = _make_client(
+        {
+            "uid": "+1",
+            "label": "stale reminder",
+            "nextOccurrenceUTC": "2026-04-25T07:56:00Z",
+            "schedule": {"repeat": "weekly", "timeLocal": "07:56", "days": ["Fri"]},
+            "deliveryChannel": ["app"],
+        }
+    )
+
+    monkeypatch.setenv("REMINDER_MAX_LATENESS_SECONDS", "180")
+    monkeypatch.setattr(reminder_push_job, "get_ai_message", lambda **kwargs: "msg")
+    monkeypatch.setattr(reminder_push_job, "_send_app_notification", lambda **kwargs: True)
+
+    result = reminder_push_job.run_send_reminder_push_job(
+        execute=True,
+        now=now,
+        client=client,
+    )
+
+    assert result["triggered"] == 0
+    assert result["skipped"] == 1
+    assert result["results"][0]["skipped"] == "too_late"
+
+
+def test_reminder_lateness_cap_allows_recent_occurrence(monkeypatch):
+    now = datetime(2026, 4, 25, 8, 0, tzinfo=timezone.utc)
+    client = _make_client(
+        {
+            "uid": "+1",
+            "label": "recent reminder",
+            "nextOccurrenceUTC": "2026-04-25T07:58:30Z",
+            "schedule": {"repeat": "weekly", "timeLocal": "07:58", "days": ["Fri"]},
+            "deliveryChannel": ["app"],
+        }
+    )
+
+    monkeypatch.setenv("REMINDER_MAX_LATENESS_SECONDS", "180")
+    monkeypatch.setattr(reminder_push_job, "get_ai_message", lambda **kwargs: "msg")
+    monkeypatch.setattr(reminder_push_job, "_send_app_notification", lambda **kwargs: True)
+    monkeypatch.setattr(
+        reminder_push_job,
+        "_finalize_if_occurrence_matches",
+        lambda **kwargs: True,
+    )
+
+    result = reminder_push_job.run_send_reminder_push_job(
+        execute=True,
+        now=now,
+        client=client,
+    )
+
+    assert result["triggered"] == 1
+    assert result["skipped"] == 0
+
+
 def test_plushie_session_hydration_includes_reminder_title(monkeypatch):
     now = datetime(2026, 4, 25, 8, 0, tzinfo=timezone.utc)
     created = {}

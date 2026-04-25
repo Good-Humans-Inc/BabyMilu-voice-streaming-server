@@ -46,7 +46,14 @@ _ALARM_MODE_CONFIG = {
 }
 
 
-def _build_conn_for_mode(mode: str, context: str | None, monkeypatch) -> ConnectionHandler:
+def _build_conn_for_mode(
+    mode: str,
+    context: str | None,
+    monkeypatch,
+    *,
+    title: str | None = None,
+    label: str | None = None,
+) -> ConnectionHandler:
     mode_config_map = {
         "morning_alarm": _ALARM_MODE_CONFIG,
         "reminder": _REMINDER_MODE_CONFIG,
@@ -67,6 +74,8 @@ def _build_conn_for_mode(mode: str, context: str | None, monkeypatch) -> Connect
         session_config={
             "mode": mode,
             "context": context,
+            "title": title,
+            "label": label,
         },
     )
     return conn
@@ -135,6 +144,30 @@ def test_reminder_mode_no_context_still_loads_base_instructions(monkeypatch):
     assert "You have one job" in conn.mode_specific_instructions
     # Context block must NOT be injected when context is empty/None
     assert "The user asked to be reminded about" not in conn.mode_specific_instructions
+
+
+def test_reminder_mode_title_used_when_context_missing(monkeypatch):
+    conn = _build_conn_for_mode(
+        "reminder",
+        context=None,
+        monkeypatch=monkeypatch,
+        title="take vitamins",
+    )
+    ConnectionHandler._apply_mode_session_settings(conn)
+
+    assert 'The user asked to be reminded about: "take vitamins".' in conn.mode_specific_instructions
+
+
+def test_reminder_mode_label_used_when_context_and_title_missing(monkeypatch):
+    conn = _build_conn_for_mode(
+        "reminder",
+        context=None,
+        monkeypatch=monkeypatch,
+        label="drink water",
+    )
+    ConnectionHandler._apply_mode_session_settings(conn)
+
+    assert 'The user asked to be reminded about: "drink water".' in conn.mode_specific_instructions
 
 
 # ---------------------------------------------------------------------------
