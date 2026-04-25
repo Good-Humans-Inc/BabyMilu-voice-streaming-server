@@ -271,3 +271,57 @@ def test_reminder_allowlist_filters_non_test_user(monkeypatch):
     assert result["triggered"] == 0
     assert result["skipped"] == 1
     assert result["results"][0]["skipped"] == "user_filtered"
+
+
+def test_plushie_session_hydration_includes_reminder_title(monkeypatch):
+    now = datetime(2026, 4, 25, 8, 0, tzinfo=timezone.utc)
+    created = {}
+
+    class _FakeStore:
+        def get_session(self, device_id, now=None):
+            return None
+
+        def create_session(
+            self,
+            *,
+            device_id,
+            session_type,
+            ttl,
+            triggered_at,
+            session_config,
+        ):
+            created.update(
+                {
+                    "device_id": device_id,
+                    "session_type": session_type,
+                    "ttl": ttl,
+                    "triggered_at": triggered_at,
+                    "session_config": session_config,
+                }
+            )
+            return type("Session", (), {"device_id": device_id})()
+
+        def delete_session(self, device_id):
+            raise AssertionError("delete_session should not be called on publish success")
+
+    monkeypatch.setenv("ALARM_WS_URL", "wss://example.com/ws")
+    monkeypatch.setenv("ALARM_MQTT_URL", "mqtt://example.com")
+    monkeypatch.setattr(reminder_push_job, "session_context_store", _FakeStore())
+    monkeypatch.setattr(reminder_push_job, "publish_ws_start", lambda *args, **kwargs: True)
+
+    sent = reminder_push_job._send_plushie_notification(
+        reminder_id="rem-123",
+        reminder_data={
+            "targets": [{"deviceId": "aa:bb:cc:dd:ee:ff", "mode": "reminder"}],
+            "context": "drink water",
+        },
+        uid="+1",
+        label="Drink water",
+        now=now,
+    )
+
+    assert sent is True
+    assert created["session_type"] == "alarm"
+    assert created["session_config"]["reminderId"] == "rem-123"
+    assert created["session_config"]["label"] == "Drink water"
+    assert created["session_config"]["title"] == "Drink water"
