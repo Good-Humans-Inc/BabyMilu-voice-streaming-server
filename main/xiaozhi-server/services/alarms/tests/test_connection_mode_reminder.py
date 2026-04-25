@@ -26,9 +26,12 @@ class _DummyLogger:
 
 _REMINDER_MODE_CONFIG = {
     "instructions": (
-        "You have one job: deliver the reminder stated in the context below, "
-        "clearly and warmly, in a single short sentence. "
-        "After delivering it, wish the user well and end naturally. "
+        "You have one job: deliver the reminder stated in the context below "
+        "as a natural spoken reminder. "
+        "Your very first spoken sentence must already include the reminder reason. "
+        "Do not begin with filler, small talk, or a standalone greeting before the reminder reason. "
+        "Treat the reminder context as the meaning to convey, not as text to quote verbatim unless quoting is necessary. "
+        "Keep it clear, warm, and concise. After delivering it, wish the user well and end naturally. "
         "Do not ask follow-up questions or continue the conversation."
     ),
     "server_initiate_chat": True,
@@ -126,7 +129,8 @@ def test_reminder_mode_context_injected_into_instructions(monkeypatch):
     ConnectionHandler._apply_mode_session_settings(conn)
 
     assert 'The user asked to be reminded about: "drink water".' in conn.mode_specific_instructions
-    assert "Mention this reason explicitly in your very first sentence." in conn.mode_specific_instructions
+    assert "Use this as the reminder meaning, not as raw text to parrot back." in conn.mode_specific_instructions
+    assert "Your very first spoken sentence must already contain the reminder reason." in conn.mode_specific_instructions
 
 
 def test_reminder_mode_base_instructions_present(monkeypatch):

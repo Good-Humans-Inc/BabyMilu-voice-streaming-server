@@ -3,6 +3,7 @@ import json
 import random
 import asyncio
 from core.utils.dialogue import Message
+from core.providers.tts.dto.dto import ContentType
 from core.utils.util import audio_to_data
 from core.providers.tts.dto.dto import SentenceType
 from core.utils.wakeup_word import WakeupWordsConfig
@@ -16,6 +17,46 @@ from core.providers.tools.device_mcp import (
 
 TAG = __name__
 
+def _build_server_initiated_query(conn) -> str:
+    """Return the synthetic starter query for proactive server-owned sessions."""
+    mode_session = getattr(conn, "mode_session", None)
+    session_config = (getattr(mode_session, "session_config", None) or {}) if mode_session else {}
+    mode = session_config.get("mode")
+    if mode != "reminder":
+        return ""
+
+    reminder_context = session_config.get("context")
+    if isinstance(reminder_context, str):
+        reminder_context = reminder_context.strip()
+    else:
+        reminder_context = ""
+    if not reminder_context:
+        fallback_context = session_config.get("title") or session_config.get("label")
+        if isinstance(fallback_context, str):
+            reminder_context = fallback_context.strip()
+        else:
+            reminder_context = ""
+
+    if not reminder_context:
+        return ""
+
+    return (
+        "Deliver the reminder naturally right now. "
+        f"The reminder reason is: {reminder_context}. "
+        "Your first spoken sentence must already contain that reminder reason. "
+        "Do not start with a standalone greeting before the reminder."
+    )
+
+def _get_precomputed_reminder_message(conn) -> str:
+    mode_session = getattr(conn, "mode_session", None)
+    session_config = (getattr(mode_session, "session_config", None) or {}) if mode_session else {}
+    if session_config.get("mode") != "reminder":
+        return ""
+    first_message = session_config.get("firstMessage")
+    if isinstance(first_message, str):
+        return first_message.strip()
+    return ""
+
 async def _trigger_server_greeting(conn):
     """Wait for all components initialization, then trigger server-initiated greeting"""
     try:
@@ -28,8 +69,15 @@ async def _trigger_server_greeting(conn):
     # Check llm_finish_task to avoid overlapping conversations
     if conn.llm_finish_task:
         conn.logger.bind(tag=TAG).info("Triggering server-initiated greeting")
+        precomputed_message = _get_precomputed_reminder_message(conn)
+        if precomputed_message:
+            conn.logger.bind(tag=TAG).info("Triggering precomputed reminder greeting")
+            conn.tts.tts_one_sentence(conn, ContentType.TEXT, content_detail=precomputed_message)
+            conn.dialogue.put(Message(role="assistant", content=precomputed_message))
+            return
         # Server-initiated greeting; not fresh user input
-        conn.executor.submit(conn.chat, "", 0, None, False)
+        query = _build_server_initiated_query(conn)
+        conn.executor.submit(conn.chat, query, 0, None, False)
     else:
         conn.logger.bind(tag=TAG).warning("Cannot trigger greeting: llm_finish_task is False")
 

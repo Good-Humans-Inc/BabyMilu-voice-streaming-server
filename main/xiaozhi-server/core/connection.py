@@ -2003,7 +2003,8 @@ Return ONLY the JSON array, no other explanation."""
             context_block = (
                 "\n\nReminder context:\n"
                 f"- The user asked to be reminded about: \"{reminder_context}\".\n"
-                "- Mention this reason explicitly in your very first sentence."
+                "- Use this as the reminder meaning, not as raw text to parrot back.\n"
+                "- Your very first spoken sentence must already contain the reminder reason."
             )
             instructions = (instructions or "") + context_block
 

@@ -154,10 +154,11 @@ def test_both_channel_reminder_sends_app_then_plushie_then_finalizes(monkeypatch
         "_send_app_notification",
         lambda **kwargs: order.append("app") or True,
     )
+    plushie_calls = []
     monkeypatch.setattr(
         reminder_push_job,
         "_send_plushie_notification",
-        lambda **kwargs: order.append("plushie") or True,
+        lambda **kwargs: plushie_calls.append(kwargs) or order.append("plushie") or True,
     )
     captured = {}
 
@@ -177,6 +178,7 @@ def test_both_channel_reminder_sends_app_then_plushie_then_finalizes(monkeypatch
     assert result["triggered"] == 1
     assert result["results"][0]["appSent"] is True
     assert result["results"][0]["plushieSent"] is True
+    assert plushie_calls[0]["first_message"] == "msg"
     assert captured["expected_occurrence_iso"] == "2026-04-25T08:00:00Z"
     assert captured["updates"]["lastDelivered.app.at"] == now.isoformat()
     assert captured["updates"]["lastDelivered.plushie.at"] == now.isoformat()
@@ -375,6 +377,7 @@ def test_plushie_session_hydration_includes_reminder_title(monkeypatch):
         },
         uid="+1",
         label="Drink water",
+        first_message="Don't forget to drink water.",
         now=now,
     )
 
@@ -383,3 +386,5 @@ def test_plushie_session_hydration_includes_reminder_title(monkeypatch):
     assert created["session_config"]["reminderId"] == "rem-123"
     assert created["session_config"]["label"] == "Drink water"
     assert created["session_config"]["title"] == "Drink water"
+    assert created["session_config"]["context"] == "drink water"
+    assert created["session_config"]["firstMessage"] == "Don't forget to drink water."

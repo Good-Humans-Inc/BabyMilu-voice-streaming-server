@@ -446,6 +446,7 @@ def _send_plushie_notification(
     reminder_data: Dict[str, Any],
     uid: str,
     label: str,
+    first_message: str,
     now: datetime,
 ) -> bool:
     ws_url = _resolve_ws_url()
@@ -497,6 +498,7 @@ def _send_plushie_notification(
                 "title": label,
                 "label": label,
                 "context": reminder_data.get("context"),
+                "firstMessage": first_message,
             },
         )
         if publish_ws_start(broker_url, device_id, ws_url):
@@ -761,6 +763,7 @@ def run_send_reminder_push_job(
                     reminder_data=reminder_data,
                     uid=uid,
                     label=label,
+                    first_message=ai_message,
                     now=now,
                 )
                 if not plushie_sent:

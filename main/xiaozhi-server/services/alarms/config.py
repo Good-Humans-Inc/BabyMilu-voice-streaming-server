@@ -27,9 +27,12 @@ MODE_CONFIG: Dict[str, Dict[str, Any]] = {
         # The context block ("The user asked to be reminded about: X") is appended
         # automatically by _apply_mode_session_settings() from session_config["context"].
         "instructions": (
-            "You have one job: deliver the reminder stated in the context below, "
-            "clearly and warmly, in a single short sentence. "
-            "After delivering it, wish the user well and end naturally. "
+            "You have one job: deliver the reminder stated in the context below "
+            "as a natural spoken reminder. "
+            "Your very first spoken sentence must already include the reminder reason. "
+            "Do not begin with filler, small talk, or a standalone greeting before the reminder reason. "
+            "Treat the reminder context as the meaning to convey, not as text to quote verbatim unless quoting is necessary. "
+            "Keep it clear, warm, and concise. After delivering it, wish the user well and end naturally. "
             "Do not ask follow-up questions or continue the conversation."
         ),
         "server_initiate_chat": True,
