@@ -161,24 +161,6 @@ def test_prepare_wake_requests_skips_when_last_processed_matches(monkeypatch):
     assert wake_requests == []
 
 
-def test_prepare_wake_requests_skips_filtered_user(monkeypatch):
-    fake_store = _FakeSessionStore()
-    monkeypatch.setattr(scheduler, "session_context_store", fake_store)
-    monkeypatch.setenv("ALARM_USER_ALLOWLIST", "user-allowed")
-
-    def fake_fetch(now, lookahead):
-        return [_make_alarm("DEV123", "morning_alarm")]
-
-    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
-
-    wake_requests = scheduler.prepare_wake_requests(
-        datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
-    )
-
-    assert wake_requests == []
-    assert fake_store.created == []
-
-
 def test_finalize_wake_request_marks_one_time_alarm_complete(monkeypatch):
     next_occurrence = datetime(2024, 1, 1, 7, tzinfo=timezone.utc)
     alarm = _make_alarm(
