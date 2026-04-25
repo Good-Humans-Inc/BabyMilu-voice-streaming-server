@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from zoneinfo import ZoneInfo
@@ -18,16 +19,28 @@ ONE_TIME_SESSION_TTL = ALARM_TIMING["one_time_session_ttl"]
 _DAY_TO_INDEX = {name: idx for idx, name in enumerate(models.DAY_NAMES)}
 
 
+def _parse_user_set(raw: str) -> set[str]:
+    return {token.strip() for token in (raw or "").split(",") if token.strip()}
+
+
+def _is_alarm_user_allowed(user_id: str) -> bool:
+    allowed = _parse_user_set(os.environ.get("ALARM_USER_ALLOWLIST", ""))
+    denied = _parse_user_set(os.environ.get("ALARM_USER_DENYLIST", ""))
+    normalized = (user_id or "").strip()
+    if normalized in denied:
+        return False
+    if not allowed:
+        return True
+    return normalized in allowed
+
+
 def prepare_wake_requests(
     now: datetime,
     lookahead: timedelta,
     ) -> List[tasks.WakeRequest]:
     wake_requests: List[tasks.WakeRequest] = []
-    all_docs = (
-        firestore_client.fetch_due_alarms(now, lookahead=lookahead)
-        + firestore_client.fetch_due_reminders(now, lookahead=lookahead)
-    )
-    for alarm in all_docs:
+    alarms = firestore_client.fetch_due_alarms(now, lookahead=lookahead)
+    for alarm in alarms:
         if not alarm.next_occurrence_utc:
             logger.bind(tag=TAG).warning(
                 f"Alarm {alarm.alarm_id} missing next_occurrence_utc; skipping"
@@ -45,6 +58,11 @@ def prepare_wake_requests(
         if not alarm.targets:
             logger.bind(tag=TAG).warning(
                 f"Alarm {alarm.alarm_id} has no targets; skipping"
+            )
+            continue
+        if not _is_alarm_user_allowed(alarm.user_id):
+            logger.bind(tag=TAG).info(
+                f"Skipping alarm {alarm.alarm_id}: user {alarm.user_id} not allowed"
             )
             continue
         for target in alarm.targets:

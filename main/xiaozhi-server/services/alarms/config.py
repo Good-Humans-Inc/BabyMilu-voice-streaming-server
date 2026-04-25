@@ -4,7 +4,7 @@ from datetime import timedelta
 from typing import Any, Dict
 
 ALARM_TIMING = {
-    "lookahead": timedelta(minutes=2),
+    "lookahead": timedelta(0),
     "session_ttl": timedelta(minutes=5),
     "one_time_session_ttl": timedelta(seconds=60),
 }
@@ -38,4 +38,3 @@ MODE_CONFIG: Dict[str, Dict[str, Any]] = {
         "use_separate_conversation": True,
     },
 }
-
