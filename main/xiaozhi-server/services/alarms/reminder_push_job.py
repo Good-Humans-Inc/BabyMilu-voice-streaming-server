@@ -1,7 +1,7 @@
 """
-Unified reminder delivery and Firestore finalization.
+Reminder push + Firestore updates aligned with babymilu-backend sendReminderPush.
 
-Query: status == on AND nextOccurrenceUTC <= now.
+Query: status == on AND nextOccurrenceUTC <= now (same as backend scheduled job).
 """
 from __future__ import annotations
 
@@ -76,7 +76,7 @@ _fcm_init_attempted = False
 
 
 def _get_fcm_messaging():
-    """Lazy Firebase Admin for native FCM tokens used by reminder app delivery."""
+    """Lazy Firebase Admin for native FCM tokens (same path as sendReminderPush)."""
     global _fcm_messaging_mod, _fcm_init_attempted
     if _fcm_init_attempted:
         return _fcm_messaging_mod
@@ -485,7 +485,6 @@ def _send_plushie_notification(
                 "alarmId": reminder_id,
                 "reminderId": reminder_id,
                 "userId": uid,
-                "title": label,
                 "label": label,
                 "context": reminder_data.get("context"),
             },

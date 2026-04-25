@@ -181,7 +181,7 @@ def process_due_reminders(
                 )
                 continue
 
-            # Only fire when the occurrence time has arrived.
+            # Match sendReminderPush: only fire when occurrence time has arrived
             # (lookahead widens the query for batching, not early delivery).
             if due_time > _as_utc(now):
                 skipped += 1
@@ -311,3 +311,4 @@ def _resolve_user_timezone(doc, cache: Dict[str, str]) -> str:
     except Exception:
         cache[user_id] = "UTC"
         return "UTC"
+
