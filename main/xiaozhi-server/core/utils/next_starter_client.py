@@ -29,14 +29,13 @@ def _parse_iso8601(value: Any) -> Optional[datetime]:
         return None
 
 
-def get_ready_next_starter(character_id: str) -> Optional[Dict[str, Any]]:
+def _fetch_next_starter_row(character_id: str):
     supabase_url = _env("SUPABASE_URL").rstrip("/")
     service_role_key = _env("SUPABASE_SERVICE_ROLE_KEY")
-    max_age_days = int(_env("NEXT_STARTER_MAX_AGE_DAYS", "7") or "7")
     request_timeout = float(_env("NEXT_STARTER_DB_TIMEOUT_SECONDS", "2.0") or "2.0")
 
     if not character_id or not supabase_url or not service_role_key:
-        return None
+        return None, supabase_url, service_role_key, request_timeout
 
     url = (
         f"{supabase_url}/rest/v1/character_memory_model"
@@ -57,10 +56,16 @@ def get_ready_next_starter(character_id: str) -> Optional[Dict[str, Any]]:
     response.raise_for_status()
 
     rows = response.json()
-    if not rows:
+    return (rows[0] if rows else None), supabase_url, service_role_key, request_timeout
+
+
+def get_ready_next_starter(character_id: str) -> Optional[Dict[str, Any]]:
+    max_age_days = int(_env("NEXT_STARTER_MAX_AGE_DAYS", "7") or "7")
+    row, _, _, _ = _fetch_next_starter_row(character_id)
+    if not row:
         return None
 
-    payload = rows[0].get("next_starter")
+    payload = row.get("next_starter")
     if not isinstance(payload, dict):
         return None
     if payload.get("status") != "ready":
@@ -80,6 +85,48 @@ def get_ready_next_starter(character_id: str) -> Optional[Dict[str, Any]]:
         return None
 
     return payload
+
+
+def mark_next_starter_consumed(character_id: str, payload: Dict[str, Any]) -> bool:
+    if not character_id or not isinstance(payload, dict):
+        return False
+
+    row, supabase_url, service_role_key, request_timeout = _fetch_next_starter_row(character_id)
+    if not row or not supabase_url or not service_role_key:
+        return False
+
+    current_payload = row.get("next_starter")
+    if not isinstance(current_payload, dict):
+        return False
+
+    # Only consume the payload we just played; avoid overwriting a newer starter.
+    if current_payload.get("generatedAt") != payload.get("generatedAt"):
+        return False
+    if current_payload.get("sourceSessionId") != payload.get("sourceSessionId"):
+        return False
+
+    consumed_payload = dict(current_payload)
+    consumed_payload["status"] = "consumed"
+    consumed_payload["consumedAt"] = datetime.now(timezone.utc).isoformat()
+
+    url = (
+        f"{supabase_url}/rest/v1/character_memory_model"
+        f"?character_id=eq.{quote(character_id, safe='')}"
+    )
+    response = requests.patch(
+        url,
+        headers={
+            "Authorization": f"Bearer {service_role_key}",
+            "apikey": service_role_key,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal",
+        },
+        json={"next_starter": consumed_payload},
+        timeout=request_timeout,
+    )
+    response.raise_for_status()
+    return True
 
 
 def fetch_next_starter_audio(audio_url: str) -> bytes:
