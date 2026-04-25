@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from google.cloud import firestore
@@ -289,15 +289,6 @@ def _is_device_allowed(device_id: str) -> bool:
     if not allowed:
         return True
     return normalized in allowed
-
-
-def _reminder_max_lateness() -> timedelta:
-    raw = os.environ.get("REMINDER_MAX_LATENESS_SECONDS", "180")
-    try:
-        seconds = max(0, int(raw))
-    except ValueError:
-        seconds = 180
-    return timedelta(seconds=seconds)
 
 
 def _same_occurrence(current_value: Any, expected_iso: str) -> bool:
@@ -609,7 +600,6 @@ def run_send_reminder_push_job(
     count = 0
     results: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
-    max_lateness = _reminder_max_lateness()
 
     for reminder_doc in query.stream():
         count += 1
@@ -618,7 +608,6 @@ def run_send_reminder_push_job(
             reminder_data = reminder_doc.to_dict() or {}
             delivery_channels = _resolve_delivery_channels(reminder_data)
             uid = _resolve_uid_from_reminder_doc(reminder_doc, reminder_data)
-            next_occurrence_str = reminder_data.get("nextOccurrenceUTC")
             if not uid:
                 skipped += 1
                 results.append(
@@ -638,41 +627,6 @@ def run_send_reminder_push_job(
                         "processed": False,
                         "deliveryChannel": delivery_channels,
                         "skipped": "user_filtered",
-                    }
-                )
-                continue
-            if not next_occurrence_str:
-                skipped += 1
-                results.append(
-                    {
-                        "reminderId": reminder_id,
-                        "userId": uid,
-                        "processed": False,
-                        "skipped": "missing_occurrence",
-                    }
-                )
-                continue
-            next_occurrence = _parse_occurrence(next_occurrence_str)
-            if next_occurrence is None:
-                skipped += 1
-                results.append(
-                    {
-                        "reminderId": reminder_id,
-                        "userId": uid,
-                        "processed": False,
-                        "skipped": "invalid_occurrence",
-                    }
-                )
-                continue
-            if max_lateness and next_occurrence < (now - max_lateness):
-                skipped += 1
-                results.append(
-                    {
-                        "reminderId": reminder_id,
-                        "userId": uid,
-                        "processed": False,
-                        "deliveryChannel": delivery_channels,
-                        "skipped": "too_late",
                     }
                 )
                 continue
@@ -710,6 +664,18 @@ def run_send_reminder_push_job(
                         character_cache[active_character_id] = character_data
 
             label = reminder_data.get("label", "Reminder")
+            next_occurrence_str = reminder_data.get("nextOccurrenceUTC")
+            if not next_occurrence_str:
+                skipped += 1
+                results.append(
+                    {
+                        "reminderId": reminder_id,
+                        "userId": uid,
+                        "processed": False,
+                        "skipped": "missing_occurrence",
+                    }
+                )
+                continue
             user_name = user_data.get("name") or "there"
 
             try:

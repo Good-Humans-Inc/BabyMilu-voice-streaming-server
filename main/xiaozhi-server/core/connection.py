@@ -1991,12 +1991,6 @@ Return ONLY the JSON array, no other explanation."""
             reminder_context = reminder_context.strip()
         else:
             reminder_context = ""
-        if not reminder_context:
-            fallback_context = session_config.get("title") or session_config.get("label")
-            if isinstance(fallback_context, str):
-                reminder_context = fallback_context.strip()
-            else:
-                reminder_context = ""
         if reminder_context:
             # Make reminder purpose explicit in first-turn prompt guidance so
             # server-initiated alarm speech consistently mentions the reason.
