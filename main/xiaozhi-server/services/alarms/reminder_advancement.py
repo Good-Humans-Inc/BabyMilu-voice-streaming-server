@@ -1,6 +1,6 @@
 """
 Reminder next-occurrence math aligned with babymilu-backend
-`services/reminder_helper.py` (used by sendReminderPush / advance_recurring_reminder).
+`services/reminder_helper.py` (used by the reminder advancement flow).
 
 Uses zoneinfo.ZoneInfo instead of pytz to avoid an extra dependency.
 """

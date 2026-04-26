@@ -1,267 +1,390 @@
-"""Tests for scheduler behaviour when reminders are present.
-
-Verifies:
-- prepare_wake_requests merges alarms + reminders
-- Reminders always get the short (1-min) session TTL regardless of repeat
-- Reminder session_config contains mode: "reminder"
-- Alarms and reminders don't interfere with each other
-"""
+"""Tests for unified reminder orchestration behavior."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
-from services.alarms import models, scheduler
-from services.session_context import models as session_models
-
-
-# ---------------------------------------------------------------------------
-# Shared helpers (mirrors test_scheduler.py helpers)
-# ---------------------------------------------------------------------------
-
-class _FakeSessionStore:
-    def __init__(self):
-        self.sessions: dict = {}
-        self.created: list = []
-
-    def get_session(self, device_id: str, now: datetime | None = None):
-        return self.sessions.get(device_id)
-
-    def create_session(
-        self, *, device_id, session_type, ttl, triggered_at, session_config
-    ):
-        session = session_models.ModeSession(
-            device_id=device_id,
-            session_type=session_type,
-            triggered_at=triggered_at,
-            ttl_seconds=int(ttl.total_seconds()),
-            session_config=session_config,
-        )
-        self.sessions[device_id] = session
-        self.created.append((device_id, session_config))
-        return session
-
-    def delete_session(self, device_id: str):
-        self.sessions.pop(device_id, None)
+from services.alarms import reminder_push_job
 
 
-def _make_alarm_doc(
-    device_id: str,
-    mode: str,
-    *,
-    repeat: models.AlarmRepeat = models.AlarmRepeat.NONE,
-    alarm_id: str = "alarm-001",
-    doc_path_collection: str = "alarms",
-    next_occurrence: datetime | None = None,
-    last_processed: datetime | None = None,
-    label: str = "Test",
-    context: str | None = None,
-) -> models.AlarmDoc:
-    schedule = models.AlarmSchedule(
-        repeat=repeat,
-        time_local="14:00",
-        days=["2026-06-01"] if repeat == models.AlarmRepeat.NONE else ["Mon"],
+class _FakeQuery:
+    def __init__(self, docs):
+        self.docs = docs
+
+    def where(self, *args, **kwargs):
+        return self
+
+    def stream(self):
+        return self.docs
+
+
+class _FakeDocRef:
+    def __init__(self, path: str):
+        self.path = path
+
+
+class _FakeReminderDoc:
+    def __init__(self, doc_id: str, data: dict):
+        self.id = doc_id
+        self._data = data
+        self.reference = _FakeDocRef(f"reminders/{doc_id}")
+
+    def to_dict(self):
+        return dict(self._data)
+
+
+class _FakeSnapshot:
+    def __init__(self, payload: dict | None):
+        self._payload = payload or {}
+        self.exists = payload is not None
+
+    def to_dict(self):
+        return dict(self._payload)
+
+
+class _FakeCollection:
+    def __init__(self, store: dict):
+        self.store = store
+        self._doc_id = None
+
+    def document(self, doc_id: str):
+        self._doc_id = doc_id
+        return self
+
+    def get(self):
+        return _FakeSnapshot(self.store.get(self._doc_id))
+
+
+class _FakeClient:
+    def __init__(self, reminder_docs, users, characters):
+        self.reminder_docs = reminder_docs
+        self.users = users
+        self.characters = characters
+
+    def collection_group(self, name: str):
+        assert name == "reminders"
+        return _FakeQuery(self.reminder_docs)
+
+    def collection(self, name: str):
+        if name == "users":
+            return _FakeCollection(self.users)
+        if name == "characters":
+            return _FakeCollection(self.characters)
+        raise AssertionError(f"unexpected collection {name}")
+
+
+def _make_client(reminder_data: dict) -> _FakeClient:
+    doc = _FakeReminderDoc("rem-1", reminder_data)
+    return _FakeClient(
+        [doc],
+        {
+            "+1": {
+                "name": "Yan",
+                "timezone": "UTC",
+                "fcm": "ExponentPushToken[test]",
+                "characterIds": ["char-1"],
+            }
+        },
+        {
+            "char-1": {
+                "profile": {"name": "Milu", "personality": "warm", "characterToUser": "friend"},
+                "emotionUrls": {"normal": {"thumbnail": "https://example.com/a.png"}},
+            }
+        },
     )
-    target = models.AlarmTarget(device_id=device_id, mode=mode)
-    return models.AlarmDoc(
-        alarm_id=alarm_id,
-        user_id="+1",
+
+
+def test_delivery_channel_defaults_to_app_when_missing(monkeypatch):
+    now = datetime(2026, 4, 25, 8, 0, tzinfo=timezone.utc)
+    client = _make_client(
+        {
+            "uid": "+1",
+            "label": "take vitamins",
+            "nextOccurrenceUTC": "2026-04-25T08:00:00Z",
+            "schedule": {"repeat": "weekly", "timeLocal": "08:00", "days": ["Fri"]},
+        }
+    )
+
+    monkeypatch.setattr(reminder_push_job, "get_ai_message", lambda **kwargs: "msg")
+    calls = []
+    monkeypatch.setattr(
+        reminder_push_job,
+        "_send_app_notification",
+        lambda **kwargs: calls.append("app") or True,
+    )
+    monkeypatch.setattr(
+        reminder_push_job,
+        "_send_plushie_notification",
+        lambda **kwargs: calls.append("plushie") or True,
+    )
+    monkeypatch.setattr(
+        reminder_push_job,
+        "_finalize_if_occurrence_matches",
+        lambda **kwargs: True,
+    )
+
+    result = reminder_push_job.run_send_reminder_push_job(
+        execute=True,
+        now=now,
+        client=client,
+    )
+
+    assert result["triggered"] == 1
+    assert calls == ["app"]
+    assert result["results"][0]["deliveryChannel"] == ["app"]
+
+
+def test_both_channel_reminder_sends_app_then_plushie_then_finalizes(monkeypatch):
+    now = datetime(2026, 4, 25, 8, 0, tzinfo=timezone.utc)
+    client = _make_client(
+        {
+            "uid": "+1",
+            "label": "drink water",
+            "nextOccurrenceUTC": "2026-04-25T08:00:00Z",
+            "schedule": {"repeat": "weekly", "timeLocal": "08:00", "days": ["Fri"]},
+            "deliveryChannel": ["app", "plushie"],
+            "targets": [{"deviceId": "aa:bb:cc:dd:ee:ff", "mode": "reminder"}],
+            "context": "drink water",
+        }
+    )
+
+    monkeypatch.setattr(reminder_push_job, "get_ai_message", lambda **kwargs: "msg")
+    order: list[str] = []
+    monkeypatch.setattr(
+        reminder_push_job,
+        "_send_app_notification",
+        lambda **kwargs: order.append("app") or True,
+    )
+    plushie_calls = []
+    monkeypatch.setattr(
+        reminder_push_job,
+        "_send_plushie_notification",
+        lambda **kwargs: plushie_calls.append(kwargs) or order.append("plushie") or True,
+    )
+    captured = {}
+
+    def fake_finalize(**kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(reminder_push_job, "_finalize_if_occurrence_matches", fake_finalize)
+
+    result = reminder_push_job.run_send_reminder_push_job(
+        execute=True,
+        now=now,
+        client=client,
+    )
+
+    assert order == ["app", "plushie"]
+    assert result["triggered"] == 1
+    assert result["results"][0]["appSent"] is True
+    assert result["results"][0]["plushieSent"] is True
+    assert plushie_calls[0]["first_message"] == "msg"
+    assert captured["expected_occurrence_iso"] == "2026-04-25T08:00:00Z"
+    assert captured["updates"]["lastDelivered.app.at"] == now.isoformat()
+    assert captured["updates"]["lastDelivered.plushie.at"] == now.isoformat()
+    assert captured["updates"]["lastDelivered.occurrenceUTC"] == "2026-04-25T08:00:00Z"
+
+
+def test_plushie_success_can_finalize_dual_channel_when_app_fails(monkeypatch):
+    now = datetime(2026, 4, 25, 8, 0, tzinfo=timezone.utc)
+    client = _make_client(
+        {
+            "uid": "+1",
+            "label": "stretch",
+            "nextOccurrenceUTC": "2026-04-25T08:00:00Z",
+            "schedule": {"repeat": "weekly", "timeLocal": "08:00", "days": ["Fri"]},
+            "deliveryChannel": ["app", "plushie"],
+            "targets": [{"deviceId": "aa:bb:cc:dd:ee:ff", "mode": "reminder"}],
+        }
+    )
+
+    monkeypatch.setattr(reminder_push_job, "get_ai_message", lambda **kwargs: "msg")
+    monkeypatch.setattr(reminder_push_job, "_send_app_notification", lambda **kwargs: False)
+    monkeypatch.setattr(reminder_push_job, "_send_plushie_notification", lambda **kwargs: True)
+    captured = {}
+    monkeypatch.setattr(
+        reminder_push_job,
+        "_finalize_if_occurrence_matches",
+        lambda **kwargs: captured.update(kwargs) or True,
+    )
+
+    result = reminder_push_job.run_send_reminder_push_job(
+        execute=True,
+        now=now,
+        client=client,
+    )
+
+    assert result["triggered"] == 1
+    assert result["results"][0]["appSent"] is False
+    assert result["results"][0]["plushieSent"] is True
+    assert "lastDelivered.app.at" not in captured["updates"]
+    assert captured["updates"]["lastDelivered.plushie.at"] == now.isoformat()
+
+
+def test_stale_occurrence_skips_finalize(monkeypatch):
+    now = datetime(2026, 4, 25, 8, 0, tzinfo=timezone.utc)
+    client = _make_client(
+        {
+            "uid": "+1",
+            "label": "call mom",
+            "nextOccurrenceUTC": "2026-04-25T08:00:00Z",
+            "schedule": {"repeat": "weekly", "timeLocal": "08:00", "days": ["Fri"]},
+            "deliveryChannel": ["app"],
+        }
+    )
+
+    monkeypatch.setattr(reminder_push_job, "get_ai_message", lambda **kwargs: "msg")
+    monkeypatch.setattr(reminder_push_job, "_send_app_notification", lambda **kwargs: True)
+    monkeypatch.setattr(reminder_push_job, "_finalize_if_occurrence_matches", lambda **kwargs: False)
+
+    result = reminder_push_job.run_send_reminder_push_job(
+        execute=True,
+        now=now,
+        client=client,
+    )
+
+    assert result["triggered"] == 0
+    assert result["skipped"] == 1
+    assert result["results"][0]["skipped"] == "stale_occurrence"
+
+
+def test_reminder_allowlist_filters_non_test_user(monkeypatch):
+    now = datetime(2026, 4, 25, 8, 0, tzinfo=timezone.utc)
+    client = _make_client(
+        {
+            "uid": "+1",
+            "label": "call mom",
+            "nextOccurrenceUTC": "2026-04-25T08:00:00Z",
+            "schedule": {"repeat": "weekly", "timeLocal": "08:00", "days": ["Fri"]},
+            "deliveryChannel": ["app"],
+        }
+    )
+
+    monkeypatch.setenv("REMINDER_USER_ALLOWLIST", "+11111111111")
+    monkeypatch.setattr(reminder_push_job, "get_ai_message", lambda **kwargs: "msg")
+    monkeypatch.setattr(reminder_push_job, "_send_app_notification", lambda **kwargs: True)
+
+    result = reminder_push_job.run_send_reminder_push_job(
+        execute=True,
+        now=now,
+        client=client,
+    )
+
+    assert result["triggered"] == 0
+    assert result["skipped"] == 1
+    assert result["results"][0]["skipped"] == "user_filtered"
+
+
+def test_reminder_lateness_cap_skips_old_occurrence(monkeypatch):
+    now = datetime(2026, 4, 25, 8, 0, tzinfo=timezone.utc)
+    client = _make_client(
+        {
+            "uid": "+1",
+            "label": "stale reminder",
+            "nextOccurrenceUTC": "2026-04-25T07:56:00Z",
+            "schedule": {"repeat": "weekly", "timeLocal": "07:56", "days": ["Fri"]},
+            "deliveryChannel": ["app"],
+        }
+    )
+
+    monkeypatch.setenv("REMINDER_MAX_LATENESS_SECONDS", "180")
+    monkeypatch.setattr(reminder_push_job, "get_ai_message", lambda **kwargs: "msg")
+    monkeypatch.setattr(reminder_push_job, "_send_app_notification", lambda **kwargs: True)
+
+    result = reminder_push_job.run_send_reminder_push_job(
+        execute=True,
+        now=now,
+        client=client,
+    )
+
+    assert result["triggered"] == 0
+    assert result["skipped"] == 1
+    assert result["results"][0]["skipped"] == "too_late"
+
+
+def test_reminder_lateness_cap_allows_recent_occurrence(monkeypatch):
+    now = datetime(2026, 4, 25, 8, 0, tzinfo=timezone.utc)
+    client = _make_client(
+        {
+            "uid": "+1",
+            "label": "recent reminder",
+            "nextOccurrenceUTC": "2026-04-25T07:58:30Z",
+            "schedule": {"repeat": "weekly", "timeLocal": "07:58", "days": ["Fri"]},
+            "deliveryChannel": ["app"],
+        }
+    )
+
+    monkeypatch.setenv("REMINDER_MAX_LATENESS_SECONDS", "180")
+    monkeypatch.setattr(reminder_push_job, "get_ai_message", lambda **kwargs: "msg")
+    monkeypatch.setattr(reminder_push_job, "_send_app_notification", lambda **kwargs: True)
+    monkeypatch.setattr(
+        reminder_push_job,
+        "_finalize_if_occurrence_matches",
+        lambda **kwargs: True,
+    )
+
+    result = reminder_push_job.run_send_reminder_push_job(
+        execute=True,
+        now=now,
+        client=client,
+    )
+
+    assert result["triggered"] == 1
+    assert result["skipped"] == 0
+
+
+def test_plushie_session_hydration_includes_reminder_title(monkeypatch):
+    now = datetime(2026, 4, 25, 8, 0, tzinfo=timezone.utc)
+    created = {}
+
+    class _FakeStore:
+        def get_session(self, device_id, now=None):
+            return None
+
+        def create_session(
+            self,
+            *,
+            device_id,
+            session_type,
+            ttl,
+            triggered_at,
+            session_config,
+        ):
+            created.update(
+                {
+                    "device_id": device_id,
+                    "session_type": session_type,
+                    "ttl": ttl,
+                    "triggered_at": triggered_at,
+                    "session_config": session_config,
+                }
+            )
+            return type("Session", (), {"device_id": device_id})()
+
+        def delete_session(self, device_id):
+            raise AssertionError("delete_session should not be called on publish success")
+
+    monkeypatch.setenv("ALARM_WS_URL", "wss://example.com/ws")
+    monkeypatch.setenv("ALARM_MQTT_URL", "mqtt://example.com")
+    monkeypatch.setattr(reminder_push_job, "session_context_store", _FakeStore())
+    monkeypatch.setattr(reminder_push_job, "publish_ws_start", lambda *args, **kwargs: True)
+
+    sent = reminder_push_job._send_plushie_notification(
+        reminder_id="rem-123",
+        reminder_data={
+            "targets": [{"deviceId": "aa:bb:cc:dd:ee:ff", "mode": "reminder"}],
+            "context": "drink water",
+        },
         uid="+1",
-        label=label,
-        context=context,
-        schedule=schedule,
-        status=models.AlarmStatus.ON,
-        next_occurrence_utc=next_occurrence or datetime.now(timezone.utc),
-        targets=[target],
-        updated_at=None,
-        raw={"timezone": "UTC"},
-        doc_path=f"users/+1/{doc_path_collection}/{alarm_id}",
-        last_processed_utc=last_processed,
+        label="Drink water",
+        first_message="Don't forget to drink water.",
+        now=now,
     )
 
-
-# ---------------------------------------------------------------------------
-# Reminders use the short (1-min) session TTL
-# ---------------------------------------------------------------------------
-
-def test_reminder_wake_request_uses_short_session_ttl(monkeypatch):
-    fake_store = _FakeSessionStore()
-    monkeypatch.setattr(scheduler, "session_context_store", fake_store)
-
-    reminder = _make_alarm_doc(
-        "DEV-R1", "reminder",
-        repeat=models.AlarmRepeat.NONE,
-        alarm_id="reminder-001",
-        doc_path_collection="reminders",
-    )
-
-    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", lambda now, lookahead: [])
-    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_reminders", lambda now, lookahead: [reminder])
-
-    wake_requests = scheduler.prepare_wake_requests(
-        datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
-    )
-
-    assert len(wake_requests) == 1
-    ttl = wake_requests[0].session.ttl_seconds
-    assert ttl == int(scheduler.ONE_TIME_SESSION_TTL.total_seconds()), (
-        f"Reminder should use ONE_TIME_SESSION_TTL ({scheduler.ONE_TIME_SESSION_TTL}) "
-        f"but got {ttl}s"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Reminder session_config has mode: "reminder"
-# ---------------------------------------------------------------------------
-
-def test_reminder_session_config_has_reminder_mode(monkeypatch):
-    fake_store = _FakeSessionStore()
-    monkeypatch.setattr(scheduler, "session_context_store", fake_store)
-
-    reminder = _make_alarm_doc(
-        "DEV-R2", "reminder",
-        alarm_id="reminder-002",
-        doc_path_collection="reminders",
-        label="drink water",
-        context="drink water",
-    )
-
-    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", lambda now, lookahead: [])
-    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_reminders", lambda now, lookahead: [reminder])
-
-    scheduler.prepare_wake_requests(datetime.now(timezone.utc), lookahead=timedelta(minutes=1))
-
-    assert "DEV-R2" in fake_store.sessions
-    cfg = fake_store.sessions["DEV-R2"].session_config
-    assert cfg["mode"] == "reminder"
-    assert cfg["label"] == "drink water"
-    assert cfg["context"] == "drink water"
-
-
-# ---------------------------------------------------------------------------
-# Alarms and reminders are merged without interfering
-# ---------------------------------------------------------------------------
-
-def test_prepare_wake_requests_merges_alarms_and_reminders(monkeypatch):
-    fake_store = _FakeSessionStore()
-    monkeypatch.setattr(scheduler, "session_context_store", fake_store)
-
-    alarm = _make_alarm_doc(
-        "DEV-A1", "morning_alarm",
-        repeat=models.AlarmRepeat.WEEKLY,
-        alarm_id="alarm-001",
-        doc_path_collection="alarms",
-    )
-    reminder = _make_alarm_doc(
-        "DEV-R1", "reminder",
-        repeat=models.AlarmRepeat.NONE,
-        alarm_id="reminder-001",
-        doc_path_collection="reminders",
-    )
-
-    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", lambda now, lookahead: [alarm])
-    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_reminders", lambda now, lookahead: [reminder])
-
-    wake_requests = scheduler.prepare_wake_requests(
-        datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
-    )
-
-    assert len(wake_requests) == 2
-    device_ids = {r.target.device_id for r in wake_requests}
-    assert "DEV-A1" in device_ids
-    assert "DEV-R1" in device_ids
-
-
-def test_alarm_session_ttl_unaffected_by_reminders(monkeypatch):
-    """Recurring alarm still gets SESSION_TTL (5 min), not the short reminder TTL."""
-    fake_store = _FakeSessionStore()
-    monkeypatch.setattr(scheduler, "session_context_store", fake_store)
-
-    alarm = _make_alarm_doc(
-        "DEV-A2", "morning_alarm",
-        repeat=models.AlarmRepeat.WEEKLY,
-        alarm_id="alarm-002",
-        doc_path_collection="alarms",
-    )
-
-    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", lambda now, lookahead: [alarm])
-    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_reminders", lambda now, lookahead: [])
-
-    wake_requests = scheduler.prepare_wake_requests(
-        datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
-    )
-
-    assert len(wake_requests) == 1
-    ttl = wake_requests[0].session.ttl_seconds
-    assert ttl == int(scheduler.SESSION_TTL.total_seconds())
-
-
-# ---------------------------------------------------------------------------
-# Existing session on device blocks reminder (same dedup logic as alarms)
-# ---------------------------------------------------------------------------
-
-def test_prepare_wake_requests_skips_reminder_if_device_has_active_session(monkeypatch):
-    fake_store = _FakeSessionStore()
-    fake_store.sessions["DEV-R3"] = session_models.ModeSession(
-        device_id="DEV-R3",
-        session_type="alarm",
-        triggered_at=datetime.now(timezone.utc),
-        ttl_seconds=300,
-        session_config={"mode": "morning_alarm"},
-    )
-    monkeypatch.setattr(scheduler, "session_context_store", fake_store)
-
-    reminder = _make_alarm_doc("DEV-R3", "reminder", alarm_id="r-3", doc_path_collection="reminders")
-
-    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", lambda now, lookahead: [])
-    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_reminders", lambda now, lookahead: [reminder])
-
-    wake_requests = scheduler.prepare_wake_requests(
-        datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
-    )
-
-    assert wake_requests == []
-
-
-# ---------------------------------------------------------------------------
-# finalize_wake_request for a reminder marks it complete (status → off)
-# ---------------------------------------------------------------------------
-
-def test_finalize_wake_request_marks_reminder_complete(monkeypatch):
-    """Reminder docs (repeat=NONE) must call mark_one_time_alarm_complete."""
-    next_occurrence = datetime(2026, 6, 1, 14, tzinfo=timezone.utc)
-    reminder = _make_alarm_doc(
-        "DEV-R4", "reminder",
-        repeat=models.AlarmRepeat.NONE,
-        alarm_id="reminder-004",
-        doc_path_collection="reminders",
-        next_occurrence=next_occurrence,
-    )
-    target = models.AlarmTarget(device_id="DEV-R4", mode="reminder")
-    fake_session = session_models.ModeSession(
-        device_id="DEV-R4",
-        session_type="alarm",
-        triggered_at=datetime.now(timezone.utc),
-        ttl_seconds=60,
-        session_config={"mode": "reminder"},
-    )
-    wake_request = scheduler.tasks.WakeRequest(alarm=reminder, target=target, session=fake_session)
-
-    completed = {}
-    mark_processed_called = False
-
-    def fake_complete(alarm, *, last_processed):
-        completed["alarm_id"] = alarm.alarm_id
-        completed["last_processed"] = last_processed
-
-    def fake_mark(*args, **kwargs):
-        nonlocal mark_processed_called
-        mark_processed_called = True
-
-    monkeypatch.setattr(scheduler.firestore_client, "mark_one_time_alarm_complete", fake_complete)
-    monkeypatch.setattr(scheduler.firestore_client, "mark_alarm_processed", fake_mark)
-
-    scheduler.finalize_wake_request(wake_request, now=datetime.now(timezone.utc))
-
-    assert completed["alarm_id"] == "reminder-004"
-    assert completed["last_processed"] == next_occurrence
-    assert mark_processed_called is False  # must NOT call recurring path
+    assert sent is True
+    assert created["session_type"] == "alarm"
+    assert created["session_config"]["reminderId"] == "rem-123"
+    assert created["session_config"]["label"] == "Drink water"
+    assert created["session_config"]["title"] == "Drink water"
+    assert created["session_config"]["context"] == "drink water"
+    assert created["session_config"]["firstMessage"] == "Don't forget to drink water."

@@ -251,7 +251,7 @@ def test_process_due_reminders_daily_stale_next_jumps_past_now(monkeypatch):
 
 
 def test_process_due_reminders_skips_not_yet_due_inside_lookahead(monkeypatch):
-    """Lookahead may include future slots; sendReminderPush only fires when due <= now."""
+    """Lookahead may include future slots; reminders only fire when due <= now."""
     now = datetime(2026, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
     due = datetime(2026, 1, 1, 10, 15, 0, tzinfo=timezone.utc)
     data = {
@@ -283,4 +283,3 @@ def test_process_due_reminders_skips_not_yet_due_inside_lookahead(monkeypatch):
     assert result["triggered"] == 0
     assert result["results"][0]["skipped"] == "not_yet_due"
     assert doc.reference._writes == []
-
