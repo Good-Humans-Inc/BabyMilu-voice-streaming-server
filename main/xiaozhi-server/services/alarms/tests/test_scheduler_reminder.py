@@ -72,12 +72,12 @@ class _FakeClient:
         raise AssertionError(f"unexpected collection {name}")
 
 
-def _make_client(reminder_data: dict) -> _FakeClient:
+def _make_client(reminder_data: dict, user_payload: dict | None = None) -> _FakeClient:
     doc = _FakeReminderDoc("rem-1", reminder_data)
     return _FakeClient(
         [doc],
         {
-            "+1": {
+            "+1": user_payload or {
                 "name": "Yan",
                 "timezone": "UTC",
                 "fcm": "ExponentPushToken[test]",
@@ -331,6 +331,38 @@ def test_reminder_lateness_cap_allows_recent_occurrence(monkeypatch):
 
     assert result["triggered"] == 1
     assert result["skipped"] == 0
+
+
+def test_recurring_reminder_requires_user_timezone(monkeypatch):
+    now = datetime(2026, 4, 25, 8, 0, tzinfo=timezone.utc)
+    client = _make_client(
+        {
+            "uid": "+1",
+            "label": "timezone required",
+            "nextOccurrenceUTC": "2026-04-25T08:00:00Z",
+            "schedule": {"repeat": "weekly", "timeLocal": "08:00", "days": ["Fri"]},
+            "deliveryChannel": ["app"],
+        },
+        user_payload={
+            "name": "Yan",
+            "timezone": "",
+            "fcm": "ExponentPushToken[test]",
+            "characterIds": ["char-1"],
+        },
+    )
+
+    monkeypatch.setattr(reminder_push_job, "get_ai_message", lambda **kwargs: "msg")
+    monkeypatch.setattr(reminder_push_job, "_send_app_notification", lambda **kwargs: True)
+
+    result = reminder_push_job.run_send_reminder_push_job(
+        execute=True,
+        now=now,
+        client=client,
+    )
+
+    assert result["triggered"] == 0
+    assert result["skipped"] == 1
+    assert result["results"][0]["skipped"] == "missing_user_timezone"
 
 
 def test_plushie_session_hydration_includes_reminder_title(monkeypatch):

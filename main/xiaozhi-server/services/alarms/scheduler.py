@@ -170,14 +170,11 @@ def compute_next_occurrence(
 
 
 def _resolve_timezone(alarm: models.AlarmDoc) -> str:
-    raw = alarm.raw or {}
-    tz_name = raw.get("timezone")
+    tz_name = (alarm.user_timezone or "").strip()
     if not tz_name:
-        user_block = raw.get("user")
-        if isinstance(user_block, dict):
-            tz_name = user_block.get("timezone")
+        tz_name = (firestore_client.fetch_user_timezone(alarm.user_id) or "").strip()
     if not tz_name:
         raise ValueError(
-            f"Alarm {alarm.alarm_id} (user={alarm.user_id}) missing timezone metadata."
+            f"Alarm {alarm.alarm_id} (user={alarm.user_id}) missing users/{alarm.user_id}.timezone."
         )
     return tz_name
