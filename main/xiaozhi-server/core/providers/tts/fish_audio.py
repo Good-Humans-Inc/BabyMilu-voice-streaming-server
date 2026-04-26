@@ -210,9 +210,13 @@ class TTSProvider(TTSProviderBase):
         )
 
     def _resolve_reference_id(self):
+        reference_id, _ = self._resolve_reference_id_with_source()
+        return reference_id
+
+    def _resolve_reference_id_with_source(self):
         if self.conn and getattr(self.conn, "voice_id", None):
-            return self.conn.voice_id
-        return self.default_reference_id
+            return self.conn.voice_id, "conn.voice_id"
+        return self.default_reference_id, "default_config"
 
     def tts_text_priority_thread(self):
         while not self.conn.stop_event.is_set():
@@ -279,7 +283,7 @@ class TTSProvider(TTSProviderBase):
                 )
 
     async def text_to_speak(self, text, _output_file=None, is_last_segment=True):
-        reference_id = self._resolve_reference_id()
+        reference_id, reference_source = self._resolve_reference_id_with_source()
         if not reference_id:
             raise Exception(
                 "No Fish Audio reference_id configured. "
@@ -354,7 +358,14 @@ class TTSProvider(TTSProviderBase):
 
                         if resp.status != 200:
                             body = await resp.text()
-                            raise Exception(f"Fish Audio TTS failed: {resp.status} - {body}")
+                            if resp.status == 400 and "Reference not found" in body:
+                                logger.bind(tag=TAG).warning(
+                                    f"Fish Audio reference not found: reference_id={reference_id}, "
+                                    f"source={reference_source}"
+                                )
+                            raise Exception(
+                                f"Fish Audio TTS failed: {resp.status} - {body}"
+                            )
 
                         self.tts_audio_queue.put((SentenceType.FIRST, [], text))
 
