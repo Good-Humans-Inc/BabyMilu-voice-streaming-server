@@ -300,6 +300,19 @@ def _reminder_max_lateness() -> timedelta:
     return timedelta(seconds=seconds)
 
 
+def _resolve_user_timezone(user_data: Dict[str, Any]) -> Optional[str]:
+    timezone_value = (
+        user_data.get("timezone")
+        or user_data.get("timeZone")
+        or user_data.get("timezoneId")
+        or user_data.get("userTimezone")
+    )
+    if not timezone_value:
+        return None
+    timezone_name = str(timezone_value).strip()
+    return timezone_name or None
+
+
 def _same_occurrence(current_value: Any, expected_iso: str) -> bool:
     current_dt = _parse_occurrence(current_value)
     expected_dt = _parse_occurrence(expected_iso)
@@ -694,6 +707,20 @@ def run_send_reminder_push_job(
                     continue
                 user_cache[uid] = user_snap.to_dict() or {}
             user_data = user_cache[uid]
+            user_timezone = _resolve_user_timezone(user_data)
+            repeat = str(reminder_data.get("schedule", {}).get("repeat", "")).strip().lower()
+            if repeat not in ONE_TIME_REPEATS and not user_timezone:
+                skipped += 1
+                results.append(
+                    {
+                        "reminderId": reminder_id,
+                        "userId": uid,
+                        "processed": False,
+                        "deliveryChannel": delivery_channels,
+                        "skipped": "missing_user_timezone",
+                    }
+                )
+                continue
 
             character_ids = user_data.get("characterIds") or []
             character_data: Dict[str, Any] = {}
@@ -793,7 +820,7 @@ def run_send_reminder_push_job(
                     reminder_data=reminder_data,
                     expected_occurrence_iso=str(next_occurrence_str),
                     now=now,
-                    user_timezone=str(user_data.get("timezone", "America/Los_Angeles")),
+                    user_timezone=user_timezone,
                     app_sent=app_sent,
                     plushie_sent=plushie_sent,
                 )

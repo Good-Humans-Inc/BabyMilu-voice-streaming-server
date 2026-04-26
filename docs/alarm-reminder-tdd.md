@@ -11,7 +11,9 @@ Linked PRD:
 V1 keeps the same server-driven architecture for alarms and reminders, but
 changes the reminder delivery model to remove race conditions, remove
 lookahead-based early firing, and improve plushie reminder hydration for
-app-created reminders.
+app-created reminders. V1 also standardizes timezone resolution so both alarm
+and reminder scheduling read from `users/{uid}.timezone` as the only ground
+truth.
 
 ### What Changed From V0
 
@@ -75,7 +77,19 @@ V1 includes a documented smoke-testing setup:
 
 See:
 
-- [Reminder Smoke Testing TDD](/Users/yan/Desktop/BabyMilu/BabyMilu-voice-streaming-server-apr-reminder-racing-fix/docs/reminder-smoke-testing-tdd.md)
+- [Reminder Smoke Testing TDD](./reminder-smoke-testing-tdd.md)
+
+#### 7. `users/{uid}.timezone` is the only schedule timezone source of truth
+
+Alarm and reminder recurrence now resolve timezone from the user document, not
+from the scheduled item itself.
+
+- alarms advance using `users/{uid}.timezone`
+- reminders advance using `users/{uid}.timezone`
+- legacy `timezone` fields that may still exist on individual alarm/reminder
+  docs are not trusted for recurrence math
+- if a recurring item has no usable `users/{uid}.timezone`, it must not silently
+  fall back to an arbitrary default timezone
 
 ## V1 Architecture
 
@@ -110,6 +124,12 @@ The system remains backend-driven.
 9. Recurring alarms advance to the next occurrence.
 10. One-time alarms are completed.
 
+Alarm recurrence timezone resolution order:
+
+1. cached `users/{uid}.timezone` loaded during fetch
+2. fresh `users/{uid}` lookup if cache is unavailable
+3. fail loudly if the user profile timezone is still missing
+
 ### Reminder workflow
 
 1. Reminder is created from app or voice and stored in Firestore.
@@ -134,6 +154,13 @@ The system remains backend-driven.
    - `lastDelivered.app.at`
    - `lastDelivered.plushie.at`
    - `lastDelivered.occurrenceUTC`
+
+Reminder recurrence timezone rule:
+
+- recurring reminders advance using `users/{uid}.timezone`
+- one-time reminders do not need timezone to turn `off`
+- if a recurring reminder has no usable `users/{uid}.timezone`, skip it rather
+  than silently advancing in `UTC` or another fallback zone
 
 ## Latest Schema
 
@@ -164,6 +191,12 @@ Path:
   "updatedAt": "<timestamp>"
 }
 ```
+
+Note:
+
+- a legacy `timezone` field may still appear on some alarm docs from older
+  writes, but V1 runtime logic uses `users/{uid}.timezone` for recurrence
+  instead
 
 ### Reminder
 
@@ -204,6 +237,12 @@ Path:
   "lastActionAt": null
 }
 ```
+
+Note:
+
+- a legacy `timezone` field may still appear on some reminder docs from older
+  writes, but V1 runtime logic uses `users/{uid}.timezone` for recurring
+  advancement instead
 
 ### Session Context
 
@@ -246,6 +285,7 @@ Path:
 
 - due when `nextOccurrenceUTC <= now`
 - no lookahead
+- timezone source of truth is `users/{uid}.timezone`
 - server-driven wake via MQTT + websocket mode hydration
 - recurring alarms advance after firing
 - one-time alarms complete after firing
@@ -254,6 +294,7 @@ Path:
 
 - due when `nextOccurrenceUTC <= now`
 - no lookahead
+- timezone source of truth is `users/{uid}.timezone`
 - skip active delivery if overdue by more than `3 minutes`
 - deliver all configured channels
 - finalize once
@@ -264,7 +305,7 @@ Path:
 
 See:
 
-- [Reminder Smoke Testing TDD](/Users/yan/Desktop/BabyMilu/BabyMilu-voice-streaming-server-apr-reminder-racing-fix/docs/reminder-smoke-testing-tdd.md)
+- [Reminder Smoke Testing TDD](./reminder-smoke-testing-tdd.md)
 
 ### Recommended V1 validation
 
@@ -274,6 +315,11 @@ See:
 4. App + plushie recurring reminder
 5. Stale overdue reminder
 6. Mock-device QA using the local harness
+7. User-timezone smoke:
+   - recurring reminder advances using `users/{uid}.timezone` even if the
+     reminder doc carries stale timezone metadata
+   - recurring alarm advances using `users/{uid}.timezone` even if the alarm
+     doc carries stale timezone metadata
 
 ## V0 - Oct 2025 (Archived Context)
 
