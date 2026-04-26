@@ -74,6 +74,19 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def _extract_timezone(payload: Dict[str, Any]) -> Optional[str]:
+    timezone_value = (
+        payload.get("timezone")
+        or payload.get("timeZone")
+        or payload.get("timezoneId")
+        or payload.get("userTimezone")
+    )
+    if not timezone_value:
+        return None
+    timezone_name = str(timezone_value).strip()
+    return timezone_name or None
+
+
 def _resolve_user_id(doc) -> str:
     parent = doc.reference.parent.parent
     return parent.id if parent else ""
@@ -95,7 +108,7 @@ def fetch_due_reminders(
     query = query.where(filter=FieldFilter("nextOccurrenceUTC", "<=", upper_bound_str))
 
     reminders: List[ReminderDoc] = []
-    user_tz_cache: Dict[str, str] = {}
+    user_tz_cache: Dict[str, Optional[str]] = {}
     for doc in query.stream():
         data = doc.to_dict() or {}
         user_id = _resolve_user_id(doc)
@@ -181,7 +194,7 @@ def process_due_reminders(
                 )
                 continue
 
-            # Match sendReminderPush: only fire when occurrence time has arrived
+            # Only fire when the occurrence time has arrived.
             # (lookahead widens the query for batching, not early delivery).
             if due_time > _as_utc(now):
                 skipped += 1
@@ -231,7 +244,6 @@ def process_due_reminders(
                 )
                 continue
 
-            triggered += 1
             patch: Dict[str, Any] = {
                 "lastProcessedUTC": _format_datetime(due_time),
                 "updatedAt": _format_datetime(now),
@@ -239,7 +251,18 @@ def process_due_reminders(
             if reminder.repeat in ONE_TIME_REPEATS:
                 patch["status"] = "off"
             else:
-                tz_name = reminder.timezone or "UTC"
+                tz_name = (reminder.timezone or "").strip()
+                if not tz_name:
+                    skipped += 1
+                    results.append(
+                        {
+                            "reminderId": reminder.reminder_id,
+                            "userId": reminder.user_id,
+                            "processed": False,
+                            "skipped": "missing_user_timezone",
+                        }
+                    )
+                    continue
                 advanced = reminder_advancement.compute_advance_after_firing(
                     reminder.raw,
                     tz_name,
@@ -261,6 +284,7 @@ def process_due_reminders(
                 patch["nextOccurrenceUTC"] = _format_datetime(next_occurrence)
                 patch["nextTriggerUTC"] = _format_datetime(next_trigger)
             doc_client.document(reminder.doc_path).set(patch, merge=True)
+            triggered += 1
 
             results.append(
                 {
@@ -285,30 +309,22 @@ def process_due_reminders(
     }
 
 
-def _resolve_user_timezone(doc, cache: Dict[str, str]) -> str:
+def _resolve_user_timezone(doc, cache: Dict[str, Optional[str]]) -> Optional[str]:
     parent = doc.reference.parent.parent
     if parent is None:
-        return "UTC"
+        return None
     user_id = parent.id
     if user_id in cache:
         return cache[user_id]
     try:
         snap = parent.get()
         if not snap.exists:
-            cache[user_id] = "UTC"
-            return "UTC"
+            cache[user_id] = None
+            return None
         payload = snap.to_dict() or {}
-        timezone_value = (
-            payload.get("timezone")
-            or payload.get("timeZone")
-            or payload.get("timezoneId")
-            or payload.get("userTimezone")
-            or "UTC"
-        )
-        timezone_name = str(timezone_value)
+        timezone_name = _extract_timezone(payload)
         cache[user_id] = timezone_name
         return timezone_name
     except Exception:
-        cache[user_id] = "UTC"
-        return "UTC"
-
+        cache[user_id] = None
+        return None

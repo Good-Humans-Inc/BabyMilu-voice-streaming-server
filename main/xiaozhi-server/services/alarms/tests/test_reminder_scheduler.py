@@ -250,8 +250,43 @@ def test_process_due_reminders_daily_stale_next_jumps_past_now(monkeypatch):
     assert "nextTriggerUTC" in payload
 
 
+def test_process_due_reminders_recurring_requires_user_timezone(monkeypatch):
+    now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
+    due = datetime(2026, 3, 20, 8, 0, 0, tzinfo=timezone.utc)
+    data = {
+        "status": "on",
+        "nextOccurrenceUTC": due.isoformat(),
+        "schedule": {"repeat": "daily", "timeLocal": "08:00"},
+        "label": "Pills",
+    }
+    doc = _FakeDoc(
+        path="users/user-1/reminders/rem-missing-tz",
+        doc_id="rem-missing-tz",
+        user_id="user-1",
+        data=data,
+        user_payload={"timezone": ""},
+    )
+    client = _FakeClient([doc])
+    monkeypatch.setattr(
+        reminder_scheduler, "FieldFilter", lambda field_path, op, value: (field_path, op, value)
+    )
+
+    result = reminder_scheduler.process_due_reminders(
+        now=now,
+        lookahead=timedelta(minutes=2),
+        execute=True,
+        trigger_fn=lambda reminder: True,
+        client=client,
+    )
+
+    assert result["triggered"] == 0
+    assert result["skipped"] == 1
+    assert result["results"][0]["skipped"] == "missing_user_timezone"
+    assert doc.reference._writes == []
+
+
 def test_process_due_reminders_skips_not_yet_due_inside_lookahead(monkeypatch):
-    """Lookahead may include future slots; sendReminderPush only fires when due <= now."""
+    """Lookahead may include future slots; reminders only fire when due <= now."""
     now = datetime(2026, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
     due = datetime(2026, 1, 1, 10, 15, 0, tzinfo=timezone.utc)
     data = {
@@ -283,4 +318,3 @@ def test_process_due_reminders_skips_not_yet_due_inside_lookahead(monkeypatch):
     assert result["triggered"] == 0
     assert result["results"][0]["skipped"] == "not_yet_due"
     assert doc.reference._writes == []
-
