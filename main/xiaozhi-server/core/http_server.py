@@ -75,13 +75,16 @@ class SimpleHttpServer:
 
             # 运行服务
             runner = web.AppRunner(app)
-            await runner.setup()
-            site = web.TCPSite(runner, host, port)
-            await site.start()
+            try:
+                await runner.setup()
+                site = web.TCPSite(runner, host, port)
+                await site.start()
 
-            # 保持服务运行
-            while True:
-                await asyncio.sleep(3600)  # 每隔 1 小时检查一次
+                # 保持服务运行
+                while True:
+                    await asyncio.sleep(3600)  # 每隔 1 小时检查一次
+            finally:
+                await runner.cleanup()
 
     async def handle_alarm_ws_start(self, request: web.Request) -> web.Response:
         """HTTP endpoint to publish ws_start to a device via MQTT.

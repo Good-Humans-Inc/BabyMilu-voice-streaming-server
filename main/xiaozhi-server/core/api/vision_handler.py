@@ -39,6 +39,7 @@ class VisionHandler:
     async def handle_post(self, request):
         """处理 MCP Vision POST 请求"""
         response = None  # 初始化response变量
+        vllm = None
         try:
             # 验证token
             is_valid, token_device_id = self._verify_auth_token(request)
@@ -146,9 +147,14 @@ class VisionHandler:
                 content_type="application/json",
             )
         finally:
+            if vllm:
+                try:
+                    vllm.close()
+                except Exception as e:
+                    self.logger.bind(tag=TAG).error(f"关闭VLLM供应器异常: {e}")
             if response:
                 self._add_cors_headers(response)
-            return response
+        return response
 
     async def handle_get(self, request):
         """处理 MCP Vision GET 请求"""

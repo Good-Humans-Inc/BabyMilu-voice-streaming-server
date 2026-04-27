@@ -10,3 +10,7 @@ class VLLMProviderBase(ABC):
     def response(self, question, base64_image):
         """VLLM response generator"""
         pass
+
+    def close(self):
+        """Release provider resources."""
+        pass

@@ -30,8 +30,6 @@ DEFAULT_TOTAL_TIMEOUT_SECONDS = 60
 _REQUEST_LIMITER = None
 _REQUEST_LIMITER_CAPACITY = None
 _REQUEST_LIMITER_LOCK = threading.Lock()
-_SHARED_CONNECTORS = {}
-_SHARED_CONNECTORS_LOCK = threading.Lock()
 
 
 class _FishRequestLimiter:
@@ -67,29 +65,12 @@ def _get_request_limiter(capacity: int):
         return _REQUEST_LIMITER
 
 
-def _get_shared_connector():
-    loop = asyncio.get_running_loop()
-    with _SHARED_CONNECTORS_LOCK:
-        connector = _SHARED_CONNECTORS.get(loop)
-        if connector is None or connector.closed:
-            connector = aiohttp.TCPConnector(
-                limit=0,
-                ttl_dns_cache=300,
-                use_dns_cache=True,
-            )
-            _SHARED_CONNECTORS[loop] = connector
-        return connector
-
-
 async def close_shared_resources():
-    with _SHARED_CONNECTORS_LOCK:
-        connectors = list(_SHARED_CONNECTORS.values())
-        _SHARED_CONNECTORS.clear()
+    """Compatibility hook for older smoke tests.
 
-    for connector in connectors:
-        close_result = connector.close()
-        if asyncio.iscoroutine(close_result):
-            await close_result
+    Fish Audio sessions now own their connectors so each HTTP stream closes its
+    sockets when the request exits.
+    """
 
 
 class _StreamingPcmResampler:
@@ -330,11 +311,7 @@ class TTSProvider(TTSProviderBase):
                 )
 
             try:
-                async with aiohttp.ClientSession(
-                    connector=_get_shared_connector(),
-                    connector_owner=False,
-                    timeout=timeout,
-                ) as session:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.post(
                         self.api_url,
                         data=ormsgpack.packb(

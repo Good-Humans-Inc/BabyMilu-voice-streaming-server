@@ -66,3 +66,8 @@ class VLLMProvider(VLLMProviderBase):
         except Exception as e:
             logger.bind(tag=TAG).error(f"Error in response generation: {e}")
             raise
+
+    def close(self):
+        if self.client:
+            self.client.close()
+            self.client = None
