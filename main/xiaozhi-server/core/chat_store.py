@@ -348,6 +348,9 @@ class SupabaseChatStore:
         self.character_memory_model_table = os.environ.get(
             "SUPABASE_CHARACTER_MEMORY_MODEL_TABLE", "character_memory_model"
         )
+        self.prompt_build_up_table = os.environ.get(
+            "SUPABASE_PROMPT_BUILD_UP_TABLE", "prompt_build_up"
+        )
 
         self.headers = {
             "apikey": self.service_role_key,
@@ -620,6 +623,40 @@ class SupabaseChatStore:
             return legacy_block
 
         return ""
+
+    def get_prompt_build_up(self, device_id: str) -> dict:
+        """Fetch prompt_build_up row for device_id. Returns dict with character_profile_prompt and user_profile_prompt."""
+        if not device_id:
+            return {}
+        existing = self._select_eq(self.prompt_build_up_table, "device_id", device_id)
+        if not isinstance(existing, dict):
+            return {}
+        return existing
+
+    def _ensure_character_memory_model(self, character_id: str):
+        if not character_id:
+            return
+
+        existing = self._select_eq(self.character_memory_model_table, "character_id", character_id)
+        if existing:
+            return
+
+        payload = {
+            "character_id": character_id,
+            "memory": {
+                "recentSummary": "",
+                "sharedMemories": [],
+                "userNotes": [],
+                "openLoops": [],
+            },
+            "Memory_prompt": "",
+        }
+        try:
+            self._insert(self.character_memory_model_table, payload)
+        except RuntimeError as e:
+            if "status=409" in str(e):
+                return
+            raise
 
     def get_character_memory_prompt(self, character_id: str) -> str:
         if not character_id:

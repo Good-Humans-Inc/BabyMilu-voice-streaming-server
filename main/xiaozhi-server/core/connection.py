@@ -706,6 +706,18 @@ class ConnectionHandler:
                     device_id=self.device_id,
                 )
 
+                char_id_for_mem = getattr(self, "active_character_id", None)
+                if char_id_for_mem:
+                    try:
+                        self.chat_store._ensure_character_memory_model(char_id_for_mem)
+                        self.logger.bind(tag=TAG).info(
+                            f"Ensured character_memory_model for character {char_id_for_mem}"
+                        )
+                    except Exception as e:
+                        self.logger.bind(tag=TAG).warning(
+                            f"Failed to ensure character_memory_model for {char_id_for_mem}: {e}"
+                        )
+
                 self.chat_store.create_session(
                     session_id=self.session_id,
                     user_id=self.user_id,
@@ -717,6 +729,22 @@ class ConnectionHandler:
                 self._session_created = True
                 self.logger.bind(tag=TAG).info(
                     f"✅ Session created: {self.session_id} user={self.user_id}"
+                )
+
+            # ---- PROMPT ASSEMBLY: base + character_profile_prompt + user_profile_prompt ----
+            try:
+                prompt_build_up = self.chat_store.get_prompt_build_up(self.device_id)
+                char_profile_prompt = prompt_build_up.get("character_profile_prompt") or ""
+                user_profile_prompt = prompt_build_up.get("user_profile_prompt") or ""
+                prompt_parts = [p for p in [_BASE_PROMPT, char_profile_prompt, user_profile_prompt] if p]
+                new_prompt = "\n\n".join(prompt_parts)
+                self.logger.bind(tag=TAG).info(
+                    f"Assembled system prompt from prompt_build_up: "
+                    f"base={bool(_BASE_PROMPT)}, char_profile={bool(char_profile_prompt)}, user_profile={bool(user_profile_prompt)}"
+                )
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(
+                    f"Failed to fetch prompt_build_up for {self.device_id}, using base prompt only: {e}"
                 )
 
             # ---- PROMPT UPDATE (SAFE) ----
@@ -736,9 +764,8 @@ class ConnectionHandler:
             # hello handling can correctly trigger server-initiated greeting.
             self._hydrate_mode_session()
 
-            # Commit the assembled prompt so _create_llm_conversation seeds
-            # the OpenAI conversation with only Part 1 (agent-base-prompt.txt).
-            # Part 3 (character_memory_prompt) is appended later once loaded.
+            # Commit assembled prompt (base + character_profile_prompt + user_profile_prompt)
+            # so _create_llm_conversation seeds the OpenAI conversation with it.
             self.config["prompt"] = new_prompt
             self.prompt = new_prompt
 
