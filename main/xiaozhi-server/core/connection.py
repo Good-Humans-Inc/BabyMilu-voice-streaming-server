@@ -1862,11 +1862,6 @@ Return ONLY the JSON array, no other explanation."""
                 llm=self.llm,
                 summary_memory=summary_memory_block,
             )
-        """初始化任务模块"""
-        self.task.init_task(
-            role_id=self.device_id,
-            llm=self.llm,
-        )
         # Initialize task module (guard: Task provider may not be configured)
         if self.task:
             self.task.init_task(
@@ -2093,8 +2088,6 @@ Return ONLY the JSON array, no other explanation."""
         self.current_conversation_id = new_conv_id
 
     def _ensure_device_scoped_conversation(self):
-        # [TESTING] Comment out to resume existing conversation:
-        return
         state = get_conversation_state_for_device(self.device_id)
         conv_id = state.get("id") if state else None
         if state and self._device_conversation_expired(state.get("last_used")):
