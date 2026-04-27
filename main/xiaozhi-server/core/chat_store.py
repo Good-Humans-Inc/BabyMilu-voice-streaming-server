@@ -628,7 +628,15 @@ class SupabaseChatStore:
         """Fetch prompt_build_up row for device_id. Returns dict with character_profile_prompt and user_profile_prompt."""
         if not device_id:
             return {}
-        existing = self._select_eq(self.prompt_build_up_table, "device_id", device_id)
+        # Use ilike for case-insensitive match so "PA:TR:IC:KL:IU:03" and "pa:tr:ic:kl:iu:03" both resolve.
+        url = f"{self.base_url}/rest/v1/{self.prompt_build_up_table}?device_id=ilike.{quote(str(device_id), safe='')}&select=*"
+        response = requests.get(url, headers=self.headers, timeout=self.timeout_seconds)
+        if not response.ok:
+            raise RuntimeError(
+                f"Supabase select failed table={self.prompt_build_up_table} filter=device_id=ilike.{device_id} status={response.status_code} body={response.text}"
+            )
+        rows = response.json()
+        existing = rows[0] if rows else None
         if not isinstance(existing, dict):
             return {}
         return existing
