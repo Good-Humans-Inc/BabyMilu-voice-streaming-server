@@ -922,3 +922,13 @@ class ChatStore:
                 self.logger.error(f"[ChatStore] get_character_memory_prompt failed: {e}")
         return ""
 
+    def get_prompt_build_up(self, device_id: str) -> dict:
+        try:
+            if hasattr(self.store, "get_prompt_build_up"):
+                result = self.store.get_prompt_build_up(device_id)
+                return result if isinstance(result, dict) else {}
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"[ChatStore] get_prompt_build_up failed: {e}")
+        return {}
+
