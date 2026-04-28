@@ -60,6 +60,7 @@ class AlarmDoc:
     doc_path: Optional[str] = None
     last_processed_utc: Optional[datetime] = None
     context: Optional[str] = None  # reason/purpose; used to customize the alarm conversation
+    user_timezone: Optional[str] = None
 
 
 @dataclass
@@ -71,5 +72,4 @@ class AlarmLog:
     request_id: str
     timestamp: datetime
     changes: Dict[str, Dict[str, Optional[str]]]
-
 

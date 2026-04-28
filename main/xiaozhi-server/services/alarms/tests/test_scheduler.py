@@ -49,7 +49,8 @@ def _make_alarm(
     next_occurrence: datetime | None = None,
     last_processed: datetime | None = None,
     time_local: str = "07:00",
-    timezone_name: str | None = "UTC",
+    timezone_name: str | None = None,
+    user_timezone: str | None = "UTC",
 ) -> models.AlarmDoc:
     schedule = models.AlarmSchedule(
         repeat=repeat,
@@ -60,6 +61,8 @@ def _make_alarm(
     raw_payload = {}
     if timezone_name:
         raw_payload["timezone"] = timezone_name
+    if user_timezone:
+        raw_payload["user"] = {"timezone": user_timezone}
     return models.AlarmDoc(
         alarm_id="alarm-123",
         user_id="user-xyz",
@@ -73,6 +76,7 @@ def _make_alarm(
         raw=raw_payload,
         doc_path="users/user-xyz/alarms/alarm-123",
         last_processed_utc=last_processed,
+        user_timezone=user_timezone,
     )
 
 
@@ -159,6 +163,24 @@ def test_prepare_wake_requests_skips_when_last_processed_matches(monkeypatch):
     )
 
     assert wake_requests == []
+
+
+def test_prepare_wake_requests_skips_filtered_user(monkeypatch):
+    fake_store = _FakeSessionStore()
+    monkeypatch.setattr(scheduler, "session_context_store", fake_store)
+    monkeypatch.setenv("ALARM_USER_ALLOWLIST", "user-allowed")
+
+    def fake_fetch(now, lookahead):
+        return [_make_alarm("DEV123", "morning_alarm")]
+
+    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
+
+    wake_requests = scheduler.prepare_wake_requests(
+        datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
+    )
+
+    assert wake_requests == []
+    assert fake_store.created == []
 
 
 def test_finalize_wake_request_marks_one_time_alarm_complete(monkeypatch):
@@ -273,7 +295,7 @@ def test_compute_next_occurrence_uses_timezone_and_local_time():
         days=["Mon", "Tue", "Wed"],
         next_occurrence=reference,
         time_local="07:30",
-        timezone_name="America/Los_Angeles",
+        user_timezone="America/Los_Angeles",
     )
 
     next_dt = scheduler.compute_next_occurrence(alarm, now=reference)
@@ -281,14 +303,65 @@ def test_compute_next_occurrence_uses_timezone_and_local_time():
     assert next_dt == datetime(2024, 1, 2, 15, 30, tzinfo=timezone.utc)
 
 
-def test_compute_next_occurrence_requires_timezone():
+def test_compute_next_occurrence_uses_user_timezone_not_alarm_doc_timezone(monkeypatch):
+    reference = datetime(2026, 4, 26, 13, 0, tzinfo=timezone.utc)
+    alarm = _make_alarm(
+        "DEV1",
+        "mode",
+        days=["Sun"],
+        next_occurrence=reference,
+        time_local="09:00",
+        timezone_name="America/Los_Angeles",
+        user_timezone="Asia/Shanghai",
+    )
+
+    monkeypatch.setattr(
+        scheduler.firestore_client,
+        "fetch_user_timezone",
+        lambda user_id: (_ for _ in ()).throw(AssertionError("should not refetch")),
+    )
+
+    next_dt = scheduler.compute_next_occurrence(alarm, now=reference)
+
+    assert next_dt == datetime(2026, 5, 3, 1, 0, tzinfo=timezone.utc)
+
+
+def test_compute_next_occurrence_refetches_user_timezone_when_cache_missing(monkeypatch):
     reference = datetime(2024, 1, 1, 7, tzinfo=timezone.utc)
     alarm = _make_alarm(
         "DEV1",
         "mode",
-        timezone_name=None,
+        timezone_name="America/Los_Angeles",
+        user_timezone=None,
         next_occurrence=reference,
     )
 
-    with pytest.raises(ValueError):
+    monkeypatch.setattr(
+        scheduler.firestore_client,
+        "fetch_user_timezone",
+        lambda user_id: "UTC",
+    )
+
+    next_dt = scheduler.compute_next_occurrence(alarm, now=reference)
+
+    assert next_dt == datetime(2024, 1, 8, 7, 0, tzinfo=timezone.utc)
+
+
+def test_compute_next_occurrence_requires_user_timezone(monkeypatch):
+    reference = datetime(2024, 1, 1, 7, tzinfo=timezone.utc)
+    alarm = _make_alarm(
+        "DEV1",
+        "mode",
+        timezone_name="America/Los_Angeles",
+        user_timezone=None,
+        next_occurrence=reference,
+    )
+
+    monkeypatch.setattr(
+        scheduler.firestore_client,
+        "fetch_user_timezone",
+        lambda user_id: None,
+    )
+
+    with pytest.raises(ValueError, match="missing users/.+timezone"):
         scheduler.compute_next_occurrence(alarm, now=reference)

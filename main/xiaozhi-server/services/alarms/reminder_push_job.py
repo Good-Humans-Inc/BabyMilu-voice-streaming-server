@@ -1,14 +1,14 @@
 """
-Reminder push + Firestore updates aligned with babymilu-backend sendReminderPush.
+Unified reminder delivery and Firestore finalization.
 
-Query: status == on AND nextOccurrenceUTC <= now (same as backend scheduled job).
+Query: status == on AND nextOccurrenceUTC <= now.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from google.cloud import firestore
@@ -22,13 +22,20 @@ from exponent_server_sdk import (
 
 from openai import APIError, OpenAI
 
+from core.utils.mac import normalize_mac
 from services.alarms import reminder_advancement
+from services.alarms.config import ALARM_TIMING
 from services.logging import setup_logging
+from services.messaging.mqtt import publish_ws_start
+from services.session_context import store as session_context_store
 
 TAG = __name__
 logger = setup_logging()
 
 OPENAI_MODEL = os.environ.get("REMINDER_OPENAI_MODEL", "gpt-4o-mini")
+APP_CHANNEL = "app"
+PLUSHIE_CHANNEL = "plushie"
+REMINDER_SESSION_TTL = ALARM_TIMING["one_time_session_ttl"]
 
 # Copied from babymilu-backend src/functions/services/text.py (REMINDER_LLM_PROMPT)
 REMINDER_LLM_PROMPT = """
@@ -62,13 +69,14 @@ Return ONLY the reminder message text as a plain string. No JSON, no markdown co
 **Example:**
 Hey, don't forget to take your medication now. I know you've been busy, but your health matters to me.
 """
+ONE_TIME_REPEATS = {"none", "once", "one_time", "one-time", "no_repeat"}
 
 _fcm_messaging_mod = None
 _fcm_init_attempted = False
 
 
 def _get_fcm_messaging():
-    """Lazy Firebase Admin for native FCM tokens (same path as sendReminderPush)."""
+    """Lazy Firebase Admin for native FCM tokens used by reminder app delivery."""
     global _fcm_messaging_mod, _fcm_init_attempted
     if _fcm_init_attempted:
         return _fcm_messaging_mod
@@ -210,6 +218,382 @@ def _format_occurrence_iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _resolve_delivery_channels(reminder_data: Dict[str, Any]) -> List[str]:
+    raw = reminder_data.get("deliveryChannel")
+    if isinstance(raw, list):
+        channels = [str(item).strip().lower() for item in raw if str(item).strip()]
+    elif isinstance(raw, str) and raw.strip():
+        channels = [raw.strip().lower()]
+    else:
+        # Legacy app reminders were created without deliveryChannel.
+        channels = [APP_CHANNEL]
+
+    seen = set()
+    normalized: List[str] = []
+    for channel in channels:
+        if channel not in {APP_CHANNEL, PLUSHIE_CHANNEL} or channel in seen:
+            continue
+        seen.add(channel)
+        normalized.append(channel)
+    return normalized or [APP_CHANNEL]
+
+
+def _resolve_ws_url() -> str:
+    return os.environ.get("ALARM_WS_URL") or os.environ.get("DEFAULT_WS_URL", "")
+
+
+def _resolve_broker_url() -> str:
+    return os.environ.get("ALARM_MQTT_URL") or os.environ.get("MQTT_URL", "")
+
+
+def _parse_device_set(raw: str) -> set[str]:
+    tokens: set[str] = set()
+    for token in (raw or "").split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            tokens.add(normalize_mac(token))
+        except Exception:
+            tokens.add(token.lower())
+    return tokens
+
+
+def _parse_user_set(raw: str) -> set[str]:
+    return {token.strip() for token in (raw or "").split(",") if token.strip()}
+
+
+def _is_reminder_user_allowed(uid: str) -> bool:
+    allowed = _parse_user_set(os.environ.get("REMINDER_USER_ALLOWLIST", ""))
+    denied = _parse_user_set(
+        os.environ.get("REMINDER_USER_DENYLIST", "")
+        or os.environ.get("NOT_ALLOWED_PHONENUMBERS", "")
+    )
+    normalized = (uid or "").strip()
+    if normalized in denied:
+        return False
+    if not allowed:
+        return True
+    return normalized in allowed
+
+
+def _is_device_allowed(device_id: str) -> bool:
+    allowed = _parse_device_set(os.environ.get("ALARM_DEVICE_ALLOWLIST", ""))
+    denied = _parse_device_set(os.environ.get("ALARM_DEVICE_DENYLIST", ""))
+    try:
+        normalized = normalize_mac(device_id)
+    except Exception:
+        normalized = (device_id or "").lower()
+    if normalized in denied:
+        return False
+    if not allowed:
+        return True
+    return normalized in allowed
+
+
+def _reminder_max_lateness() -> timedelta:
+    raw = os.environ.get("REMINDER_MAX_LATENESS_SECONDS", "180")
+    try:
+        seconds = max(0, int(raw))
+    except ValueError:
+        seconds = 180
+    return timedelta(seconds=seconds)
+
+
+def _resolve_user_timezone(user_data: Dict[str, Any]) -> Optional[str]:
+    timezone_value = (
+        user_data.get("timezone")
+        or user_data.get("timeZone")
+        or user_data.get("timezoneId")
+        or user_data.get("userTimezone")
+    )
+    if not timezone_value:
+        return None
+    timezone_name = str(timezone_value).strip()
+    return timezone_name or None
+
+
+def _same_occurrence(current_value: Any, expected_iso: str) -> bool:
+    current_dt = _parse_occurrence(current_value)
+    expected_dt = _parse_occurrence(expected_iso)
+    if current_dt is None or expected_dt is None:
+        return str(current_value or "") == str(expected_iso or "")
+    return current_dt == expected_dt
+
+
+def _parse_occurrence(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    return None
+
+
+def _send_app_notification(
+    *,
+    reminder_id: str,
+    reminder_data: Dict[str, Any],
+    uid: str,
+    user_data: Dict[str, Any],
+    character_data: Dict[str, Any],
+    label: str,
+    next_occurrence_str: Optional[str],
+    ai_message: str,
+) -> bool:
+    fcm_token = user_data.get("fcm")
+    if not fcm_token:
+        logger.bind(tag=TAG).warning(
+            f"Skipping app delivery for reminder {reminder_id}: user {uid} has no FCM token"
+        )
+        return False
+
+    character_name = (
+        character_data.get("profile", {}).get("name", "Milu")
+        or character_data.get("name", "Milu")
+        if character_data
+        else "Milu"
+    )
+    user_avatar = ""
+    if character_data:
+        user_avatar = (
+            character_data.get("emotionUrls", {})
+            .get("normal", {})
+            .get("thumbnail", "")
+        )
+
+    try:
+        is_expo = PushClient.is_exponent_push_token(str(fcm_token))
+        if is_expo:
+            system = str(user_data.get("system", "") or "")
+            if system.lower() == "android":
+                push_message = PushMessage(
+                    to=str(fcm_token),
+                    data={
+                        "type": "reminder",
+                        "title": character_name,
+                        "body": ai_message,
+                        "largeIcon": user_avatar or "",
+                        "reminderId": reminder_id,
+                        "action": "custom_display",
+                        "label": label,
+                        "nextOccurrenceUTC": next_occurrence_str,
+                    },
+                    sound="reminder_sound.wav",
+                    priority="high",
+                    channel_id="reminders",
+                    mutable_content=True,
+                )
+            else:
+                push_message = PushMessage(
+                    to=str(fcm_token),
+                    title=character_name,
+                    body=ai_message,
+                    data={
+                        "type": "reminder",
+                        "title": character_name,
+                        "body": ai_message,
+                        "userAvatar": user_avatar or "",
+                        "reminderId": reminder_id,
+                        "label": label,
+                        "nextOccurrenceUTC": next_occurrence_str,
+                    },
+                    sound="reminder_sound.wav",
+                    priority="high",
+                    channel_id="reminders",
+                    mutable_content=True,
+                )
+            resp = PushClient().publish(push_message)
+            resp.validate_response()
+            return True
+
+        fcm = _get_fcm_messaging()
+        if fcm is None:
+            raise RuntimeError("FCM not configured (firebase_admin)")
+        message = fcm.Message(
+            data={
+                "type": "reminder",
+                "title": str(character_name),
+                "body": str(ai_message),
+                "userAvatar": str(user_avatar or ""),
+                "reminderId": str(reminder_id),
+                "label": str(label),
+                "nextOccurrenceUTC": str(next_occurrence_str or ""),
+            },
+            android=fcm.AndroidConfig(priority="high"),
+            apns=fcm.APNSConfig(
+                headers={"apns-priority": "10"},
+                payload=fcm.APNSPayload(
+                    aps=fcm.Aps(
+                        content_available=True,
+                        sound="reminder_sound.wav",
+                    ),
+                ),
+            ),
+            token=str(fcm_token),
+        )
+        fcm.send(message)
+        return True
+    except PushTicketError as exc:
+        logger.bind(tag=TAG).warning(
+            f"Expo push error uid={uid} reminder={reminder_id}: {exc}"
+        )
+        if isinstance(exc, DeviceNotRegisteredError):
+            logger.bind(tag=TAG).warning(
+                f"Expo device not registered for uid={uid}"
+            )
+        return False
+    except Exception as exc:
+        logger.bind(tag=TAG).warning(
+            f"Push failed uid={uid} reminder={reminder_id}: {exc}"
+        )
+        return False
+
+
+def _send_plushie_notification(
+    *,
+    reminder_id: str,
+    reminder_data: Dict[str, Any],
+    uid: str,
+    label: str,
+    first_message: str,
+    now: datetime,
+) -> bool:
+    ws_url = _resolve_ws_url()
+    broker_url = _resolve_broker_url()
+    if not ws_url or not broker_url:
+        logger.bind(tag=TAG).warning(
+            f"Skipping plushie delivery for reminder {reminder_id}: alarm ws/mqtt env missing"
+        )
+        return False
+
+    targets = reminder_data.get("targets")
+    if not isinstance(targets, list) or not targets:
+        logger.bind(tag=TAG).warning(
+            f"Skipping plushie delivery for reminder {reminder_id}: no targets"
+        )
+        return False
+
+    any_sent = False
+    for target in targets:
+        try:
+            device_id = normalize_mac(target["deviceId"])
+        except Exception as exc:
+            logger.bind(tag=TAG).warning(
+                f"Skipping plushie target for reminder {reminder_id}: {exc}"
+            )
+            continue
+        if not _is_device_allowed(device_id):
+            logger.bind(tag=TAG).info(
+                f"Skipping plushie delivery for filtered device {device_id}"
+            )
+            continue
+        existing = session_context_store.get_session(device_id, now=now)
+        if existing:
+            logger.bind(tag=TAG).warning(
+                f"Skipping plushie delivery for {device_id}: existing session active ({existing.session_type})"
+            )
+            continue
+
+        session = session_context_store.create_session(
+            device_id=device_id,
+            session_type="alarm",
+            ttl=REMINDER_SESSION_TTL,
+            triggered_at=now,
+            session_config={
+                "mode": target.get("mode") or "reminder",
+                "alarmId": reminder_id,
+                "reminderId": reminder_id,
+                "userId": uid,
+                "title": label,
+                "label": label,
+                "context": reminder_data.get("context"),
+                "firstMessage": first_message,
+            },
+        )
+        if publish_ws_start(broker_url, device_id, ws_url):
+            any_sent = True
+            continue
+
+        logger.bind(tag=TAG).warning(
+            f"Failed plushie ws_start for reminder {reminder_id} device {device_id}"
+        )
+        session_context_store.delete_session(session.device_id)
+
+    return any_sent
+
+
+def _build_finalize_updates(
+    *,
+    reminder_data: Dict[str, Any],
+    expected_occurrence_iso: str,
+    now: datetime,
+    user_timezone: str,
+    app_sent: bool,
+    plushie_sent: bool,
+) -> Dict[str, Any]:
+    now_iso = now.isoformat()
+    updates: Dict[str, Any] = {
+        "updatedAt": now_iso,
+        "lastDelivered.occurrenceUTC": expected_occurrence_iso,
+    }
+    if app_sent:
+        updates["lastDelivered.app.at"] = now_iso
+    if plushie_sent:
+        updates["lastDelivered.plushie.at"] = now_iso
+
+    repeat = str(reminder_data.get("schedule", {}).get("repeat", "")).strip().lower()
+    if repeat in ONE_TIME_REPEATS:
+        updates["status"] = "off"
+        return updates
+
+    due_occurrence = _parse_occurrence(expected_occurrence_iso)
+    if due_occurrence is None:
+        raise ValueError("Missing or invalid expected occurrence")
+    advanced = reminder_advancement.compute_advance_after_firing(
+        reminder_data,
+        user_timezone,
+        due_occurrence_utc=due_occurrence,
+        now_utc=now,
+    )
+    if advanced is None:
+        raise ValueError("Could not advance recurring reminder")
+    next_occ, next_trig = advanced
+    updates["nextOccurrenceUTC"] = _format_occurrence_iso(next_occ)
+    updates["nextTriggerUTC"] = _format_occurrence_iso(next_trig)
+    updates["lastAction"] = None
+    updates["lastActionAt"] = None
+    return updates
+
+
+def _finalize_if_occurrence_matches(
+    *,
+    client: firestore.Client,
+    doc_ref,
+    expected_occurrence_iso: str,
+    updates: Dict[str, Any],
+) -> bool:
+    transaction = client.transaction()
+
+    @firestore.transactional
+    def _apply(transaction, ref):
+        snapshot = ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return False
+        payload = snapshot.to_dict() or {}
+        if str(payload.get("status", "")).strip().lower() != "on":
+            return False
+        if not _same_occurrence(payload.get("nextOccurrenceUTC"), expected_occurrence_iso):
+            return False
+        transaction.update(ref, updates)
+        return True
+
+    return bool(_apply(transaction, doc_ref))
+
+
 def run_send_reminder_push_job(
     *,
     execute: bool = False,
@@ -217,8 +601,10 @@ def run_send_reminder_push_job(
     client: Optional[firestore.Client] = None,
 ) -> Dict[str, Any]:
     """
-    Port of sendReminderPush: query due reminders, optional Expo/FCM send,
-    sentLogs, then one-time off or recurring advance (nextOccurrenceUTC / nextTriggerUTC).
+    Unified reminder scheduler:
+    - app only: send app, then finalize once
+    - plushie only: send plushie, then finalize once
+    - both: send app, then plushie, then finalize once
     """
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
@@ -238,13 +624,16 @@ def run_send_reminder_push_job(
     count = 0
     results: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
+    max_lateness = _reminder_max_lateness()
 
     for reminder_doc in query.stream():
         count += 1
         reminder_id = reminder_doc.id
         try:
             reminder_data = reminder_doc.to_dict() or {}
+            delivery_channels = _resolve_delivery_channels(reminder_data)
             uid = _resolve_uid_from_reminder_doc(reminder_doc, reminder_data)
+            next_occurrence_str = reminder_data.get("nextOccurrenceUTC")
             if not uid:
                 skipped += 1
                 results.append(
@@ -252,6 +641,53 @@ def run_send_reminder_push_job(
                         "reminderId": reminder_id,
                         "processed": False,
                         "skipped": "no_uid",
+                    }
+                )
+                continue
+            if not _is_reminder_user_allowed(uid):
+                skipped += 1
+                results.append(
+                    {
+                        "reminderId": reminder_id,
+                        "userId": uid,
+                        "processed": False,
+                        "deliveryChannel": delivery_channels,
+                        "skipped": "user_filtered",
+                    }
+                )
+                continue
+            if not next_occurrence_str:
+                skipped += 1
+                results.append(
+                    {
+                        "reminderId": reminder_id,
+                        "userId": uid,
+                        "processed": False,
+                        "skipped": "missing_occurrence",
+                    }
+                )
+                continue
+            next_occurrence = _parse_occurrence(next_occurrence_str)
+            if next_occurrence is None:
+                skipped += 1
+                results.append(
+                    {
+                        "reminderId": reminder_id,
+                        "userId": uid,
+                        "processed": False,
+                        "skipped": "invalid_occurrence",
+                    }
+                )
+                continue
+            if max_lateness and next_occurrence < (now - max_lateness):
+                skipped += 1
+                results.append(
+                    {
+                        "reminderId": reminder_id,
+                        "userId": uid,
+                        "processed": False,
+                        "deliveryChannel": delivery_channels,
+                        "skipped": "too_late",
                     }
                 )
                 continue
@@ -271,15 +707,17 @@ def run_send_reminder_push_job(
                     continue
                 user_cache[uid] = user_snap.to_dict() or {}
             user_data = user_cache[uid]
-            fcm_token = user_data.get("fcm")
-            if not fcm_token:
+            user_timezone = _resolve_user_timezone(user_data)
+            repeat = str(reminder_data.get("schedule", {}).get("repeat", "")).strip().lower()
+            if repeat not in ONE_TIME_REPEATS and not user_timezone:
                 skipped += 1
                 results.append(
                     {
                         "reminderId": reminder_id,
                         "userId": uid,
                         "processed": False,
-                        "skipped": "no_fcm_token",
+                        "deliveryChannel": delivery_channels,
+                        "skipped": "missing_user_timezone",
                     }
                 )
                 continue
@@ -300,20 +738,8 @@ def run_send_reminder_push_job(
                         character_data = char_snap.to_dict() or {}
                         character_cache[active_character_id] = character_data
 
-            character_name = character_data.get("profile", {}).get("name", "Milu") or character_data.get("name", "Milu") if character_data else "Milu"
             label = reminder_data.get("label", "Reminder")
-            next_occurrence_str = reminder_data.get("nextOccurrenceUTC")
             user_name = user_data.get("name") or "there"
-
-            reminder_time_display = None
-            if next_occurrence_str:
-                try:
-                    no = datetime.fromisoformat(
-                        str(next_occurrence_str).replace("Z", "+00:00")
-                    )
-                    reminder_time_display = no.strftime("%I:%M %p")
-                except Exception:
-                    pass
 
             try:
                 ai_message = get_ai_message(
@@ -335,194 +761,106 @@ def run_send_reminder_push_job(
                         "userId": uid,
                         "processed": False,
                         "dryRun": True,
+                        "deliveryChannel": delivery_channels,
                     }
                 )
                 continue
 
-            user_avatar = ""
-            if character_data:
-                user_avatar = (
-                    character_data.get("emotionUrls", {})
-                    .get("normal", {})
-                    .get("thumbnail", "")
-                )
+            app_sent = False
+            plushie_sent = False
+            channel_errors: List[str] = []
 
-            try:
-                is_expo = PushClient.is_exponent_push_token(str(fcm_token))
-                if is_expo:
-                    system = str(user_data.get("system", "") or "")
-                    if system.lower() == "android":
-                        push_message = PushMessage(
-                            to=str(fcm_token),
-                            data={
-                                "type": "reminder",
-                                "title": character_name,
-                                "body": ai_message,
-                                "largeIcon": user_avatar or "",
-                                "reminderId": reminder_id,
-                                "action": "custom_display",
-                                "label": label,
-                                "nextOccurrenceUTC": next_occurrence_str,
-                            },
-                            sound="reminder_sound.wav",
-                            priority="high",
-                            channel_id="reminders",
-                            mutable_content=True,
-                        )
-                    else:
-                        push_message = PushMessage(
-                            to=str(fcm_token),
-                            title=character_name,
-                            body=ai_message,
-                            data={
-                                "type": "reminder",
-                                "title": character_name,
-                                "body": ai_message,
-                                "userAvatar": user_avatar or "",
-                                "reminderId": reminder_id,
-                                "label": label,
-                                "nextOccurrenceUTC": next_occurrence_str,
-                            },
-                            sound="reminder_sound.wav",
-                            priority="high",
-                            channel_id="reminders",
-                            mutable_content=True,
-                        )
-                    resp = PushClient().publish(push_message)
-                    resp.validate_response()
-                else:
-                    fcm = _get_fcm_messaging()
-                    if fcm is None:
-                        raise RuntimeError("FCM not configured (firebase_admin)")
-                    message = fcm.Message(
-                        data={
-                            "type": "reminder",
-                            "title": str(character_name),
-                            "body": str(ai_message),
-                            "userAvatar": str(user_avatar or ""),
-                            "reminderId": str(reminder_id),
-                            "label": str(label),
-                            "nextOccurrenceUTC": str(next_occurrence_str or ""),
-                        },
-                        android=fcm.AndroidConfig(priority="high"),
-                        apns=fcm.APNSConfig(
-                            headers={"apns-priority": "10"},
-                            payload=fcm.APNSPayload(
-                                aps=fcm.Aps(
-                                    content_available=True,
-                                    sound="reminder_sound.wav",
-                                ),
-                            ),
-                        ),
-                        token=str(fcm_token),
-                    )
-                    fcm.send(message)
-            except PushTicketError as exc:
-                logger.bind(tag=TAG).warning(
-                    f"Expo push error uid={uid} reminder={reminder_id}: {exc}"
+            if APP_CHANNEL in delivery_channels:
+                app_sent = _send_app_notification(
+                    reminder_id=reminder_id,
+                    reminder_data=reminder_data,
+                    uid=uid,
+                    user_data=user_data,
+                    character_data=character_data,
+                    label=label,
+                    next_occurrence_str=next_occurrence_str,
+                    ai_message=ai_message,
                 )
-                if isinstance(exc, DeviceNotRegisteredError):
-                    logger.bind(tag=TAG).warning(
-                        f"Expo device not registered for uid={uid}"
-                    )
-                errors.append(
-                    {"id": reminder_id, "error": f"Push send failed: {exc}"}
+                if not app_sent:
+                    channel_errors.append("app_failed")
+
+            if PLUSHIE_CHANNEL in delivery_channels:
+                plushie_sent = _send_plushie_notification(
+                    reminder_id=reminder_id,
+                    reminder_data=reminder_data,
+                    uid=uid,
+                    label=label,
+                    first_message=ai_message,
+                    now=now,
                 )
+                if not plushie_sent:
+                    channel_errors.append("plushie_failed")
+
+            if not app_sent and not plushie_sent:
                 skipped += 1
-                results.append(
-                    {
-                        "reminderId": reminder_id,
-                        "userId": uid,
-                        "processed": False,
-                        "skipped": "push_failed",
-                    }
-                )
-                continue
-            except Exception as push_error:
-                logger.bind(tag=TAG).warning(
-                    f"Push failed uid={uid} reminder={reminder_id}: {push_error}"
-                )
                 errors.append(
                     {
                         "id": reminder_id,
-                        "error": f"Push send failed: {push_error}",
+                        "error": ",".join(channel_errors) or "delivery_failed",
                     }
                 )
+                results.append(
+                    {
+                        "reminderId": reminder_id,
+                        "userId": uid,
+                        "processed": False,
+                        "deliveryChannel": delivery_channels,
+                        "skipped": ",".join(channel_errors) or "delivery_failed",
+                    }
+                )
+                continue
+
+            try:
+                updates = _build_finalize_updates(
+                    reminder_data=reminder_data,
+                    expected_occurrence_iso=str(next_occurrence_str),
+                    now=now,
+                    user_timezone=user_timezone,
+                    app_sent=app_sent,
+                    plushie_sent=plushie_sent,
+                )
+            except Exception as finalize_error:
+                logger.bind(tag=TAG).warning(
+                    f"Reminder finalize payload failed {reminder_id}: {finalize_error}"
+                )
+                errors.append({"id": reminder_id, "error": str(finalize_error)})
                 skipped += 1
                 results.append(
                     {
                         "reminderId": reminder_id,
                         "userId": uid,
                         "processed": False,
-                        "skipped": "push_failed",
+                        "deliveryChannel": delivery_channels,
+                        "skipped": "finalize_payload_failed",
+                    }
+                )
+                continue
+
+            finalized = _finalize_if_occurrence_matches(
+                client=client,
+                doc_ref=reminder_doc.reference,
+                expected_occurrence_iso=str(next_occurrence_str),
+                updates=updates,
+            )
+            if not finalized:
+                skipped += 1
+                results.append(
+                    {
+                        "reminderId": reminder_id,
+                        "userId": uid,
+                        "processed": False,
+                        "deliveryChannel": delivery_channels,
+                        "skipped": "stale_occurrence",
                     }
                 )
                 continue
 
             triggered += 1
-
-            # log_entry = {
-            #     "reminderId": reminder_id,
-            #     "uid": uid,
-            #     "label": label,
-            #     "aiMessage": ai_message,
-            #     "sentAt": now_iso,
-            #     "nextOccurrenceUTC": next_occurrence_str,
-            #     "fcmToken": (str(fcm_token)[:20] + "...") if fcm_token else None,
-            # }
-            # try:
-            #     reminder_doc.reference.collection("sentLogs").document().set(log_entry)
-            # except Exception as log_error:
-            #     logger.bind(tag=TAG).warning(
-            #         f"sentLogs write failed reminder={reminder_id}: {log_error}"
-            #     )
-
-            if next_occurrence_str:
-                try:
-                    due = datetime.fromisoformat(
-                        str(next_occurrence_str).replace("Z", "+00:00")
-                    )
-                    if due.tzinfo is None:
-                        due = due.replace(tzinfo=timezone.utc)
-                    repeat = reminder_data.get("schedule", {}).get("repeat")
-                    reminder_ref = reminder_doc.reference
-                    if repeat == "none":
-                        reminder_ref.update(
-                            {"status": "off", "updatedAt": now_iso}
-                        )
-                    else:
-                        user_timezone = user_data.get(
-                            "timezone", "America/Los_Angeles"
-                        )
-                        advanced = reminder_advancement.compute_advance_after_firing(
-                            reminder_data,
-                            str(user_timezone),
-                            due_occurrence_utc=due,
-                            now_utc=now,
-                        )
-                        if advanced is None:
-                            logger.bind(tag=TAG).warning(
-                                f"Could not advance recurring reminder {reminder_id}"
-                            )
-                        else:
-                            next_occ, next_trig = advanced
-                            reminder_ref.update(
-                                {
-                                    "nextOccurrenceUTC": _format_occurrence_iso(
-                                        next_occ
-                                    ),
-                                    "nextTriggerUTC": _format_occurrence_iso(
-                                        next_trig
-                                    ),
-                                    "updatedAt": now_iso,
-                                    "lastAction": None,
-                                    "lastActionAt": None,
-                                }
-                            )
-                except Exception as reschedule_error:
-                    logger.bind(tag=TAG).warning(
-                        f"Reminder update failed {reminder_id}: {reschedule_error}"
-                    )
 
             results.append(
                 {
@@ -530,6 +868,9 @@ def run_send_reminder_push_job(
                     "userId": uid,
                     "processed": True,
                     "label": label,
+                    "deliveryChannel": delivery_channels,
+                    "appSent": app_sent,
+                    "plushieSent": plushie_sent,
                 }
             )
         except Exception as inner_e:

@@ -140,10 +140,9 @@ def scan_due_scheduled_items(request) -> Dict[str, Any]:
     """
     Unified Cloud Scheduler entrypoint for alarms + reminders.
 
-    Reminders use the same flow as babymilu-backend sendReminderPush (query due
-    by nextOccurrenceUTC <= now, Expo or FCM, sentLogs, then advance / turn off).
-
-    Phase-1 default: REMINDER_EXECUTE=false dry-runs without sends or writes.
+    Reminders are processed in the unified server scheduler and delivered
+    immediately once nextOccurrenceUTC <= now. App and plushie notifications are
+    orchestrated from the same pass so each occurrence is finalized once.
     """
     now = datetime.now(timezone.utc)
 
