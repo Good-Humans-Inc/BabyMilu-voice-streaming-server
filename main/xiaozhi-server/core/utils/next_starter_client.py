@@ -133,7 +133,7 @@ def fetch_next_starter_audio(audio_url: str) -> bytes:
     if not audio_url:
         raise ValueError("audio_url is missing")
 
-    request_timeout = float(_env("NEXT_STARTER_FETCH_TIMEOUT_SECONDS", "0.2") or "0.2")
+    request_timeout = float(_env("NEXT_STARTER_FETCH_TIMEOUT_SECONDS", "2.0") or "2.0")
     response = requests.get(audio_url, timeout=request_timeout)
     response.raise_for_status()
     return response.content
