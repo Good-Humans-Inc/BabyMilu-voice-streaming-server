@@ -395,7 +395,16 @@ def _send_app_notification(
                     body=ai_message,
                     channel_id="reminders",
                     rich_content=_rich,
-                    data={"action": "custom_display"},
+                    data={
+                        "type": "reminder",
+                        "title": character_name,
+                        "body": ai_message,
+                        "largeIcon": user_avatar or "",
+                        "reminderId": reminder_id,
+                        "action": "custom_display",
+                        "label": label,
+                        "nextOccurrenceUTC": next_occurrence_str,
+                    },
                     sound="reminder_sound.wav",
                     priority="high",
                 )
