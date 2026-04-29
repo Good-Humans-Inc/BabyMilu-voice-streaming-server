@@ -32,6 +32,24 @@ from services.session_context import store as session_context_store
 TAG = __name__
 logger = setup_logging()
 
+class ExpoRichPushMessage(PushMessage):
+    """
+    Expo HTTP API supports richContent (e.g. image); stock PushMessage.get_payload
+    does not serialize it. Matches https://exp.host/--/api/v2/push/send payloads.
+    """
+
+    def __new__(cls, rich_content=None, **kwargs):
+        inst = super().__new__(cls, **kwargs)
+        object.__setattr__(inst, "_rich_content", rich_content)
+        return inst
+
+    def get_payload(self):
+        payload = super().get_payload()
+        rc = getattr(self, "_rich_content", None)
+        if rc:
+            payload["richContent"] = rc
+        return payload
+
 OPENAI_MODEL = os.environ.get("REMINDER_OPENAI_MODEL", "gpt-4o-mini")
 APP_CHANNEL = "app"
 PLUSHIE_CHANNEL = "plushie"
@@ -369,23 +387,17 @@ def _send_app_notification(
         is_expo = PushClient.is_exponent_push_token(str(fcm_token))
         if is_expo:
             system = str(user_data.get("system", "") or "")
+            _rich = {"image": user_avatar} if user_avatar else None
             if system.lower() == "android":
-                push_message = PushMessage(
+                push_message = ExpoRichPushMessage(
                     to=str(fcm_token),
-                    data={
-                        "type": "reminder",
-                        "title": character_name,
-                        "body": ai_message,
-                        "largeIcon": user_avatar or "",
-                        "reminderId": reminder_id,
-                        "action": "custom_display",
-                        "label": label,
-                        "nextOccurrenceUTC": next_occurrence_str,
-                    },
+                    title=character_name,
+                    body=ai_message,
+                    channel_id="reminders",
+                    rich_content=_rich,
+                    data={"action": "custom_display"},
                     sound="reminder_sound.wav",
                     priority="high",
-                    channel_id="reminders",
-                    mutable_content=True,
                 )
             else:
                 push_message = PushMessage(
