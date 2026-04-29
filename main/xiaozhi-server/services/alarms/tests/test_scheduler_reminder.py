@@ -420,3 +420,60 @@ def test_plushie_session_hydration_includes_reminder_title(monkeypatch):
     assert created["session_config"]["title"] == "Drink water"
     assert created["session_config"]["context"] == "drink water"
     assert created["session_config"]["firstMessage"] == "Don't forget to drink water."
+
+
+def test_android_expo_push_preserves_legacy_data_fields_with_rich_content(monkeypatch):
+    published = {}
+
+    class _FakeResponse:
+        def validate_response(self):
+            return None
+
+    class _FakePushClient:
+        @staticmethod
+        def is_exponent_push_token(token):
+            return True
+
+        def publish(self, push_message):
+            published["payload"] = push_message.get_payload()
+            return _FakeResponse()
+
+    monkeypatch.setattr(reminder_push_job, "PushClient", _FakePushClient)
+
+    sent = reminder_push_job._send_app_notification(
+        reminder_id="rem-123",
+        reminder_data={},
+        uid="+1",
+        user_data={
+            "fcm": "ExponentPushToken[test]",
+            "system": "android",
+        },
+        character_data={
+            "profile": {"name": "Milu"},
+            "emotionUrls": {"normal": {"thumbnail": "https://example.com/avatar.png"}},
+        },
+        label="Drink water",
+        next_occurrence_str="2026-04-25T08:00:00Z",
+        ai_message="Time to drink water.",
+    )
+
+    assert sent is True
+    assert published["payload"] == {
+        "to": "ExponentPushToken[test]",
+        "data": {
+            "type": "reminder",
+            "title": "Milu",
+            "body": "Time to drink water.",
+            "largeIcon": "https://example.com/avatar.png",
+            "reminderId": "rem-123",
+            "action": "custom_display",
+            "label": "Drink water",
+            "nextOccurrenceUTC": "2026-04-25T08:00:00Z",
+        },
+        "title": "Milu",
+        "body": "Time to drink water.",
+        "priority": "high",
+        "sound": "reminder_sound.wav",
+        "channelId": "reminders",
+        "richContent": {"image": "https://example.com/avatar.png"},
+    }
