@@ -115,7 +115,7 @@ async def handleHelloMessage(conn, msg_json):
             # 发送mcp消息，获取tools列表
             asyncio.create_task(send_mcp_tools_list_request(conn))
 
-    if not getattr(conn, "active_character_id", None) and getattr(conn, "server_initiate_chat", False) and not getattr(
+    if getattr(conn, "server_initiate_chat", False) and not getattr(
         conn, "_server_greeting_scheduled", False
     ):
         conn._server_greeting_scheduled = True
