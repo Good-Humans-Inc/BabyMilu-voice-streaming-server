@@ -205,3 +205,7 @@ _build_alarms/
 /docker-compose.local.yml
 /compose.override.yml
 /compose.local.yml
+
+# Shared smoke harness local state
+/tools/smoke/artifacts/
+/tools/smoke/environments/*.local.json
