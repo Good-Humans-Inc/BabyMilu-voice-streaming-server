@@ -136,6 +136,35 @@ def get_next_occurrence_utc(
                 return candidate.astimezone(timezone.utc)
         raise ValueError("Failed to find next weekly occurrence")
 
+    if repeat == "monthly":
+        # days[0] holds the day-of-month as a string, e.g. "15"
+        days_raw = schedule.get("days", [])
+        try:
+            day_of_month = int(days_raw[0]) if days_raw else None
+        except (ValueError, TypeError):
+            day_of_month = None
+        if day_of_month is None or not (1 <= day_of_month <= 31):
+            raise ValueError(
+                "Missing or invalid days[0] for monthly reminder (must be '1'–'31')"
+            )
+
+        import calendar
+
+        from_local = from_date.astimezone(tz)
+        for month_offset in range(13):
+            total_months = from_local.month - 1 + month_offset
+            year = from_local.year + total_months // 12
+            month = total_months % 12 + 1
+            max_day = calendar.monthrange(year, month)[1]
+            actual_day = min(day_of_month, max_day)
+            try:
+                candidate = datetime(year, month, actual_day, hour, minute, tzinfo=tz)
+            except Exception:
+                continue
+            if candidate.astimezone(timezone.utc) > from_date:
+                return candidate.astimezone(timezone.utc)
+        raise ValueError("Failed to find next monthly occurrence")
+
     raise ValueError(f"Invalid repeat value: {repeat}")
 
 
