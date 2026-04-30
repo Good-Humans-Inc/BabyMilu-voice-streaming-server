@@ -44,8 +44,8 @@ services:
       TZ: America/Los_Angeles
 
     ports:
-      - "8000:8000"
-      - "8003:8003"
+      - "8010:8000"
+      - "8013:8003"
 
     restart: unless-stopped
     networks:
