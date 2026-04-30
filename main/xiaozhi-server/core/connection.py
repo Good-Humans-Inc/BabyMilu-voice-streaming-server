@@ -1,6 +1,13 @@
 import os
 import sys
 import copy
+
+def _load_base_prompt() -> str:
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "agent-base-prompt.txt")
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+_BASE_PROMPT = _load_base_prompt()
 import json
 import uuid
 import time
@@ -52,6 +59,8 @@ from core.utils.firestore_client import (
     update_conversation_state_for_device,
     get_most_recent_character_via_user_for_device
 )
+from core.utils.next_starter_client import get_ready_next_starter
+
 from services.session_context import store as session_context_store
 from services.alarms.config import MODE_CONFIG
 from services import log_context
@@ -137,6 +146,8 @@ class ConnectionHandler:
         self.websocket = None
         self.headers = None
         self.device_id: Optional[str] = None
+        self.active_character_id: Optional[str] = None
+        self.character_memory_prompt: str = ""
         self.client_ip = None
         self.prompt = None
         self.welcome_msg = None
@@ -231,6 +242,9 @@ class ConnectionHandler:
         self.sentence_id = None
         self.voice_id = None
         self.tts_MessageText = ""
+        self.active_character_id = None
+        self.next_starter_payload: Optional[Dict[str, Any]] = None
+        self.next_starter_scheduled = False
 
         # IOT/MCP
         self.iot_descriptors = {}
@@ -264,6 +278,8 @@ class ConnectionHandler:
         self._session_created = False
         self._session_closed = False
         self.turn_index = 0
+        self.ws_connect_start = 0
+        self._ws_connect_start_perf = None
 
     # ------------------------------------------------------------------
     # Mode runtime accessors
@@ -418,89 +434,40 @@ class ConnectionHandler:
                 self.voice_id = str(fields.get("voice"))
 
             # Invalidate prompt cache for this device then rebuild prompt with latest character.
-            try:
-                invalidated = self.prompt_manager.invalidate_device_prompt_cache(
-                    self.device_id
-                )
-                self.logger.bind(tag=TAG).info(
-                    f"Prompt cache invalidated for {self.device_id}: {invalidated} entries"
-                )
-            except Exception as e:
-                self.logger.bind(tag=TAG).warning(
-                    f"Failed to invalidate prompt cache for {self.device_id}: {e}"
-                )
+            # try:
+            #     invalidated = self.prompt_manager.invalidate_device_prompt_cache(
+            #         self.device_id
+            #     )
+            #     self.logger.bind(tag=TAG).info(
+            #         f"Prompt cache invalidated for {self.device_id}: {invalidated} entries"
+            #     )
+            # except Exception as e:
+            #     self.logger.bind(tag=TAG).warning(
+            #     f"Failed to invalidate prompt cache for {self.device_id}: {e}"
+            # )
 
-            base_prompt = self.common_config.get("prompt", self.config.get("prompt", ""))
-            refreshed_prompt = base_prompt
+            refreshed_prompt = _BASE_PROMPT
 
-            profile_parts = []
-            for label, key in (
-                ("Your Name", "name"),
-                ("Your Age", "age"),
-                ("Your Pronouns", "pronouns"),
-                ("Your Relationship with the user", "relationship"),
-                ("You like calling the user", "callMe"),
-            ):
-                val = fields.get(key)
-                if val:
-                    profile_parts.append(f"{label}: {val}")
-            if profile_parts:
-                refreshed_prompt += "\n# About you:\n" + "\n- ".join(profile_parts)
-            if fields.get("bio"):
-                refreshed_prompt += f"\nUser's description of you: {fields['bio']}"
+            # profile_parts = []
+            # for label, key in (
+            #     ("Your Name", "name"),
+            #     ("Your Age", "age"),
+            #     ("Your Pronouns", "pronouns"),
+            #     ("Your Relationship with the user", "relationship"),
+            #     ("You like calling the user", "callMe"),
+            # ):
+            #     val = fields.get(key)
+            #     if val:
+            #         profile_parts.append(f"{label}: {val}")
+            # if profile_parts:
+            #     refreshed_prompt += "\n# About you:\n" + "\n- ".join(profile_parts)
+            # if fields.get("bio"):
+            #     refreshed_prompt += f"\nUser's description of you: {fields['bio']}"
 
-            # Re-append user profile/task context, same as initial handshake behavior.
-            try:
-                owner_phone = get_owner_phone_for_device(self.device_id)
-                if owner_phone:
-                    user_doc = get_user_profile_by_phone(owner_phone)
-                    user_fields = extract_user_profile_fields(user_doc or {})
-                    user_parts = []
-                    for label, key in (
-                        ("User's name", "name"),
-                        ("User's Birthday", "birthday"),
-                        ("User's Pronouns", "pronouns"),
-                    ):
-                        val = user_fields.get(key)
-                        if val:
-                            user_parts.append(f"{label}: {val}")
-                    if user_parts:
-                        refreshed_prompt += "\nUser profile:\n" + "\n- ".join(user_parts)
-
-                    task_str = query_task(
-                        owner_phone,
-                        fields.get("name") if isinstance(fields, dict) else None,
-                        user_fields.get("name")
-                        if isinstance(user_fields, dict)
-                        else None,
-                    )
-                    if task_str:
-                        display_name = user_fields.get("name") or "User"
-                        refreshed_prompt += (
-                            f"\n{display_name} might be trying to accomplish these tasks:\n {task_str}"
-                        )
-            except Exception as e:
-                self.logger.bind(tag=TAG).warning(
-                    f"Failed to rebuild user profile context after character switch: {e}"
-                )
 
             self.config["prompt"] = refreshed_prompt
-            try:
-                quick = self.prompt_manager.get_quick_prompt(
-                    refreshed_prompt, device_id=self.device_id
-                )
-                self.change_system_prompt(quick, prompt_label="quick_character_switch")
-                enhanced = self.prompt_manager.build_enhanced_prompt(
-                    refreshed_prompt, self.device_id, self.client_ip
-                )
-                if enhanced:
-                    self.change_system_prompt(
-                        enhanced, prompt_label="enhanced_character_switch"
-                    )
-            except Exception as e:
-                self.logger.bind(tag=TAG).warning(
-                    f"Failed to rebuild prompt after character switch: {e}"
-                )
+            self.prompt = refreshed_prompt
+            self.dialogue.update_system_message(refreshed_prompt)
 
             self.logger.bind(tag=TAG).info(
                 f"Character binding refreshed for {self.device_id}: "
@@ -513,6 +480,11 @@ class ConnectionHandler:
 
     async def handle_connection(self, ws):
         device_token = None
+        self._ws_connect_start_perf = time.perf_counter()
+        self.ws_connect_start = int(time.time() * 1000)
+        self.logger.bind(tag=TAG).info(
+            f"[latency] ws_connect_start={self.ws_connect_start}"
+        )
         try:
             # 获取并验证headers
             self.headers = dict(ws.request.headers)
@@ -556,7 +528,30 @@ class ConnectionHandler:
 
             # Normalize device-id to lower-case so it matches sessionContexts doc IDs
             raw_device_id = self.headers.get("device-id")
-            self.device_id = raw_device_id.lower() if isinstance(raw_device_id, str) else raw_device_id
+            normalized_device_id = (
+                raw_device_id.lower()
+                if isinstance(raw_device_id, str)
+                else raw_device_id
+            )
+
+            # Optional test override for server-side debugging.
+            # Priority: env TEST_DEVICE_ID > config.test_device_id > request header.
+            
+            forced_device_id = os.getenv("TEST_DEVICE_ID") or self.config.get(
+
+                "test_device_id"
+            )
+            if isinstance(forced_device_id, str) and forced_device_id.strip():
+                self.device_id = forced_device_id.strip().lower()
+                self.logger.bind(tag=TAG).warning(
+                    f"Using test device_id override: {self.device_id}"
+                )
+            else:
+                self.device_id = normalized_device_id
+
+            # Keep headers in sync so all downstream code paths use the same device id.
+            if self.device_id:
+                self.headers["device-id"] = self.device_id
 
             # Attach device-id to *all* logs emitted within this connection.
             # - Bind it onto the per-connection logger (covers executor threads too)
@@ -581,22 +576,20 @@ class ConnectionHandler:
             # ---- SAFE DEFAULTS ----
             user_id = f"device:{self.device_id}"
             user_name = "Unknown User"
-            new_prompt = self.config.get("prompt", "")
+            new_prompt = _BASE_PROMPT
 
-            cached_enhanced_prompt = self.prompt_manager.get_cached_enhanced_prompt(
-                self.device_id, prompt_text=self.config.get("prompt")
-            )
-            if cached_enhanced_prompt:
-                # Important: prompt caching must NOT skip Firestore fetches that
-                # resolve per-user settings (e.g., voice_id). Otherwise we fall back
-                # to provider defaults (often "Caleb" on ElevenLabs).
-                self.logger.bind(tag=TAG).info(
-                    f"Enhanced prompt cache hit for device {self.device_id} (prompt cached); "
-                    "still fetching Firestore profile for voice/user binding"
-                )
+            # cached_enhanced_prompt = self.prompt_manager.get_cached_enhanced_prompt(
+            #     self.device_id, prompt_text=self.config.get("prompt")
+            # )
+            # if cached_enhanced_prompt:
+            #     self.logger.bind(tag=TAG).info(
+            #         f"Enhanced prompt cache hit for device {self.device_id} (prompt cached); "
+            #         "still fetching Firestore profile for voice/user binding"
+            #     )
 
             # 从云端获取角色配置（voice, bio 等），并应用到本次会话
             fields = {}
+            firestore_profile_fetch_start = time.perf_counter()
             try:
                 char_id = None
                 if self.device_id:
@@ -604,6 +597,8 @@ class ConnectionHandler:
                         f"🔍 Looking up device: {self.device_id}"
                     )
                     char_id = get_active_character_for_device(self.device_id)
+                    # persist active character id on the connection for downstream use
+                    self.active_character_id = char_id
                     if not char_id:
                         fallback_id = (
                             get_most_recent_character_via_user_for_device(
@@ -619,13 +614,26 @@ class ConnectionHandler:
                             char_id = fallback_id
 
                 if char_id:
-                    self.current_character_id = char_id
-                    self.logger.info(f"char_id={char_id!r}")
+                    self.active_character_id = str(char_id)
+                    self.logger.bind(tag=TAG, device_id=self.device_id).info(f"Active character id: {char_id!r}")
                     char_doc = get_character_profile(char_id)
                     fields = extract_character_profile_fields(char_doc or {})
 
                     if not self.voice_id and fields.get("voice"):
                         self.voice_id = str(fields.get("voice"))
+                    try:
+                        self.next_starter_payload = get_ready_next_starter(
+                            self.active_character_id
+                        )
+                        if self.next_starter_payload:
+                            self.logger.bind(tag=TAG).info(
+                                f"Loaded ready next_starter for character_id={self.active_character_id}"
+                            )
+                    except Exception as starter_error:
+                        self.logger.bind(tag=TAG).warning(
+                            f"Failed to load next_starter for character_id={self.active_character_id}: {starter_error}"
+                        )
+
 
                     if not self.voice_id:
                         # This is the key condition that will trigger TTS provider default voice.
@@ -633,28 +641,30 @@ class ConnectionHandler:
                             "No voice resolved from Firestore character profile; TTS may fall back to default_voice_id"
                         )
 
-                    profile_parts = []
-                    for label, key in (
-                        ("Your Name", "name"),
-                        ("Your Age", "age"),
-                        ("Your Pronouns", "pronouns"),
-                        ("Your Relationship with the user", "relationship"),
-                        ("You like calling the user", "callMe"),
-                    ):
-                        val = fields.get(key)
-                        if val:
-                            profile_parts.append(f"{label}: {val}")
+                    # profile_parts = []
+                    # for label, key in (
+                    #     ("Your Name", "name"),
+                    #     ("Your Age", "age"),
+                    #     ("Your Pronouns", "pronouns"),
+                    #     ("Your Relationship with the user", "relationship"),
+                    #     ("You like calling the user", "callMe"),
+                    # ):
+                    #     val = fields.get(key)
+                    #     if val:
+                    #         profile_parts.append(f"{label}: {val}")
 
-                    if profile_parts:
-                        new_prompt += "\n# About you:\n" + "\n- ".join(
-                            profile_parts
-                        )
+                    # if profile_parts:
+                    #     new_prompt += "\n# About you:\n" + "\n- ".join(
+                    #         profile_parts
+                    #     )
 
-                    if fields.get("bio"):
-                        new_prompt += (
-                            f"\nUser's description of you: {fields['bio']}"
-                        )
+                    # if fields.get("bio"):
+                    #     new_prompt += (
+                    #         f"\nUser's description of you: {fields['bio']}"
+                    #     )
                 else:
+                    # ensure attribute is explicit when missing
+                    self.active_character_id = None
                     self.logger.bind(tag=TAG, device_id=self.device_id).warning(
                         "MISSING activeCharacterId; using defaults"
                     )
@@ -668,49 +678,24 @@ class ConnectionHandler:
                 )
 
                 if owner_phone:
-                    user_id = owner_phone
-                    self.logger.bind(tag=TAG).info(
-                        f"✅ Updated user_id to: {user_id}"
-                    )
                     user_doc = get_user_profile_by_phone(owner_phone)
                     user_fields = extract_user_profile_fields(user_doc or {})
+                    firestore_uid = user_fields.get("uid")
+
+                    if firestore_uid:
+                        user_id = firestore_uid
+                        self.logger.bind(tag=TAG).info(
+                            f"✅ Updated user_id to Firebase uid: {user_id}"
+                        )
+                    else:
+                        user_id = owner_phone
+                        self.logger.bind(tag=TAG).warning(
+                            f"⚠️ Firebase uid missing for owner {owner_phone}; fallback user_id to phone"
+                        )
+
                     user_name = user_fields.get("name") or owner_phone
                     self.logger.bind(tag=TAG).info(f"👤 User name: {user_name}")
 
-                    user_parts = []
-                    for label, key in (
-                        ("User's name", "name"),
-                        ("User's Birthday", "birthday"),
-                        ("User's Pronouns", "pronouns"),
-                    ):
-                        val = user_fields.get(key)
-                        if val:
-                            user_parts.append(f"{label}: {val}")
-                    if user_parts:
-                        new_prompt += "\nUser profile:\n" + "\n- ".join(
-                            user_parts
-                        )
-
-                    # 使用未完成任务的记忆
-                    try:
-                        task_str = query_task(
-                            owner_phone,
-                            fields.get("name")
-                            if isinstance(fields, dict)
-                            else None,
-                            user_fields.get("name")
-                            if isinstance(user_fields, dict)
-                            else None,
-                        )
-                        if task_str:
-                            display_name = user_fields.get("name") or "User"
-                            new_prompt += (
-                                f"\n{display_name} might be trying to accomplish these tasks:\n {task_str}"
-                            )
-                    except Exception as task_err:
-                        self.logger.bind(tag=TAG).warning(
-                            f"Failed to query tasks for prompt injection: {task_err}"
-                        )
                 else:
                     self.logger.bind(tag=TAG).warning(
                         f"❌ No owner phone found for device {self.device_id}, using fallback user_id: {user_id}"
@@ -720,10 +705,15 @@ class ConnectionHandler:
                 self.logger.bind(tag=TAG).error(
                     f"❌ Failed to fetch/apply character profile: {e}"
                 )
-                import traceback
-
                 self.logger.bind(tag=TAG).error(
                     f"Traceback: {traceback.format_exc()}"
+                )
+            finally:
+                firestore_profile_fetch_ms = int(
+                    (time.perf_counter() - firestore_profile_fetch_start) * 1000
+                )
+                self.logger.bind(tag=TAG).info(
+                    f"[latency] firestore_profile_fetch_ms={firestore_profile_fetch_ms}"
                 )
 
             # ---- SESSION CREATION (UNCONDITIONAL) ----
@@ -753,10 +743,6 @@ class ConnectionHandler:
             # ---- PROMPT UPDATE (SAFE) ----
             if new_prompt != self.config.get("prompt", ""):
                 self.config["prompt"] = new_prompt
-                self.change_system_prompt(new_prompt, prompt_label="base")
-
-
-
 
             # 启动超时检查任务
             self.timeout_task = asyncio.create_task(self._check_timeout())
@@ -771,21 +757,11 @@ class ConnectionHandler:
             # hello handling can correctly trigger server-initiated greeting.
             self._hydrate_mode_session()
 
-            # 同步构建首轮系统提示词（包含增强）
-            try:
-                base_prompt = self.config.get("prompt")
-                if base_prompt is not None:
-                    quick = self.prompt_manager.get_quick_prompt(base_prompt, device_id=self.device_id)
-                    self.change_system_prompt(quick, prompt_label="quick")
-                    self.prompt_manager.update_context_info(self, self.client_ip)
-                    enhanced = self.prompt_manager.build_enhanced_prompt(
-                        self.config["prompt"], self.device_id, self.client_ip
-                    )
-                    if enhanced:
-                        self.change_system_prompt(enhanced, prompt_label="enhanced")
-                        self.logger.bind(tag=TAG).info("同步构建增强系统提示词完成")
-            except Exception as e:
-                self.logger.bind(tag=TAG).warning(f"同步构建系统提示词失败: {e}")
+            # Commit the assembled prompt so _create_llm_conversation seeds
+            # the OpenAI conversation with only Part 1 (agent-base-prompt.txt).
+            # Part 3 (character_memory_prompt) is appended later once loaded.
+            self.config["prompt"] = new_prompt
+            self.prompt = new_prompt
 
             # 初始化会话绑定（mode-scoped 或 device-scoped）
             self._initialize_conversation_binding()
@@ -1302,6 +1278,25 @@ Return ONLY the JSON array, no other explanation."""
                                     log_msg += f"\n  - Action: {task.get('task_action')} (ID: {task.get('task_id')}): {task.get('match_reason')}"
                             
                             self.logger.bind(tag=TAG).info(log_msg)
+
+                            # Print full turn-by-turn conversation transcript
+                            transcript_lines = [
+                                f"=== SESSION TRANSCRIPT [{self.session_id}] ==="
+                            ]
+                            for i, msg in enumerate(conversation, 1):
+                                role = msg.get("role", "?").upper()
+                                content = msg.get("content", "")
+                                if isinstance(content, list):
+                                    # Handle multi-part content (e.g. vision/tool messages)
+                                    content = " ".join(
+                                        part.get("text", "") if isinstance(part, dict) else str(part)
+                                        for part in content
+                                    )
+                                transcript_lines.append(f"[{i}] {role}: {content}")
+                            transcript_lines.append(
+                                f"=== END TRANSCRIPT [{self.session_id}] ==="
+                            )
+                            self.logger.bind(tag=TAG).info("\n".join(transcript_lines))
                     except Exception as e:
                         self.logger.bind(tag=TAG).warning(f"获取对话摘要失败: {e}")
                 threading.Thread(target=complete_task_task, daemon=True).start()
@@ -1324,6 +1319,8 @@ Return ONLY the JSON array, no other explanation."""
                         char_id = None
                         if self.device_id:
                             char_id = get_active_character_for_device(self.device_id)
+                            # persist active character id on the connection for downstream use
+                            self.active_character_id = char_id
                             if not char_id:
                                 fallback_id = get_most_recent_character_via_user_for_device(self.device_id)
                                 if fallback_id:
@@ -1332,7 +1329,7 @@ Return ONLY the JSON array, no other explanation."""
                                     )
                                     char_id = fallback_id
                         if char_id:
-                            self.logger.info(f"char_id={char_id!r}")
+                            self.logger.bind(tag=TAG, device_id=self.device_id).info(f"Active character id: {char_id!r}")
                             char_doc = get_character_profile(char_id)
                             self.logger.info(f"char_doc_keys={list((char_doc or {}).keys())}")
                             fields = extract_character_profile_fields(char_doc or {})
@@ -1375,7 +1372,7 @@ Return ONLY the JSON array, no other explanation."""
                         )
                         self.chat_store.delete_session(self.session_id)
                     else:
-                        self.chat_store.end_session(self.session_id)
+                        self.chat_store.end_session(self.session_id, character_id=self.active_character_id)
                 finally:
                     self._session_closed = True
         except Exception as e:
@@ -1501,14 +1498,6 @@ Return ONLY the JSON array, no other explanation."""
                 self.selected_module_str, device_id=self.device_id
             )
 
-            if self.config.get("prompt") is not None:
-                user_prompt = self.config["prompt"]
-                prompt = self.prompt_manager.get_quick_prompt(user_prompt, device_id=self.device_id)
-                self.change_system_prompt(prompt, prompt_label="quick_init")
-                self.logger.bind(tag=TAG).info(
-                    "快速初始化组件: prompt渲染完成"
-                )
-
             if self.vad is None:
                 self.vad = self._vad
             if self.asr is None:
@@ -1525,10 +1514,14 @@ Return ONLY the JSON array, no other explanation."""
                 self.tts.open_audio_channels(self), self.loop
             )
 
-            # Create per-connection Memory/Task/Intent to avoid shared mutable state
-            self._ensure_per_connection_providers()
-
-            self._initialize_memory()
+            memory_load_start = time.perf_counter()
+            try:
+                self._initialize_memory()
+            finally:
+                memory_load_ms = int((time.perf_counter() - memory_load_start) * 1000)
+                self.logger.bind(tag=TAG).info(
+                    f"[latency] memory_load_ms={memory_load_ms}"
+                )
             self._initialize_intent()
             self._init_report_threads()
             self._init_prompt_enhancement()
@@ -1544,13 +1537,7 @@ Return ONLY the JSON array, no other explanation."""
             self.loop.call_soon_threadsafe(self.components_initialized.set)
 
     def _init_prompt_enhancement(self):
-        self.prompt_manager.update_context_info(self, self.client_ip)
-        enhanced_prompt = self.prompt_manager.build_enhanced_prompt(
-            self.config["prompt"], self.device_id, self.client_ip
-        )
-        if enhanced_prompt:
-            self.change_system_prompt(enhanced_prompt, prompt_label="enhanced_refresh")
-            self.logger.bind(tag=TAG).info("系统提示词已增强更新")
+        pass
 
     def _init_report_threads(self):
         if not self.read_config_from_api or self.need_bind:
@@ -1681,8 +1668,6 @@ Return ONLY the JSON array, no other explanation."""
                     "functions"
                 ] = plugin_from_server.keys()
 
-        if private_config.get("prompt") is not None:
-            self.config["prompt"] = private_config["prompt"]
         if private_config.get("voiceprint") is not None:
             self.config["voiceprint"] = private_config["voiceprint"]
         if private_config.get("device_max_output_size") is not None:
@@ -1812,9 +1797,6 @@ Return ONLY the JSON array, no other explanation."""
             )
 
     def _initialize_memory(self):
-        if self.memory is None:
-            return
-
         summary_memory_block = ""
         try:
             summary_memory_block = self.chat_store.get_system_memory_block(
@@ -1822,7 +1804,15 @@ Return ONLY the JSON array, no other explanation."""
             )
             if summary_memory_block:
                 self.logger.bind(tag=TAG).info(
-                    f"Loaded systemMemoryBlock from memory_read_model for user {getattr(self, 'user_id', None)}"
+                    f"Loaded systemMemoryBlock from user_memory_model for user {getattr(self, 'user_id', None)}"
+                )
+                self.logger.bind(tag=TAG).info(
+                    f"systemMemoryBlock length={len(summary_memory_block)}"
+                )
+                self.logger.bind(tag=TAG).info(
+                    "systemMemoryBlock content START\n"
+                    f"{summary_memory_block}\n"
+                    "systemMemoryBlock content END"
                 )
             else:
                 self.logger.bind(tag=TAG).info(
@@ -1830,14 +1820,48 @@ Return ONLY the JSON array, no other explanation."""
                 )
         except Exception as e:
             self.logger.bind(tag=TAG).warning(
-                f"Failed loading systemMemoryBlock from memory_read_model: {e}"
+                f"Failed loading systemMemoryBlock from user_memory_model: {e}"
             )
 
-        self.memory.init_memory(
+        # persist system memory block on the connection for use by memory-agent
+        # at the start of a conversation
+        self.system_memory_block = summary_memory_block or ""
+
+        character_memory_prompt = ""
+        try:
+            character_id = getattr(self, "active_character_id", None)
+            if character_id:
+                character_memory_prompt = self.chat_store.get_character_memory_prompt(
+                    character_id=character_id
+                )
+                if character_memory_prompt:
+                    self.logger.bind(tag=TAG).info(
+                        f"Loaded Memory_prompt from character_memory_model for character {character_id}\n"
+                        f"character Memory_prompt content START\n"
+                        f"{character_memory_prompt}\n"
+                        f"character Memory_prompt content END"
+                    )
+                    self.character_memory_prompt = character_memory_prompt
+                else:
+                    self.logger.bind(tag=TAG).info(
+                        f"No character Memory_prompt retrieved for character {character_id}"
+                    )
+        except Exception as e:
+            self.logger.bind(tag=TAG).warning(
+                f"Failed loading Memory_prompt from character_memory_model: {e}"
+            )
+
+        if self.memory is not None:
+            self.memory.init_memory(
+                role_id=self.device_id,
+                user_id=getattr(self, "user_id", None),
+                llm=self.llm,
+                summary_memory=summary_memory_block,
+            )
+        """初始化任务模块"""
+        self.task.init_task(
             role_id=self.device_id,
-            user_id=getattr(self, "user_id", None),
             llm=self.llm,
-            summary_memory=summary_memory_block,
         )
         # Initialize task module (guard: Task provider may not be configured)
         if self.task:
@@ -1847,35 +1871,21 @@ Return ONLY the JSON array, no other explanation."""
             )
         # 获取记忆总结配置
         memory_config = self.config["Memory"]
-        memory_type = memory_config[self.config["selected_module"]["Memory"]]["type"]
+        memory_type = memory_config[self.config["selected_module"]["Memory"]].get("type", "nomem")
 
         if memory_type == "nomem":
             return
-        elif memory_type == "mem_local_short":
-            memory_llm_name = memory_config[
-                self.config["selected_module"]["Memory"]
-            ].get("llm")
-            if memory_llm_name and memory_llm_name in self.config["LLM"]:
-                from core.utils import llm as llm_utils
 
-                memory_llm_config = self.config["LLM"][memory_llm_name]
-                memory_llm_type = memory_llm_config.get("type", memory_llm_name)
-                memory_llm = llm_utils.create_instance(
-                    memory_llm_type, memory_llm_config
-                )
-                self.logger.bind(tag=TAG).info(
-                    f"为记忆总结创建了专用LLM: {memory_llm_name}, 类型: {memory_llm_type}"
-                )
-                # 设置任务模块的LLM
-                if self.task:
-                    self.task.set_llm(memory_llm)
-                self.memory.set_llm(memory_llm)
-            else:
-                # 否则使用主LLM
-                if self.task:
-                    self.task.set_llm(self.llm)
-                self.memory.set_llm(self.llm)
-                self.logger.bind(tag=TAG).info("使用主LLM作为意图识别模型")
+        # Default behavior: use the main LLM for task/memory operations.
+        # The removed `mem_local_short` provider previously created a dedicated
+        # LLM here; that provider has been deleted and we now fall back to the
+        # primary LLM for any memory-related processing.
+        try:
+            self.task.set_llm(self.llm)
+            self.memory.set_llm(self.llm)
+        except Exception:
+            # Defensive: if task/memory are not initialized, ignore.
+            pass
 
     def _initialize_intent(self):
         if self.intent is None:
@@ -1918,11 +1928,7 @@ Return ONLY the JSON array, no other explanation."""
                 self.func_handler._initialize(), self.loop
             )
 
-    def change_system_prompt(self, prompt, prompt_label: Optional[str] = None):
-        self.prompt = prompt
-        self.dialogue.update_system_message(self.prompt)
-        label = prompt_label or "system"
-        self.logger.bind(tag=TAG).info(f"{label} prompt rendered")
+
 
     # ------------------------------------------------------------------
     # Mode session + conversation/sessionContext integration
@@ -2083,6 +2089,8 @@ Return ONLY the JSON array, no other explanation."""
         self.current_conversation_id = new_conv_id
 
     def _ensure_device_scoped_conversation(self):
+        # [TESTING] Comment out to resume existing conversation:
+        return
         state = get_conversation_state_for_device(self.device_id)
         conv_id = state.get("id") if state else None
         if state and self._device_conversation_expired(state.get("last_used")):
@@ -2305,16 +2313,17 @@ Return ONLY the JSON array, no other explanation."""
     def chat(self, query, depth=0, extra_inputs=None, is_user_input=True):
         self.logger.bind(tag=TAG).info(f"大模型收到用户消息: {query}")
         self.llm_finish_task = False
+        chat_start_perf = time.perf_counter()
 
         # For active websocket sessions, re-check character binding on user turns.
         # This ensures voice_id/prompt switch quickly after app-side character changes.
-        if depth == 0 and is_user_input:
-            try:
-                self._refresh_character_binding_if_needed(force=False)
-            except Exception as e:
-                self.logger.bind(tag=TAG).warning(
-                    f"Runtime character refresh failed (non-fatal): {e}"
-                )
+        # if depth == 0 and is_user_input:
+        #     try:
+        #         self._refresh_character_binding_if_needed(force=False)
+        #     except Exception as e:
+        #         self.logger.bind(tag=TAG).warning(
+        #             f"Runtime character refresh failed (non-fatal): {e}"
+        #         )
 
         # Genuine user input cancels any pending follow-up
         if query and is_user_input:
@@ -2322,6 +2331,69 @@ Return ONLY the JSON array, no other explanation."""
             if self.followup_task and not self.followup_task.done():
                 self.followup_task.cancel()
                 self.logger.bind(tag=TAG).info("User responded - cancelling follow-up")
+
+            # If we have a canonical character profile, ensure any stored
+            # conversation summary with prior assistant statements doesn't
+            # force the LLM to repeat outdated facts. Clear the device-scoped
+            # conversation state so a fresh conversation is used instead.
+            try:
+                char_mem_check = getattr(self, "character_memory_prompt", "") or ""
+                if char_mem_check and getattr(self, "device_id", None):
+                    state = get_conversation_state_for_device(self.device_id)
+                    if state and state.get("last_interaction_summary") and "assistant:" in state.get("last_interaction_summary"):
+                        self.logger.bind(tag=TAG).info(
+                            "Character override active — clearing stored conversation to avoid stale assistant assertions"
+                        )
+                        update_conversation_state_for_device(
+                            self.device_id,
+                            conversation_id=None,
+                            last_used=None,
+                            last_interaction_summary=None,
+                        )
+                        # Also reset local tracking so we create a fresh LLM convo
+                        try:
+                            self.current_conversation_id = None
+                            # Best-effort: remove any in-memory conversation mapping
+                            # the LLM adapter may keep. This forces creation of a
+                            # fresh conversation without prior assistant history.
+                            if hasattr(self.llm, "_conversations") and self.session_id in self.llm._conversations:
+                                try:
+                                    del self.llm._conversations[self.session_id]
+                                except Exception:
+                                    pass
+                            # If adapter provides a reset helper, call it.
+                            if hasattr(self.llm, "clear_conversation_for_session"):
+                                try:
+                                    self.llm.clear_conversation_for_session(self.session_id)
+                                except Exception:
+                                    pass
+                            # Recreate a fresh conversation seeded with the base
+                            # system prompt plus the authoritative character profile
+                            # so the LLM has the correct canonical info.
+                            seed_text = (getattr(self, "prompt", "") or "")
+                            char_profile = getattr(self, "character_memory_prompt", "") or ""
+                            if hasattr(self.llm, "ensure_conversation_with_system"):
+                                try:
+                                    combined_seed = seed_text
+                                    if char_profile:
+                                        combined_seed = combined_seed + "\n\nCharacter Profile:\n" + char_profile
+                                    new_conv_id = self.llm.ensure_conversation_with_system(self.session_id, combined_seed)
+                                    if new_conv_id:
+                                        self.current_conversation_id = new_conv_id
+                                        update_conversation_state_for_device(
+                                            self.device_id,
+                                            conversation_id=new_conv_id,
+                                            last_used=datetime.now(timezone.utc).isoformat(),
+                                        )
+                                        self.logger.bind(tag=TAG).info(
+                                            f"Character override: created fresh conversation {new_conv_id} for device {self.device_id}"
+                                        )
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(f"Failed to clear stale conversation: {e}")
 
         if depth == 0:
             self.sentence_id = str(uuid.uuid4().hex)
@@ -2350,17 +2422,43 @@ Return ONLY the JSON array, no other explanation."""
         if self.intent_type == "function_call" and hasattr(self, "func_handler"):
             functions = self.func_handler.get_functions()
         response_message = []
+        llm_request_start_perf = None
 
         try:
             memory_str = None
+            # Always load the authoritative memory blocks regardless of whether
+            # the memory provider is active. This ensures system_memory_block
+            # (which contains user facts like friend names) always reaches the LLM.
+            sys_mem = getattr(self, "system_memory_block", "") or ""
+            char_mem_base = getattr(self, "character_memory_prompt", "") or ""
+
             if self.memory is not None:
                 try:
-                    future = asyncio.run_coroutine_threadsafe(
-                        self.memory.query_memory(query), self.loop
-                    )
-                    memory_str = future.result(timeout=5.0)
+                    # Detect first genuine user turn in this conversation.
+                    # At this point the current user Message has already been
+                    # appended to self.dialogue; if there are no other prior
+                    # user/assistant messages then this is the first turn.
+                    prior_non_system = [m for m in self.dialogue.dialogue if m.role in ("user", "assistant")]
+                    is_first_turn = len(prior_non_system) == 1 and prior_non_system[-1].role == "user"
+
+                    if is_first_turn:
+                        prefix_parts = [p for p in [sys_mem, char_mem_base] if p]
+                        memory_str = "\n\n".join(prefix_parts) or ""
+                    else:
+                        future = asyncio.run_coroutine_threadsafe(
+                            self.memory.query_memory(query), self.loop
+                        )
+                        queried = future.result(timeout=5.0)
+                        prefix_parts = [p for p in [sys_mem, char_mem_base] if p]
+                        prefix = "\n\n".join(prefix_parts)
+                        memory_str = (prefix + "\n\n" + queried).strip() if prefix else queried
                 except Exception as e:
                     self.logger.bind(tag=TAG).warning(f"记忆查询失败或超时: {e}")
+
+            # If memory provider is absent or failed, still inject the static blocks.
+            if memory_str is None:
+                prefix_parts = [p for p in [sys_mem, char_mem_base] if p]
+                memory_str = "\n\n".join(prefix_parts) or None
 
             use_full_history = True
             try:
@@ -2385,6 +2483,10 @@ Return ONLY the JSON array, no other explanation."""
                 instructions += self.mode_specific_instructions
                 self.mode_specific_instructions = ""
 
+            # If we have a character memory prompt, add a high-priority
+            # override so older assistant outputs or stored summaries
+            # do not conflict with the canonical character profile.
+
             if memory_str:
                 instructions += f"\n\n<memory>\n{memory_str}\n</memory>"
 
@@ -2397,6 +2499,7 @@ Return ONLY the JSON array, no other explanation."""
             if extra_inputs:
                 kwargs["extra_inputs"] = extra_inputs
 
+            llm_request_start_perf = time.perf_counter()
             if self.intent_type == "function_call" and functions is not None:
                 llm_responses = self.llm.response_with_functions(
                     self.session_id,
@@ -2419,6 +2522,8 @@ Return ONLY the JSON array, no other explanation."""
         content_arguments = ""
         self.client_abort = False
         emotion_flag = True
+        llm_first_token_logged = False
+        tts_first_chunk_logged = False
 
         for response in llm_responses:
             if self.client_abort:
@@ -2477,8 +2582,24 @@ Return ONLY the JSON array, no other explanation."""
                 emotion_flag = False
 
             if content is not None and len(content) > 0:
+                if not llm_first_token_logged and llm_request_start_perf is not None:
+                    llm_first_token_ms = int(
+                        (time.perf_counter() - llm_request_start_perf) * 1000
+                    )
+                    self.logger.bind(tag=TAG).info(
+                        f"[latency] llm_first_token_ms={llm_first_token_ms}"
+                    )
+                    llm_first_token_logged = True
                 if not tool_call_flag:
                     response_message.append(content)
+                    if not tts_first_chunk_logged:
+                        tts_first_chunk_ms = int(
+                            (time.perf_counter() - chat_start_perf) * 1000
+                        )
+                        self.logger.bind(tag=TAG).info(
+                            f"[latency] tts_first_chunk_ms={tts_first_chunk_ms}"
+                        )
+                        tts_first_chunk_logged = True
                     self.tts.tts_text_queue.put(
                         TTSMessageDTO(
                             sentence_id=self.sentence_id,

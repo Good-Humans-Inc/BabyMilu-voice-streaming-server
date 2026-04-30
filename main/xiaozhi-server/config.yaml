@@ -231,7 +231,6 @@ Intent:
     # 系统默认已经记载"handle_exit_intent(退出识别)"、"play_music(音乐播放)"插件，请勿重复加载
     # 下面是加载查天气、角色切换、加载查新闻的插件示例
     functions:
-      - change_role
       - get_weather
       - play_music
       - set_alarm
@@ -252,13 +251,7 @@ Memory:
   nomem:
     # 不想使用记忆功能，可以使用nomem
     type: nomem
-  mem_local_short:
-    # 本地记忆功能，通过selected_module的llm总结，数据保存在本地服务器，不会上传到外部服务器
-    type: mem_local_short
-    # 配备记忆存储独立的思考模型
-    # 如果这里不填，则会默认使用selected_module.LLM的模型作为意图识别的思考模型
-    # 如果你的不想使用selected_module.LLM记忆存储，这里最好使用独立的LLM作为意图识别，例如使用免费的ChatGLMLLM
-    # llm: ChatGLMLLM
+  # mem_local_short removed: local short-term memory provider deprecated
 
 Task:
   llm_task:

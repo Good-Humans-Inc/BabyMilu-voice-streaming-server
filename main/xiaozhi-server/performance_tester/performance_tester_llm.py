@@ -36,29 +36,7 @@ class LLMPerformanceTester:
 
     def _load_system_prompt(self) -> str:
         """加载系统提示词"""
-        try:
-            prompt_file = os.path.join(
-                os.path.dirname(os.path.dirname(__file__)), "agent-base-prompt.txt"
-            )
-            with open(prompt_file, "r", encoding="utf-8") as f:
-                content = f.read()
-                # 替换模板变量为测试值
-                content = content.replace(
-                    "{{base_prompt}}", "你是小智，一个聪明可爱的AI助手"
-                )
-                content = content.replace(
-                    "{{emojiList}}", "😀,😃,😄,😁,😊,😍,🤔,😮,😱,😢,😭,😴,😵,🤗,🙄"
-                )
-                content = content.replace("{{current_time}}", "2024年8月17日 12:30:45")
-                content = content.replace("{{today_date}}", "2024年8月17日")
-                content = content.replace("{{today_weekday}}", "星期六")
-                content = content.replace("{{lunar_date}}", "甲辰年七月十四")
-                content = content.replace("{{local_address}}", "北京市")
-                content = content.replace("{{weather_info}}", "今天晴，25-32℃")
-                return content
-        except Exception as e:
-            print(f"无法加载系统提示词文件: {e}")
-            return "你是小智，一个聪明可爱的AI助手。请用温暖友善的语气回复用户。"
+        return "你是小智，一个聪明可爱的AI助手。请用温暖友善的语气回复用户。"
 
     def _collect_response_sync(self, llm, messages, llm_name, sentence_start):
         """同步收集响应数据的辅助方法"""

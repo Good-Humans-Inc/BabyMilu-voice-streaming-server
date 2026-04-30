@@ -79,7 +79,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             start_time TEXT,
             end_time TEXT,
             analysis_status TEXT,
-            memory_status TEXT,
+            memory_status_user TEXT,
+            memory_status_character TEXT,
             turns TEXT,
             conversation_id TEXT,
             analysis_json TEXT,
@@ -106,7 +107,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "sessions", "analysis_json", "TEXT")
     _add_column_if_missing(conn, "sessions", "token_usage", "INTEGER DEFAULT 0")
     _add_column_if_missing(conn, "sessions", "last_active_at", "TEXT")
-    _add_column_if_missing(conn, "sessions", "memory_status", "TEXT")
+    _add_column_if_missing(conn, "sessions", "memory_status_user", "TEXT")
+    _add_column_if_missing(conn, "sessions", "memory_status_character", "TEXT")
     _add_column_if_missing(conn, "sessions", "turns", "TEXT")
     _add_column_if_missing(conn, "turns", "created_at", "TEXT")
     _add_column_if_missing(conn, "users", "device_ids", "TEXT")
@@ -171,8 +173,8 @@ class SQLiteChatStore:
         with get_db() as db:
             cur = db.execute(
                 """
-                INSERT INTO sessions (session_id, user_name, user_id, device_id, created_at, start_time, last_active_at, memory_status, turns)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO sessions (session_id, user_name, user_id, device_id, created_at, start_time, last_active_at, turns)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     user_name = excluded.user_name,
                     user_id = excluded.user_id,
@@ -181,7 +183,8 @@ class SQLiteChatStore:
                     start_time = excluded.start_time,
                     end_time = NULL,
                     analysis_status = NULL,
-                    memory_status = 'pending',
+                    memory_status_user = NULL,
+                    memory_status_character = NULL,
                     turns = COALESCE(sessions.turns, '[]'),
                     last_active_at = excluded.last_active_at
                 """,
@@ -193,7 +196,6 @@ class SQLiteChatStore:
                     _now_iso(),
                     _now_iso(),
                     _now_iso(),
-                    "pending",
                     "[]",
                 ),
             )
@@ -257,19 +259,21 @@ class SQLiteChatStore:
         existing_turns.append(turn_id)
         return json.dumps(existing_turns, ensure_ascii=False)
 
-    def end_session(self, session_id):
+    def end_session(self, session_id, character_id=None):
         if self.logger:
-            self.logger.info(f"[ChatStore:sqlite] end_session(session_id={session_id})")
+            self.logger.info(f"[ChatStore:sqlite] end_session(session_id={session_id}, character_id={character_id})")
         with get_db() as db:
             cur = db.execute(
                 """
                 UPDATE sessions
                 SET end_time = ?,
                     analysis_status = 'pending',
-                    memory_status = 'pending'
+                    memory_status_user = 'pending',
+                    memory_status_character = 'pending',
+                    character_id = COALESCE(?, character_id)
                 WHERE session_id = ?
                 """,
-                (_now_iso(), session_id),
+                (_now_iso(), character_id, session_id),
             )
 
             if self.logger:
@@ -325,6 +329,9 @@ class SQLiteChatStore:
     def get_system_memory_block(self, user_id: str) -> str:
         return ""
 
+    def get_character_memory_prompt(self, character_id: str) -> str:
+        return ""
+
 
 class SupabaseChatStore:
     def __init__(self, logger=None):
@@ -335,8 +342,11 @@ class SupabaseChatStore:
         self.users_table = os.environ.get("SUPABASE_USERS_TABLE", "users")
         self.sessions_table = os.environ.get("SUPABASE_SESSIONS_TABLE", "sessions")
         self.turns_table = os.environ.get("SUPABASE_TURNS_TABLE", "turns")
-        self.memory_read_model_table = os.environ.get(
-            "SUPABASE_MEMORY_READ_MODEL_TABLE", "memory_read_model"
+        self.user_memory_model_table = os.environ.get(
+            "SUPABASE_USER_MEMORY_MODEL_TABLE", "user_memory_model"
+        )
+        self.character_memory_model_table = os.environ.get(
+            "SUPABASE_CHARACTER_MEMORY_MODEL_TABLE", "character_memory_model"
         )
 
         self.headers = {
@@ -347,7 +357,7 @@ class SupabaseChatStore:
 
         if self.logger:
             self.logger.info(
-                f"[ChatStore:init] backend=supabase base_url={self.base_url}, users_table={self.users_table}, sessions_table={self.sessions_table}, turns_table={self.turns_table}, memory_read_model_table={self.memory_read_model_table}"
+                f"[ChatStore:init] backend=supabase base_url={self.base_url}, users_table={self.users_table}, sessions_table={self.sessions_table}, turns_table={self.turns_table}, user_memory_model_table={self.user_memory_model_table}"
             )
 
     def is_configured(self) -> bool:
@@ -487,7 +497,7 @@ class SupabaseChatStore:
             f"{facts_text}"
         )
 
-    def _build_memory_read_model_payload(self, user_id: str, device_id: str = "") -> dict:
+    def _build_user_memory_model_payload(self, user_id: str, device_id: str = "") -> dict:
         identity = self._build_identity_from_firestore(user_id=user_id, device_id=device_id)
         system_memory_block = self._build_initial_system_memory_block(identity)
         return {
@@ -523,17 +533,17 @@ class SupabaseChatStore:
             },
         }
 
-    def _ensure_memory_read_model(self, user_id: str, device_id: str = ""):
+    def _ensure_user_memory_model(self, user_id: str, device_id: str = ""):
         if not user_id:
             return
 
-        existing = self._select_eq(self.memory_read_model_table, "user_id", user_id)
+        existing = self._select_eq(self.user_memory_model_table, "user_id", user_id)
         if existing:
             return
 
-        payload = self._build_memory_read_model_payload(user_id=user_id, device_id=device_id)
+        payload = self._build_user_memory_model_payload(user_id=user_id, device_id=device_id)
         try:
-            self._insert(self.memory_read_model_table, payload)
+            self._insert(self.user_memory_model_table, payload)
         except RuntimeError as e:
             if "status=409" in str(e):
                 return
@@ -543,9 +553,9 @@ class SupabaseChatStore:
         if not user_id:
             return
 
-        existing = self._select_eq(self.memory_read_model_table, "user_id", user_id)
+        existing = self._select_eq(self.user_memory_model_table, "user_id", user_id)
         if not existing:
-            self._ensure_memory_read_model(user_id=user_id, device_id=device_id)
+            self._ensure_user_memory_model(user_id=user_id, device_id=device_id)
             return
 
         profile = existing.get("profile") if isinstance(existing.get("profile"), dict) else {}
@@ -582,7 +592,7 @@ class SupabaseChatStore:
         updated_profile["identity"] = updated_identity
 
         self._update_eq(
-            self.memory_read_model_table,
+            self.user_memory_model_table,
             "user_id",
             user_id,
             {
@@ -595,7 +605,7 @@ class SupabaseChatStore:
         if not user_id:
             return ""
 
-        existing = self._select_eq(self.memory_read_model_table, "user_id", user_id)
+        existing = self._select_eq(self.user_memory_model_table, "user_id", user_id)
         if not isinstance(existing, dict):
             return ""
 
@@ -608,6 +618,20 @@ class SupabaseChatStore:
         legacy_block = profile.get("systemMemoryBlock")
         if isinstance(legacy_block, str):
             return legacy_block
+
+        return ""
+
+    def get_character_memory_prompt(self, character_id: str) -> str:
+        if not character_id:
+            return ""
+
+        existing = self._select_eq(self.character_memory_model_table, "character_id", character_id)
+        if not isinstance(existing, dict):
+            return ""
+
+        prompt = existing.get("memory_prompt") or existing.get("Memory_prompt")
+        if isinstance(prompt, str):
+            return prompt
 
         return ""
 
@@ -627,15 +651,15 @@ class SupabaseChatStore:
             on_conflict="user_id",
         )
         try:
-            self._ensure_memory_read_model(user_id, device_id)
+            self._ensure_user_memory_model(user_id, device_id)
             if self.logger:
                 self.logger.info(
-                    f"[ChatStore:supabase] ensured memory_read_model(user_id={user_id})"
+                    f"[ChatStore:supabase] ensured user_memory_model(user_id={user_id})"
                 )
         except Exception as e:
             if self.logger:
                 self.logger.warning(
-                    f"[ChatStore:supabase] ensure memory_read_model failed for user_id={user_id}: {e}"
+                    f"[ChatStore:supabase] ensure user_memory_model failed for user_id={user_id}: {e}"
                 )
 
     def create_session(self, *, session_id, user_id, user_name, device_id):
@@ -652,7 +676,6 @@ class SupabaseChatStore:
             "created_at": now_iso,
             "start_time": now_iso,
             "last_active_at": now_iso,
-            "memory_status": "pending",
             "turns": [],
         }
         try:
@@ -672,7 +695,8 @@ class SupabaseChatStore:
                         "end_time": None,
                         "analysis_status": None,
                         "last_active_at": now_iso,
-                        "memory_status": "pending",
+                        "memory_status_user": None,
+                        "memory_status_character": None,
                     },
                 )
             else:
@@ -722,18 +746,22 @@ class SupabaseChatStore:
                 return inserted_row.get("turn_id")
         return default
 
-    def end_session(self, session_id):
+    def end_session(self, session_id, character_id=None):
         if self.logger:
-            self.logger.info(f"[ChatStore:supabase] end_session(session_id={session_id})")
+            self.logger.info(f"[ChatStore:supabase] end_session(session_id={session_id}, character_id={character_id})")
+        payload = {
+            "end_time": _now_iso(),
+            "analysis_status": "pending",
+            "memory_status_user": "pending",
+            "memory_status_character": "pending",
+        }
+        if character_id is not None:
+            payload["character_id"] = character_id
         self._update_eq(
             self.sessions_table,
             "session_id",
             session_id,
-            {
-                "end_time": _now_iso(),
-                "analysis_status": "pending",
-                "memory_status": "pending",
-            },
+            payload,
         )
 
     def delete_session(self, session_id):
@@ -760,180 +788,100 @@ class ChatStore:
         self.logger = logger
         backend = (os.environ.get("CHAT_STORE_BACKEND", "auto") or "auto").strip().lower()
 
-        sqlite_store = SQLiteChatStore(logger=logger)
-        supabase_store = SupabaseChatStore(logger=logger)
-        supabase_ready = supabase_store.is_configured()
-
-        self.primary_store = sqlite_store
-        self.replica_stores = []
-        self.memory_store = None
-
-        if backend == "dual":
-            if supabase_ready:
-                self.primary_store = supabase_store
-                self.replica_stores = [sqlite_store]
-                self.memory_store = supabase_store
-                if self.logger:
-                    self.logger.info("[ChatStore] backend=dual primary=supabase replica=sqlite")
-            else:
-                if self.logger:
-                    self.logger.warning(
-                        "[ChatStore] CHAT_STORE_BACKEND=dual but SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY missing, falling back to sqlite only"
-                    )
-                self.primary_store = sqlite_store
-                self.memory_store = sqlite_store
-        elif backend in ("supabase", "auto"):
-            if supabase_ready:
-                self.primary_store = supabase_store
-                self.memory_store = supabase_store
+        self.store = None
+        if backend in ("supabase", "auto"):
+            supabase_store = SupabaseChatStore(logger=logger)
+            if supabase_store.is_configured():
+                self.store = supabase_store
             else:
                 if self.logger and backend == "supabase":
                     self.logger.warning(
                         "[ChatStore] CHAT_STORE_BACKEND=supabase but SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY missing, falling back to sqlite"
                     )
-                self.primary_store = sqlite_store
-                self.memory_store = sqlite_store
-        else:
-            self.primary_store = sqlite_store
-            self.memory_store = sqlite_store
+
+        if self.store is None:
+            self.store = SQLiteChatStore(logger=logger)
 
     def get_or_create_user(self, user_id: str, name: str, device_id: str = ""):
         try:
-            self.primary_store.get_or_create_user(user_id=user_id, name=name, device_id=device_id)
-            for replica_store in self.replica_stores:
-                try:
-                    replica_store.get_or_create_user(
-                        user_id=user_id,
-                        name=name,
-                        device_id=device_id,
-                    )
-                except Exception as replica_error:
-                    if self.logger:
-                        self.logger.warning(
-                            f"[ChatStore] replica get_or_create_user failed: {replica_error}"
-                        )
+            self.store.get_or_create_user(user_id=user_id, name=name, device_id=device_id)
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ChatStore] get_or_create_user failed: {e}")
 
     def create_session(self, *, session_id, user_id, user_name, device_id):
         try:
-            self.primary_store.create_session(
+            self.store.create_session(
                 session_id=session_id,
                 user_id=user_id,
                 user_name=user_name,
                 device_id=device_id,
             )
-            for replica_store in self.replica_stores:
-                try:
-                    replica_store.create_session(
-                        session_id=session_id,
-                        user_id=user_id,
-                        user_name=user_name,
-                        device_id=device_id,
-                    )
-                except Exception as replica_error:
-                    if self.logger:
-                        self.logger.warning(
-                            f"[ChatStore] replica create_session failed: {replica_error}"
-                        )
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ChatStore] create_session failed: {e}")
 
     def insert_turn(self, session_id, turn_index, speaker, text):
         try:
-            self.primary_store.insert_turn(
+            self.store.insert_turn(
                 session_id=session_id,
                 turn_index=turn_index,
                 speaker=speaker,
                 text=text,
             )
-            for replica_store in self.replica_stores:
-                try:
-                    replica_store.insert_turn(
-                        session_id=session_id,
-                        turn_index=turn_index,
-                        speaker=speaker,
-                        text=text,
-                    )
-                except Exception as replica_error:
-                    if self.logger:
-                        self.logger.warning(
-                            f"[ChatStore] replica insert_turn failed: {replica_error}"
-                        )
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ChatStore] insert_turn failed: {e}")
 
-    def end_session(self, session_id):
+    def end_session(self, session_id, character_id=None):
         try:
-            self.primary_store.end_session(session_id=session_id)
-            for replica_store in self.replica_stores:
-                try:
-                    replica_store.end_session(session_id=session_id)
-                except Exception as replica_error:
-                    if self.logger:
-                        self.logger.warning(
-                            f"[ChatStore] replica end_session failed: {replica_error}"
-                        )
+            self.store.end_session(session_id=session_id, character_id=character_id)
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ChatStore] end_session failed: {e}")
 
     def delete_session(self, session_id):
         try:
-            self.primary_store.delete_session(session_id=session_id)
-            for replica_store in self.replica_stores:
-                try:
-                    replica_store.delete_session(session_id=session_id)
-                except Exception as replica_error:
-                    if self.logger:
-                        self.logger.warning(
-                            f"[ChatStore] replica delete_session failed: {replica_error}"
-                        )
+            self.store.delete_session(session_id=session_id)
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ChatStore] delete_session failed: {e}")
 
     def update_session_conversation_id(self, session_id: str, conversation_id: str):
         try:
-            self.primary_store.update_session_conversation_id(
+            self.store.update_session_conversation_id(
                 session_id=session_id,
                 conversation_id=conversation_id,
             )
-            for replica_store in self.replica_stores:
-                try:
-                    replica_store.update_session_conversation_id(
-                        session_id=session_id,
-                        conversation_id=conversation_id,
-                    )
-                except Exception as replica_error:
-                    if self.logger:
-                        self.logger.warning(
-                            f"[ChatStore] replica update_session_conversation_id failed: {replica_error}"
-                        )
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ChatStore] update_session_conversation_id failed: {e}")
 
     def ensure_memory_profile_identity(self, user_id: str, device_id: str = ""):
         try:
-            if hasattr(self.memory_store, "ensure_memory_profile_identity"):
-                self.memory_store.ensure_memory_profile_identity(
-                    user_id=user_id,
-                    device_id=device_id,
-                )
+            if hasattr(self.store, "ensure_memory_profile_identity"):
+                self.store.ensure_memory_profile_identity(user_id=user_id, device_id=device_id)
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ChatStore] ensure_memory_profile_identity failed: {e}")
 
     def get_system_memory_block(self, user_id: str) -> str:
         try:
-            if hasattr(self.memory_store, "get_system_memory_block"):
-                result = self.memory_store.get_system_memory_block(user_id=user_id)
+            if hasattr(self.store, "get_system_memory_block"):
+                result = self.store.get_system_memory_block(user_id=user_id)
                 return result if isinstance(result, str) else ""
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ChatStore] get_system_memory_block failed: {e}")
         return ""
+
+    def get_character_memory_prompt(self, character_id: str) -> str:
+        try:
+            if hasattr(self.store, "get_character_memory_prompt"):
+                result = self.store.get_character_memory_prompt(character_id=character_id)
+                return result if isinstance(result, str) else ""
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"[ChatStore] get_character_memory_prompt failed: {e}")
+        return ""
+
