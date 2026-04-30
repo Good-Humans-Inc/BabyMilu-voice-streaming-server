@@ -1,6 +1,7 @@
 import os
 import json
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from urllib.parse import quote
@@ -353,14 +354,31 @@ class SupabaseChatStore:
     def is_configured(self) -> bool:
         return bool(self.base_url and self.service_role_key)
 
+    _RETRYABLE_STATUSES = {429, 503}
+    _RETRY_BACKOFF_SECONDS = [1, 2, 4]
+
+    def _request_with_retry(self, method: str, url: str, *, headers: dict, json=None) -> requests.Response:
+        for attempt, delay in enumerate(self._RETRY_BACKOFF_SECONDS):
+            response = requests.request(
+                method, url, headers=headers, json=json, timeout=self.timeout_seconds
+            )
+            if response.status_code not in self._RETRYABLE_STATUSES:
+                return response
+            if self.logger:
+                self.logger.warning(
+                    f"[ChatStore:supabase] {method} {url} returned {response.status_code}, "
+                    f"retrying in {delay}s (attempt {attempt + 1}/{len(self._RETRY_BACKOFF_SECONDS)})"
+                )
+            time.sleep(delay)
+        return response
+
     def _insert(self, table: str, payload: dict, return_row: bool = False):
         url = f"{self.base_url}/rest/v1/{table}"
         prefer_header = "return=representation" if return_row else "return=minimal"
-        response = requests.post(
-            url,
+        response = self._request_with_retry(
+            "POST", url,
             headers={**self.headers, "Prefer": prefer_header},
             json=payload,
-            timeout=self.timeout_seconds,
         )
         if not response.ok:
             raise RuntimeError(
@@ -374,11 +392,10 @@ class SupabaseChatStore:
 
     def _upsert(self, table: str, payload: dict, on_conflict: str):
         url = f"{self.base_url}/rest/v1/{table}?on_conflict={quote(on_conflict, safe='')}"
-        response = requests.post(
-            url,
+        response = self._request_with_retry(
+            "POST", url,
             headers={**self.headers, "Prefer": "resolution=merge-duplicates,return=minimal"},
             json=payload,
-            timeout=self.timeout_seconds,
         )
         if not response.ok:
             raise RuntimeError(
@@ -387,11 +404,10 @@ class SupabaseChatStore:
 
     def _update_eq(self, table: str, field: str, value: str, payload: dict):
         url = f"{self.base_url}/rest/v1/{table}?{field}=eq.{quote(str(value), safe='')}"
-        response = requests.patch(
-            url,
+        response = self._request_with_retry(
+            "PATCH", url,
             headers={**self.headers, "Prefer": "return=minimal"},
             json=payload,
-            timeout=self.timeout_seconds,
         )
         if not response.ok:
             raise RuntimeError(
@@ -400,10 +416,9 @@ class SupabaseChatStore:
 
     def _delete_eq(self, table: str, field: str, value: str):
         url = f"{self.base_url}/rest/v1/{table}?{field}=eq.{quote(str(value), safe='')}"
-        response = requests.delete(
-            url,
+        response = self._request_with_retry(
+            "DELETE", url,
             headers={**self.headers, "Prefer": "return=minimal"},
-            timeout=self.timeout_seconds,
         )
         if not response.ok:
             raise RuntimeError(
@@ -412,10 +427,9 @@ class SupabaseChatStore:
 
     def _select_eq(self, table: str, field: str, value: str):
         url = f"{self.base_url}/rest/v1/{table}?{field}=eq.{quote(str(value), safe='')}&select=*"
-        response = requests.get(
-            url,
+        response = self._request_with_retry(
+            "GET", url,
             headers=self.headers,
-            timeout=self.timeout_seconds,
         )
         if not response.ok:
             raise RuntimeError(
@@ -683,44 +697,22 @@ class SupabaseChatStore:
             self.logger.info(
                 f"[ChatStore:supabase] insert_turn(session_id={session_id}, turn_index={turn_index}, speaker={speaker}, text_len={len(text)})"
             )
-        inserted_row = self._insert(
-            self.turns_table,
-            {
-                "session_id": session_id,
-                "turn_index": turn_index,
-                "speaker": speaker,
-                "text": text,
-                "created_at": _now_iso(),
-                "timestamp": _now_iso(),
-            },
-            return_row=True,
-        )
-        turn_id = self._extract_turn_id(inserted_row, default=turn_index)
-        self._update_eq(
-            self.sessions_table,
-            "session_id",
-            session_id,
-            {
-                "last_active_at": _now_iso(),
-                "turns": self._append_turn_id_to_supabase_array(session_id, turn_id),
+        url = f"{self.base_url}/rest/v1/rpc/insert_turn_and_update_session"
+        response = self._request_with_retry(
+            "POST", url,
+            headers=self.headers,
+            json={
+                "p_session_id": session_id,
+                "p_turn_index": turn_index,
+                "p_speaker": speaker,
+                "p_text": text,
+                "p_timestamp": _now_iso(),
             },
         )
-
-    def _append_turn_id_to_supabase_array(self, session_id: str, turn_id):
-        existing = self._select_eq(self.sessions_table, "session_id", session_id) or {}
-        turns = existing.get("turns")
-        if not isinstance(turns, list):
-            turns = []
-        turns.append(turn_id)
-        return turns
-
-    def _extract_turn_id(self, inserted_row: dict, default):
-        if isinstance(inserted_row, dict):
-            if "id" in inserted_row and inserted_row.get("id") is not None:
-                return inserted_row.get("id")
-            if "turn_id" in inserted_row and inserted_row.get("turn_id") is not None:
-                return inserted_row.get("turn_id")
-        return default
+        if not response.ok:
+            raise RuntimeError(
+                f"Supabase insert_turn_and_update_session failed status={response.status_code} body={response.text}"
+            )
 
     def end_session(self, session_id):
         if self.logger:
