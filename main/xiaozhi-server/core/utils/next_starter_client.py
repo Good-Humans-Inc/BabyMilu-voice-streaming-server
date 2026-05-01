@@ -58,6 +58,33 @@ def build_character_memory_payload(
     }
 
 
+def _fetch_character_memory_row(character_id: str, *, select_fields: str):
+    supabase_url = _env("SUPABASE_URL").rstrip("/")
+    service_role_key = _env("SUPABASE_SERVICE_ROLE_KEY")
+    request_timeout = float(_env("NEXT_STARTER_DB_TIMEOUT_SECONDS", "2.0") or "2.0")
+    table_name = _next_starter_table_name()
+
+    if not character_id or not supabase_url or not service_role_key:
+        return None, supabase_url, service_role_key, request_timeout
+
+    url = (
+        f"{supabase_url}/rest/v1/{table_name}"
+        f"?character_id=eq.{quote(character_id, safe='')}"
+        f"&select={quote(select_fields, safe=',')}"
+        "&limit=1"
+    )
+
+    response = requests.get(
+        url,
+        headers=_request_headers(service_role_key),
+        timeout=request_timeout,
+    )
+    response.raise_for_status()
+
+    rows = response.json()
+    return (rows[0] if rows else None), supabase_url, service_role_key, request_timeout
+
+
 def ensure_character_memory_record(
     character_id: str,
     *,
@@ -71,6 +98,32 @@ def ensure_character_memory_record(
 
     if not character_id or not supabase_url or not service_role_key:
         return False
+
+    row, _, _, _ = _fetch_character_memory_row(
+        character_id,
+        select_fields="character_id",
+    )
+    if row:
+        url = (
+            f"{supabase_url}/rest/v1/{table_name}"
+            f"?character_id=eq.{quote(character_id, safe='')}"
+        )
+        response = requests.patch(
+            url,
+            headers={
+                **_request_headers(service_role_key),
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            },
+            json={
+                "owner_user_id": str(owner_user_id or "").strip() or None,
+                "last_device_id": str(last_device_id or "").strip() or None,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            timeout=request_timeout,
+        )
+        response.raise_for_status()
+        return True
 
     payload = build_character_memory_payload(
         character_id,
@@ -96,30 +149,10 @@ def ensure_character_memory_record(
 
 
 def _fetch_next_starter_row(character_id: str):
-    supabase_url = _env("SUPABASE_URL").rstrip("/")
-    service_role_key = _env("SUPABASE_SERVICE_ROLE_KEY")
-    request_timeout = float(_env("NEXT_STARTER_DB_TIMEOUT_SECONDS", "2.0") or "2.0")
-    table_name = _next_starter_table_name()
-
-    if not character_id or not supabase_url or not service_role_key:
-        return None, supabase_url, service_role_key, request_timeout
-
-    url = (
-        f"{supabase_url}/rest/v1/{table_name}"
-        f"?character_id=eq.{quote(character_id, safe='')}"
-        "&select=next_starter"
-        "&limit=1"
+    return _fetch_character_memory_row(
+        character_id,
+        select_fields="next_starter",
     )
-
-    response = requests.get(
-        url,
-        headers=_request_headers(service_role_key),
-        timeout=request_timeout,
-    )
-    response.raise_for_status()
-
-    rows = response.json()
-    return (rows[0] if rows else None), supabase_url, service_role_key, request_timeout
 
 
 def get_ready_next_starter(character_id: str) -> Optional[Dict[str, Any]]:
@@ -135,7 +168,7 @@ def get_ready_next_starter(character_id: str) -> Optional[Dict[str, Any]]:
         return None
     if payload.get("characterId") and str(payload.get("characterId")) != str(character_id):
         return None
-    if not payload.get("audioUrl"):
+    if not payload.get("audioUrl") and not payload.get("text"):
         return None
 
     generated_at = _parse_iso8601(payload.get("generatedAt"))
