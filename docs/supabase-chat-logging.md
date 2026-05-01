@@ -21,10 +21,13 @@ SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
 
 # Optional
 SUPABASE_TIMEOUT_SECONDS=10
+SUPABASE_MAX_RETRIES=2
+SUPABASE_RETRY_BACKOFF_SECONDS=0.5
 SUPABASE_USERS_TABLE=users
 SUPABASE_SESSIONS_TABLE=sessions
 SUPABASE_TURNS_TABLE=turns
 SUPABASE_MEMORY_READ_MODEL_TABLE=memory_read_model
+SUPABASE_CHARACTER_MEMORY_TABLE=character_memory_model
 ```
 
 ## 3) Restart the Python Server
@@ -40,6 +43,7 @@ Look for startup/store logs and then check rows in:
 - `public.turns`
 - `public.memory_events`
 - `public.memory_read_model`
+- `public.character_memory_model`
 - `public.memory_jobs`
 
 A new device conversation should create one session row and multiple turn rows.
@@ -48,6 +52,7 @@ Current runtime write path is:
 
 - writes: `users`, `sessions`, `turns`
 - bootstraps on first user/session: `memory_read_model`
+- bootstraps on first active character/session: `character_memory_model`
 - not yet written by runtime: `memory_events`, `memory_jobs`
 
 The current schema used by the ported chat store expects:
@@ -59,6 +64,14 @@ The current schema used by the ported chat store expects:
 - `memory_read_model.modality_digests`
 - `memory_read_model.prompt_pack`
 - `memory_read_model.stats`
+- `character_memory_model.memory_state`
+- `character_memory_model.next_starter`
+
+Character-scoped behavior:
+
+- `next_starter` is stored by `character_id`, not `user_id`
+- switching `activeCharacterId` on a device must reload the matching `character_memory_model` row
+- the runtime should not migrate or replay a starter across different characters
 
 If you already created the older schema, rerun the bootstrap SQL. It uses `add column if not exists` so it will repair the missing columns.
 

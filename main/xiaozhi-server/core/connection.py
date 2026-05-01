@@ -409,6 +409,9 @@ class ConnectionHandler:
             old_char = self.current_character_id
             old_voice = self.voice_id
             self.current_character_id = char_id
+            self.active_character_id = str(char_id)
+            self.next_starter_payload = None
+            self.next_starter_scheduled = False
 
             fields = {}
             try:
@@ -487,6 +490,27 @@ class ConnectionHandler:
             except Exception as e:
                 self.logger.bind(tag=TAG).warning(
                     f"Failed to rebuild user profile context after character switch: {e}"
+                )
+
+            try:
+                owner_phone = get_owner_phone_for_device(self.device_id) or getattr(
+                    self, "user_id", ""
+                )
+                self.chat_store.ensure_character_memory_record(
+                    self.active_character_id,
+                    owner_user_id=owner_phone if isinstance(owner_phone, str) else "",
+                    device_id=self.device_id or "",
+                )
+                self.next_starter_payload = get_ready_next_starter(
+                    self.active_character_id
+                )
+                if self.next_starter_payload:
+                    self.logger.bind(tag=TAG).info(
+                        f"Reloaded next_starter after character switch for character_id={self.active_character_id}"
+                    )
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(
+                    f"Failed to refresh character-scoped memory for {self.device_id}: {e}"
                 )
 
             self.config["prompt"] = refreshed_prompt
@@ -635,18 +659,6 @@ class ConnectionHandler:
 
                     if not self.voice_id and fields.get("voice"):
                         self.voice_id = str(fields.get("voice"))
-                    try:
-                        self.next_starter_payload = get_ready_next_starter(
-                            self.active_character_id
-                        )
-                        if self.next_starter_payload:
-                            self.logger.bind(tag=TAG).info(
-                                f"Loaded ready next_starter for character_id={self.active_character_id}"
-                            )
-                    except Exception as starter_error:
-                        self.logger.bind(tag=TAG).warning(
-                            f"Failed to load next_starter for character_id={self.active_character_id}: {starter_error}"
-                        )
 
 
                     if not self.voice_id:
@@ -742,8 +754,6 @@ class ConnectionHandler:
                 self.logger.bind(tag=TAG).error(
                     f"❌ Failed to fetch/apply character profile: {e}"
                 )
-                import traceback
-
                 self.logger.bind(tag=TAG).error(
                     f"Traceback: {traceback.format_exc()}"
                 )
@@ -758,6 +768,24 @@ class ConnectionHandler:
                     name=self.user_name,
                     device_id=self.device_id,
                 )
+                if self.active_character_id:
+                    try:
+                        self.chat_store.ensure_character_memory_record(
+                            self.active_character_id,
+                            owner_user_id=self.user_id,
+                            device_id=self.device_id or "",
+                        )
+                        self.next_starter_payload = get_ready_next_starter(
+                            self.active_character_id
+                        )
+                        if self.next_starter_payload:
+                            self.logger.bind(tag=TAG).info(
+                                f"Loaded ready next_starter for character_id={self.active_character_id}"
+                            )
+                    except Exception as starter_error:
+                        self.logger.bind(tag=TAG).warning(
+                            f"Failed to initialize character-scoped next_starter for character_id={self.active_character_id}: {starter_error}"
+                        )
 
                 self.chat_store.create_session(
                     session_id=self.session_id,

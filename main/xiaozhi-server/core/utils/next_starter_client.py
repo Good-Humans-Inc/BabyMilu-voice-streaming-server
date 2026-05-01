@@ -29,16 +29,83 @@ def _parse_iso8601(value: Any) -> Optional[datetime]:
         return None
 
 
+def _next_starter_table_name() -> str:
+    return _env("SUPABASE_CHARACTER_MEMORY_TABLE", "character_memory_model")
+
+
+def _request_headers(service_role_key: str) -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {service_role_key}",
+        "apikey": service_role_key,
+        "Accept": "application/json",
+    }
+
+
+def build_character_memory_payload(
+    character_id: str,
+    *,
+    owner_user_id: str = "",
+    last_device_id: str = "",
+) -> Dict[str, Any]:
+    return {
+        "character_id": str(character_id),
+        "owner_user_id": str(owner_user_id or "").strip() or None,
+        "last_device_id": str(last_device_id or "").strip() or None,
+        "summary": "",
+        "memory_state": {},
+        "next_starter": None,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def ensure_character_memory_record(
+    character_id: str,
+    *,
+    owner_user_id: str = "",
+    last_device_id: str = "",
+) -> bool:
+    supabase_url = _env("SUPABASE_URL").rstrip("/")
+    service_role_key = _env("SUPABASE_SERVICE_ROLE_KEY")
+    request_timeout = float(_env("NEXT_STARTER_DB_TIMEOUT_SECONDS", "2.0") or "2.0")
+    table_name = _next_starter_table_name()
+
+    if not character_id or not supabase_url or not service_role_key:
+        return False
+
+    payload = build_character_memory_payload(
+        character_id,
+        owner_user_id=owner_user_id,
+        last_device_id=last_device_id,
+    )
+    url = (
+        f"{supabase_url}/rest/v1/{table_name}"
+        f"?on_conflict={quote('character_id', safe='')}"
+    )
+    response = requests.post(
+        url,
+        headers={
+            **_request_headers(service_role_key),
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+        },
+        json=payload,
+        timeout=request_timeout,
+    )
+    response.raise_for_status()
+    return True
+
+
 def _fetch_next_starter_row(character_id: str):
     supabase_url = _env("SUPABASE_URL").rstrip("/")
     service_role_key = _env("SUPABASE_SERVICE_ROLE_KEY")
     request_timeout = float(_env("NEXT_STARTER_DB_TIMEOUT_SECONDS", "2.0") or "2.0")
+    table_name = _next_starter_table_name()
 
     if not character_id or not supabase_url or not service_role_key:
         return None, supabase_url, service_role_key, request_timeout
 
     url = (
-        f"{supabase_url}/rest/v1/character_memory_model"
+        f"{supabase_url}/rest/v1/{table_name}"
         f"?character_id=eq.{quote(character_id, safe='')}"
         "&select=next_starter"
         "&limit=1"
@@ -46,11 +113,7 @@ def _fetch_next_starter_row(character_id: str):
 
     response = requests.get(
         url,
-        headers={
-            "Authorization": f"Bearer {service_role_key}",
-            "apikey": service_role_key,
-            "Accept": "application/json",
-        },
+        headers=_request_headers(service_role_key),
         timeout=request_timeout,
     )
     response.raise_for_status()
@@ -108,21 +171,23 @@ def mark_next_starter_consumed(character_id: str, payload: Dict[str, Any]) -> bo
     consumed_payload = dict(current_payload)
     consumed_payload["status"] = "consumed"
     consumed_payload["consumedAt"] = datetime.now(timezone.utc).isoformat()
+    table_name = _next_starter_table_name()
 
     url = (
-        f"{supabase_url}/rest/v1/character_memory_model"
+        f"{supabase_url}/rest/v1/{table_name}"
         f"?character_id=eq.{quote(character_id, safe='')}"
     )
     response = requests.patch(
         url,
         headers={
-            "Authorization": f"Bearer {service_role_key}",
-            "apikey": service_role_key,
-            "Accept": "application/json",
+            **_request_headers(service_role_key),
             "Content-Type": "application/json",
             "Prefer": "return=minimal",
         },
-        json={"next_starter": consumed_payload},
+        json={
+            "next_starter": consumed_payload,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
         timeout=request_timeout,
     )
     response.raise_for_status()
