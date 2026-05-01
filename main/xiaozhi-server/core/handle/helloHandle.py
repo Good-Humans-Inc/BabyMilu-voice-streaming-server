@@ -81,6 +81,7 @@ async def _trigger_server_greeting(conn):
     else:
         conn.logger.bind(tag=TAG).warning("Cannot trigger greeting: llm_finish_task is False")
 
+
 WAKEUP_CONFIG = {
     "refresh_time": 5,
     "words": ["你好", "你好啊", "嘿，你好", "嗨"],

@@ -26,12 +26,13 @@ DEFAULT_RETRY_429_ATTEMPTS = 1
 DEFAULT_RETRY_429_BACKOFF_MS = 500
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 8
 DEFAULT_TOTAL_TIMEOUT_SECONDS = 60
+DEFAULT_INVALID_REFERENCE_TTL_SECONDS = 300
 
 _REQUEST_LIMITER = None
 _REQUEST_LIMITER_CAPACITY = None
 _REQUEST_LIMITER_LOCK = threading.Lock()
-_SHARED_CONNECTORS = {}
-_SHARED_CONNECTORS_LOCK = threading.Lock()
+_INVALID_REFERENCES = {}
+_INVALID_REFERENCES_LOCK = threading.Lock()
 
 
 class _FishRequestLimiter:
@@ -67,29 +68,75 @@ def _get_request_limiter(capacity: int):
         return _REQUEST_LIMITER
 
 
-def _get_shared_connector():
-    loop = asyncio.get_running_loop()
-    with _SHARED_CONNECTORS_LOCK:
-        connector = _SHARED_CONNECTORS.get(loop)
-        if connector is None or connector.closed:
-            connector = aiohttp.TCPConnector(
-                limit=0,
-                ttl_dns_cache=300,
-                use_dns_cache=True,
-            )
-            _SHARED_CONNECTORS[loop] = connector
-        return connector
+def _get_invalid_reference_ttl_remaining(reference_id: str | None):
+    if not reference_id:
+        return None
+
+    now = time.monotonic()
+    with _INVALID_REFERENCES_LOCK:
+        entry = _INVALID_REFERENCES.get(reference_id)
+        if not entry:
+            return None
+
+        ttl_remaining = entry["expires_at"] - now
+        if ttl_remaining <= 0:
+            _INVALID_REFERENCES.pop(reference_id, None)
+            return None
+
+        return ttl_remaining
+
+
+def _mark_invalid_reference(reference_id: str | None, ttl_seconds: int):
+    if not reference_id or ttl_seconds <= 0:
+        return True
+
+    now = time.monotonic()
+    expires_at = now + ttl_seconds
+    with _INVALID_REFERENCES_LOCK:
+        entry = _INVALID_REFERENCES.get(reference_id)
+        if entry and entry["expires_at"] > now:
+            entry["expires_at"] = max(entry["expires_at"], expires_at)
+            return False
+
+        _INVALID_REFERENCES[reference_id] = {
+            "expires_at": expires_at,
+            "skip_logged": False,
+        }
+        return True
+
+
+def _consume_invalid_reference_skip_log(reference_id: str | None):
+    if not reference_id:
+        return False
+
+    now = time.monotonic()
+    with _INVALID_REFERENCES_LOCK:
+        entry = _INVALID_REFERENCES.get(reference_id)
+        if not entry:
+            return False
+
+        if entry["expires_at"] <= now:
+            _INVALID_REFERENCES.pop(reference_id, None)
+            return False
+
+        if entry.get("skip_logged"):
+            return False
+
+        entry["skip_logged"] = True
+        return True
+
+
+class _FishAudioHTTPError(Exception):
+    def __init__(self, status: int, body: str):
+        self.status = status
+        self.body = body
+        super().__init__(f"Fish Audio TTS failed: {status} - {body}")
 
 
 async def close_shared_resources():
-    with _SHARED_CONNECTORS_LOCK:
-        connectors = list(_SHARED_CONNECTORS.values())
-        _SHARED_CONNECTORS.clear()
-
-    for connector in connectors:
-        close_result = connector.close()
-        if asyncio.iscoroutine(close_result):
-            await close_result
+    # Compatibility shim for older smoke scripts. Fish Audio sessions now own
+    # their connectors, so there is no module-level connector cache to close.
+    return None
 
 
 class _StreamingPcmResampler:
@@ -195,6 +242,15 @@ class TTSProvider(TTSProviderBase):
             self.connect_timeout_seconds,
             int(config.get("total_timeout_seconds", DEFAULT_TOTAL_TIMEOUT_SECONDS)),
         )
+        self.invalid_reference_ttl_seconds = max(
+            0,
+            int(
+                config.get(
+                    "invalid_reference_ttl_seconds",
+                    DEFAULT_INVALID_REFERENCE_TTL_SECONDS,
+                )
+            ),
+        )
         self.request_limiter = _get_request_limiter(self.max_concurrent_requests)
 
         model_key_msg = check_model_key("FishAudio TTS", self.api_key)
@@ -217,6 +273,40 @@ class TTSProvider(TTSProviderBase):
         if self.conn and getattr(self.conn, "voice_id", None):
             return self.conn.voice_id, "conn.voice_id"
         return self.default_reference_id, "default_config"
+
+    def _resolve_usable_reference_id(self):
+        reference_id, reference_source = self._resolve_reference_id_with_source()
+        ttl_remaining = _get_invalid_reference_ttl_remaining(reference_id)
+        if ttl_remaining is None:
+            return reference_id, reference_source
+
+        fallback_reference_id = self.default_reference_id
+        fallback_ttl_remaining = _get_invalid_reference_ttl_remaining(
+            fallback_reference_id
+        )
+        if (
+            reference_source == "conn.voice_id"
+            and fallback_reference_id
+            and fallback_reference_id != reference_id
+            and fallback_ttl_remaining is None
+        ):
+            if _consume_invalid_reference_skip_log(reference_id):
+                logger.bind(tag=TAG).warning(
+                    f"Fish Audio skipping cached invalid conn.voice_id reference_id={reference_id}; "
+                    f"falling back to default_config reference_id={fallback_reference_id}; "
+                    f"ttl_remaining={ttl_remaining:.0f}s"
+                )
+            return fallback_reference_id, "default_config"
+
+        if _consume_invalid_reference_skip_log(reference_id):
+            logger.bind(tag=TAG).warning(
+                f"Fish Audio skipping cached invalid reference_id={reference_id}; "
+                f"source={reference_source}; ttl_remaining={ttl_remaining:.0f}s"
+            )
+        raise Exception(
+            f"Fish Audio reference_id is cached invalid for {ttl_remaining:.0f}s: "
+            f"reference_id={reference_id}, source={reference_source}"
+        )
 
     def tts_text_priority_thread(self):
         while not self.conn.stop_event.is_set():
@@ -283,7 +373,7 @@ class TTSProvider(TTSProviderBase):
                 )
 
     async def text_to_speak(self, text, _output_file=None, is_last_segment=True):
-        reference_id, reference_source = self._resolve_reference_id_with_source()
+        reference_id, reference_source = self._resolve_usable_reference_id()
         if not reference_id:
             raise Exception(
                 "No Fish Audio reference_id configured. "
@@ -322,6 +412,8 @@ class TTSProvider(TTSProviderBase):
         )
 
         for attempt in range(1, max_attempts + 1):
+            retry_backoff_ms = None
+            succeeded = False
             wait_ms, in_flight = await asyncio.to_thread(self.request_limiter.acquire)
             if wait_ms >= 25:
                 logger.bind(tag=TAG).info(
@@ -330,11 +422,7 @@ class TTSProvider(TTSProviderBase):
                 )
 
             try:
-                async with aiohttp.ClientSession(
-                    connector=_get_shared_connector(),
-                    connector_owner=False,
-                    timeout=timeout,
-                ) as session:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.post(
                         self.api_url,
                         data=ormsgpack.packb(
@@ -344,75 +432,84 @@ class TTSProvider(TTSProviderBase):
                     ) as resp:
                         if resp.status == 429 and attempt < max_attempts:
                             body = await resp.text()
-                            last_error = Exception(
-                                f"Fish Audio TTS failed: {resp.status} - {body}"
-                            )
-                            backoff_ms = self.retry_429_backoff_ms * attempt
+                            last_error = _FishAudioHTTPError(resp.status, body)
+                            retry_backoff_ms = self.retry_429_backoff_ms * attempt
                             logger.bind(tag=TAG).warning(
                                 f"Fish Audio rate limited on attempt {attempt}/{max_attempts}; "
-                                f"retrying in {backoff_ms}ms"
+                                f"retrying in {retry_backoff_ms}ms"
                             )
-                            if backoff_ms > 0:
-                                await asyncio.sleep(backoff_ms / 1000)
-                            continue
 
-                        if resp.status != 200:
+                        elif resp.status != 200:
                             body = await resp.text()
                             if resp.status == 400 and "Reference not found" in body:
-                                logger.bind(tag=TAG).warning(
-                                    f"Fish Audio reference not found: reference_id={reference_id}, "
-                                    f"source={reference_source}"
+                                if _mark_invalid_reference(
+                                    reference_id, self.invalid_reference_ttl_seconds
+                                ):
+                                    logger.bind(tag=TAG).warning(
+                                        f"Fish Audio reference not found; cached invalid for "
+                                        f"{self.invalid_reference_ttl_seconds}s: "
+                                        f"reference_id={reference_id}, source={reference_source}"
+                                    )
+                            raise _FishAudioHTTPError(resp.status, body)
+
+                        else:
+                            self.tts_audio_queue.put((SentenceType.FIRST, [], text))
+
+                            async for chunk in resp.content.iter_chunked(4096):
+                                if self.conn and self.conn.client_abort:
+                                    logger.bind(tag=TAG).info(
+                                        "TTS interrupted by client"
+                                    )
+                                    return
+                                if not chunk:
+                                    continue
+
+                                chunk = pcm_carry + chunk
+                                if len(chunk) % 2:
+                                    pcm_carry = chunk[-1:]
+                                    chunk = chunk[:-1]
+                                else:
+                                    pcm_carry = b""
+
+                                resampled = self.resampler.process(chunk)
+                                if not resampled:
+                                    continue
+
+                                self.opus_encoder.encode_pcm_to_opus_stream(
+                                    resampled,
+                                    end_of_stream=False,
+                                    callback=self.handle_opus,
                                 )
-                            raise Exception(
-                                f"Fish Audio TTS failed: {resp.status} - {body}"
-                            )
-
-                        self.tts_audio_queue.put((SentenceType.FIRST, [], text))
-
-                        async for chunk in resp.content.iter_chunked(4096):
-                            if self.conn and self.conn.client_abort:
-                                logger.bind(tag=TAG).info("TTS interrupted by client")
-                                return
-                            if not chunk:
-                                continue
-
-                            chunk = pcm_carry + chunk
-                            if len(chunk) % 2:
-                                pcm_carry = chunk[-1:]
-                                chunk = chunk[:-1]
-                            else:
-                                pcm_carry = b""
-
-                            resampled = self.resampler.process(chunk)
-                            if not resampled:
-                                continue
-
-                            self.opus_encoder.encode_pcm_to_opus_stream(
-                                resampled,
-                                end_of_stream=False,
-                                callback=self.handle_opus,
-                            )
-                        break
+                            succeeded = True
             except Exception as exc:
                 last_error = exc
-                should_retry = "429" in str(exc) or isinstance(
-                    exc, (asyncio.TimeoutError, aiohttp.ClientConnectionError)
+                should_retry = (
+                    isinstance(exc, _FishAudioHTTPError) and exc.status == 429
+                ) or isinstance(
+                    exc,
+                    (asyncio.TimeoutError, aiohttp.ClientConnectionError),
                 )
                 if should_retry and attempt < max_attempts:
-                    backoff_ms = self.retry_429_backoff_ms * attempt
+                    retry_backoff_ms = self.retry_429_backoff_ms * attempt
                     logger.bind(tag=TAG).warning(
                         f"Fish Audio retrying after exception on attempt {attempt}/{max_attempts}: {exc}"
                     )
-                    if backoff_ms > 0:
-                        await asyncio.sleep(backoff_ms / 1000)
-                    continue
-                raise
+                else:
+                    raise
             finally:
                 remaining_in_flight = self.request_limiter.release()
                 logger.bind(tag=TAG).debug(
                     f"Fish Audio request finished (attempt {attempt}/{max_attempts}); "
                     f"in_flight={remaining_in_flight}/{self.max_concurrent_requests}"
                 )
+
+            if retry_backoff_ms is not None:
+                if retry_backoff_ms > 0:
+                    await asyncio.sleep(retry_backoff_ms / 1000)
+                continue
+
+            if succeeded:
+                break
         else:
             raise last_error or Exception("Fish Audio TTS failed without a response")
 

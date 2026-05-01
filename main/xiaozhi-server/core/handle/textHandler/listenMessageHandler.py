@@ -1,14 +1,85 @@
 import time
+import asyncio
+import uuid
 from typing import Dict, Any
 
 from core.handle.receiveAudioHandle import handleAudioMessage, startToChat
 from core.handle.reportHandle import enqueue_asr_report
-from core.handle.sendAudioHandle import send_stt_message, send_tts_message
+from core.handle.sendAudioHandle import sendAudioMessage, send_stt_message, send_tts_message
 from core.handle.textMessageHandler import TextMessageHandler
 from core.handle.textMessageType import TextMessageType
-from core.utils.util import remove_punctuation_and_length
+from core.providers.tts.dto.dto import ContentType, SentenceType, TTSMessageDTO
+from core.utils.dialogue import Message
+from core.utils.next_starter_client import fetch_next_starter_audio, mark_next_starter_consumed
+from core.utils.util import audio_bytes_to_data, remove_punctuation_and_length
 
 TAG = __name__
+
+
+async def _maybe_play_next_starter(conn) -> bool:
+    payload = getattr(conn, "next_starter_payload", None) or {}
+    character_id = getattr(conn, "active_character_id", None)
+    audio_url = payload.get("audioUrl")
+    starter_text = payload.get("text") or ""
+    if not character_id or (not audio_url and not starter_text):
+        return False
+    if getattr(conn, "next_starter_scheduled", False):
+        return False
+
+    conn.next_starter_scheduled = True
+    try:
+        start_time = time.time()
+        while time.time() - start_time < 3.0:
+            if getattr(conn, "tts", None):
+                break
+            await asyncio.sleep(0.1)
+        else:
+            conn.logger.bind(tag=TAG).warning("next_starter skipped: TTS not ready within 3s")
+            return False
+
+        conn.client_abort = False
+        if audio_url:
+            audio_bytes = await asyncio.to_thread(fetch_next_starter_audio, audio_url)
+            opus_packets = await asyncio.to_thread(audio_bytes_to_data, audio_bytes, "mp3", True)
+            await sendAudioMessage(conn, SentenceType.FIRST, opus_packets, starter_text)
+            await sendAudioMessage(conn, SentenceType.LAST, [], None)
+        else:
+            sentence_id = getattr(conn, "sentence_id", None) or str(uuid.uuid4().hex)
+            conn.sentence_id = sentence_id
+            conn.tts_MessageText = starter_text
+            conn.tts.tts_text_queue.put(
+                TTSMessageDTO(
+                    sentence_id=sentence_id,
+                    sentence_type=SentenceType.FIRST,
+                    content_type=ContentType.ACTION,
+                )
+            )
+            conn.tts.tts_one_sentence(conn, ContentType.TEXT, content_detail=starter_text)
+            conn.tts.tts_text_queue.put(
+                TTSMessageDTO(
+                    sentence_id=sentence_id,
+                    sentence_type=SentenceType.LAST,
+                    content_type=ContentType.ACTION,
+                )
+            )
+        if starter_text:
+            conn.dialogue.put(Message(role="assistant", content=starter_text))
+        try:
+            await asyncio.to_thread(mark_next_starter_consumed, character_id, payload)
+        except Exception as consume_error:
+            conn.logger.bind(tag=TAG).warning(
+                f"Failed marking next_starter consumed for character_id={character_id}: {consume_error}"
+            )
+        conn.next_starter_payload = None
+        conn.logger.bind(tag=TAG).info(
+            f"Played next_starter on listen start for character_id={character_id}"
+        )
+        return True
+    except Exception as exc:
+        conn.logger.bind(tag=TAG).warning(f"Failed to play next_starter on listen start: {exc}")
+        return False
+    finally:
+        conn.next_starter_scheduled = False
 
 class ListenTextMessageHandler(TextMessageHandler):
     """Listen消息处理器"""
@@ -26,6 +97,7 @@ class ListenTextMessageHandler(TextMessageHandler):
         if msg_json["state"] == "start":
             conn.client_have_voice = True
             conn.client_voice_stop = False
+            await _maybe_play_next_starter(conn)
         elif msg_json["state"] == "stop":
             conn.client_have_voice = True
             conn.client_voice_stop = True

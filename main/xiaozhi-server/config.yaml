@@ -57,6 +57,13 @@ log:
 
 # 使用完声音文件后删除文件(Delete the sound file when you are done using it)
 delete_audio: true
+# ASR音频文件保留策略：
+# - delete: 识别后删除临时WAV（推荐线上默认）
+# - archive: 识别后移动到 archive_dir，避免 tmp/ 无限增长
+# - keep: 保留在 output_dir，不推荐线上使用
+# 如果 provider 没有显式配置 audio_retention_mode，则会自动推导：
+# - delete_audio=true  -> delete
+# - delete_audio=false -> archive
 # 没有语音输入多久后断开连接(秒)，默认2分钟，即120秒
 close_connection_no_voice_time: 120
 # TTS请求超时时间(秒)
@@ -107,10 +114,6 @@ wakeup_words:
 # MCP接入点地址，地址格式为：ws://你的mcp接入点ip或者域名:端口号/mcp/?token=你的token
 # 详细教程 https://github.com/xinnan-tech/xiaozhi-esp32-server/blob/main/docs/mcp-endpoint-integration.md
 mcp_endpoint: 你的接入点 websocket地址
-# 彩蛋配置
-easter_eggs:
-  # English bedtime intent phrases trigger this cue; WAV chosen for the current BabyMilu setup
-  bedtime_sound_path: "config/assets/goodnight.wav"
 # 插件的基础配置
 plugins:
   # 获取天气插件的配置，这里填写你的api_key
@@ -385,6 +388,10 @@ ASR:
     base_url: https://api.openai.com/v1/audio/transcriptions
     model_name: gpt-4o-mini-transcribe
     output_dir: tmp/
+    # 可选：覆盖默认保留策略
+    # audio_retention_mode: delete
+    # audio_archive_dir: data/asr_archive
+    # audio_manifest_file: manifest.jsonl
   GroqASR:
     # Groq语音识别服务，需要先在Groq Console创建API密钥
     # 申请步骤：

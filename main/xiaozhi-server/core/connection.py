@@ -59,6 +59,8 @@ from core.utils.firestore_client import (
     update_conversation_state_for_device,
     get_most_recent_character_via_user_for_device
 )
+from core.utils.next_starter_client import get_ready_next_starter
+
 from services.session_context import store as session_context_store
 from services.alarms.config import MODE_CONFIG
 from services import log_context
@@ -240,6 +242,9 @@ class ConnectionHandler:
         self.sentence_id = None
         self.voice_id = None
         self.tts_MessageText = ""
+        self.active_character_id = None
+        self.next_starter_payload: Optional[Dict[str, Any]] = None
+        self.next_starter_scheduled = False
 
         # IOT/MCP
         self.iot_descriptors = {}
@@ -415,6 +420,9 @@ class ConnectionHandler:
             old_char = self.current_character_id
             old_voice = self.voice_id
             self.current_character_id = char_id
+            self.active_character_id = str(char_id)
+            self.next_starter_payload = None
+            self.next_starter_scheduled = False
 
             fields = {}
             try:
@@ -459,6 +467,27 @@ class ConnectionHandler:
             # if fields.get("bio"):
             #     refreshed_prompt += f"\nUser's description of you: {fields['bio']}"
 
+
+            try:
+                owner_phone = get_owner_phone_for_device(self.device_id) or getattr(
+                    self, "user_id", ""
+                )
+                self.chat_store.ensure_character_memory_record(
+                    self.active_character_id,
+                    owner_user_id=owner_phone if isinstance(owner_phone, str) else "",
+                    device_id=self.device_id or "",
+                )
+                self.next_starter_payload = get_ready_next_starter(
+                    self.active_character_id
+                )
+                if self.next_starter_payload:
+                    self.logger.bind(tag=TAG).info(
+                        f"Reloaded next_starter after character switch for character_id={self.active_character_id}"
+                    )
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(
+                    f"Failed to refresh character-scoped memory for {self.device_id}: {e}"
+                )
 
             self.config["prompt"] = refreshed_prompt
             self.prompt = refreshed_prompt
@@ -612,6 +641,7 @@ class ConnectionHandler:
                     if not self.voice_id and fields.get("voice"):
                         self.voice_id = str(fields.get("voice"))
 
+
                     if not self.voice_id:
                         # This is the key condition that will trigger TTS provider default voice.
                         self.logger.bind(tag=TAG, device_id=self.device_id).warning(
@@ -703,6 +733,24 @@ class ConnectionHandler:
                     name=self.user_name,
                     device_id=self.device_id,
                 )
+                if self.active_character_id:
+                    try:
+                        self.chat_store.ensure_character_memory_record(
+                            self.active_character_id,
+                            owner_user_id=self.user_id,
+                            device_id=self.device_id or "",
+                        )
+                        self.next_starter_payload = get_ready_next_starter(
+                            self.active_character_id
+                        )
+                        if self.next_starter_payload:
+                            self.logger.bind(tag=TAG).info(
+                                f"Loaded ready next_starter for character_id={self.active_character_id}"
+                            )
+                    except Exception as starter_error:
+                        self.logger.bind(tag=TAG).warning(
+                            f"Failed to initialize character-scoped next_starter for character_id={self.active_character_id}: {starter_error}"
+                        )
 
                 char_id_for_mem = getattr(self, "active_character_id", None)
                 if char_id_for_mem:

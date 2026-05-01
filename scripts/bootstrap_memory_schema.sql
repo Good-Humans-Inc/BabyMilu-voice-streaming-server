@@ -52,6 +52,16 @@ create table if not exists public.memory_read_model (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists public.character_memory_model (
+  character_id text primary key,
+  owner_user_id text,
+  last_device_id text,
+  summary text,
+  memory_state jsonb not null default '{}'::jsonb,
+  next_starter jsonb,
+  updated_at timestamptz not null default now()
+);
+
 create table if not exists public.memory_jobs (
   id bigserial primary key,
   user_id text not null references public.users(user_id),
@@ -104,6 +114,14 @@ alter table public.memory_read_model
   add column if not exists stats jsonb not null default '{}'::jsonb,
   add column if not exists updated_at timestamptz not null default now();
 
+alter table public.character_memory_model
+  add column if not exists owner_user_id text,
+  add column if not exists last_device_id text,
+  add column if not exists summary text,
+  add column if not exists memory_state jsonb not null default '{}'::jsonb,
+  add column if not exists next_starter jsonb,
+  add column if not exists updated_at timestamptz not null default now();
+
 alter table public.memory_jobs
   add column if not exists payload jsonb,
   add column if not exists error text,
@@ -121,6 +139,9 @@ create index if not exists idx_turns_session_created_at
 
 create index if not exists idx_memory_events_user_created_at
   on public.memory_events(user_id, created_at desc);
+
+create index if not exists idx_character_memory_owner_updated_at
+  on public.character_memory_model(owner_user_id, updated_at desc);
 
 create index if not exists idx_memory_jobs_status_created_at
   on public.memory_jobs(status, created_at);
