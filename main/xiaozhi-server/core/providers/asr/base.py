@@ -4,6 +4,7 @@ import wave
 import uuid
 import json
 import time
+import shutil
 import queue
 import asyncio
 import traceback
@@ -11,6 +12,7 @@ import threading
 import opuslib_next
 import concurrent.futures
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
 from config.logger import setup_logging
 from typing import Optional, Tuple, List
 from core.handle.receiveAudioHandle import startToChat
@@ -26,6 +28,72 @@ logger = setup_logging()
 class ASRProviderBase(ABC):
     def __init__(self):
         pass
+
+    def configure_audio_retention(
+        self,
+        config: dict,
+        delete_audio_file: bool,
+    ) -> None:
+        self.delete_audio_file = delete_audio_file
+        self.audio_retention_mode = str(
+            config.get(
+                "audio_retention_mode",
+                "delete" if delete_audio_file else "archive",
+            )
+        ).strip().lower()
+        self.audio_archive_dir = str(
+            config.get("audio_archive_dir") or "data/asr_archive"
+        ).strip()
+        self.audio_manifest_file = str(
+            config.get("audio_manifest_file") or "manifest.jsonl"
+        ).strip()
+
+    def finalize_audio_file(self, file_path: Optional[str], session_id: str) -> Optional[str]:
+        if not file_path or not os.path.exists(file_path):
+            return None
+
+        mode = self.audio_retention_mode
+        if mode == "delete":
+            try:
+                os.remove(file_path)
+                logger.bind(tag=TAG).debug(f"已删除临时音频文件: {file_path}")
+            except Exception as e:
+                logger.bind(tag=TAG).error(f"文件删除失败: {file_path} | 错误: {e}")
+            return None
+
+        if mode == "keep":
+            logger.bind(tag=TAG).info(f"保留ASR音频文件: {file_path}")
+            return file_path
+
+        if mode != "archive":
+            logger.bind(tag=TAG).warning(
+                f"未知 audio_retention_mode={mode}，保留原文件: {file_path}"
+            )
+            return file_path
+
+        archive_root = os.path.abspath(self.audio_archive_dir or "data/asr_archive")
+        date_part = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        archive_dir = os.path.join(archive_root, date_part, session_id)
+        os.makedirs(archive_dir, exist_ok=True)
+        archived_path = os.path.join(archive_dir, os.path.basename(file_path))
+        try:
+            shutil.move(file_path, archived_path)
+            manifest_path = os.path.join(archive_root, self.audio_manifest_file)
+            os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
+            record = {
+                "archivedAt": datetime.now(timezone.utc).isoformat(),
+                "sessionId": session_id,
+                "sourcePath": file_path,
+                "archivedPath": archived_path,
+                "sizeBytes": os.path.getsize(archived_path),
+            }
+            with open(manifest_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            logger.bind(tag=TAG).info(f"已归档ASR音频文件: {archived_path}")
+            return archived_path
+        except Exception as e:
+            logger.bind(tag=TAG).error(f"文件归档失败: {file_path} | 错误: {e}")
+            return file_path
 
     # 打开音频通道
     async def open_audio_channels(self, conn):
