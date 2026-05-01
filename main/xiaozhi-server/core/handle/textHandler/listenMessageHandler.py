@@ -1,5 +1,6 @@
 import time
 import asyncio
+import uuid
 from typing import Dict, Any
 
 from core.handle.receiveAudioHandle import handleAudioMessage, startToChat
@@ -7,7 +8,7 @@ from core.handle.reportHandle import enqueue_asr_report
 from core.handle.sendAudioHandle import sendAudioMessage, send_stt_message, send_tts_message
 from core.handle.textMessageHandler import TextMessageHandler
 from core.handle.textMessageType import TextMessageType
-from core.providers.tts.dto.dto import SentenceType
+from core.providers.tts.dto.dto import ContentType, SentenceType, TTSMessageDTO
 from core.utils.dialogue import Message
 from core.utils.next_starter_client import fetch_next_starter_audio, mark_next_starter_consumed
 from core.utils.util import audio_bytes_to_data, remove_punctuation_and_length
@@ -20,7 +21,7 @@ async def _maybe_play_next_starter(conn) -> bool:
     character_id = getattr(conn, "active_character_id", None)
     audio_url = payload.get("audioUrl")
     starter_text = payload.get("text") or ""
-    if not character_id or not audio_url:
+    if not character_id or (not audio_url and not starter_text):
         return False
     if getattr(conn, "next_starter_scheduled", False):
         return False
@@ -37,10 +38,30 @@ async def _maybe_play_next_starter(conn) -> bool:
             return False
 
         conn.client_abort = False
-        audio_bytes = await asyncio.to_thread(fetch_next_starter_audio, audio_url)
-        opus_packets = await asyncio.to_thread(audio_bytes_to_data, audio_bytes, "mp3", True)
-        await sendAudioMessage(conn, SentenceType.FIRST, opus_packets, starter_text)
-        await sendAudioMessage(conn, SentenceType.LAST, [], None)
+        if audio_url:
+            audio_bytes = await asyncio.to_thread(fetch_next_starter_audio, audio_url)
+            opus_packets = await asyncio.to_thread(audio_bytes_to_data, audio_bytes, "mp3", True)
+            await sendAudioMessage(conn, SentenceType.FIRST, opus_packets, starter_text)
+            await sendAudioMessage(conn, SentenceType.LAST, [], None)
+        else:
+            sentence_id = getattr(conn, "sentence_id", None) or str(uuid.uuid4().hex)
+            conn.sentence_id = sentence_id
+            conn.tts_MessageText = starter_text
+            conn.tts.tts_text_queue.put(
+                TTSMessageDTO(
+                    sentence_id=sentence_id,
+                    sentence_type=SentenceType.FIRST,
+                    content_type=ContentType.ACTION,
+                )
+            )
+            conn.tts.tts_one_sentence(conn, ContentType.TEXT, content_detail=starter_text)
+            conn.tts.tts_text_queue.put(
+                TTSMessageDTO(
+                    sentence_id=sentence_id,
+                    sentence_type=SentenceType.LAST,
+                    content_type=ContentType.ACTION,
+                )
+            )
         if starter_text:
             conn.dialogue.put(Message(role="assistant", content=starter_text))
         try:

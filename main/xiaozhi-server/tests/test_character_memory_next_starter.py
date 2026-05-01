@@ -8,7 +8,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-def test_ensure_character_memory_record_posts_upsert(monkeypatch):
+def test_ensure_character_memory_record_posts_create_when_row_missing(monkeypatch):
     from core.utils import next_starter_client as client
 
     monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
@@ -18,8 +18,20 @@ def test_ensure_character_memory_record_posts_upsert(monkeypatch):
     calls = {}
 
     class Response:
+        def __init__(self, payload=None):
+            self._payload = payload or []
+
         def raise_for_status(self):
             return None
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url, headers=None, timeout=None):
+        calls["get_url"] = url
+        calls["get_headers"] = headers
+        calls["get_timeout"] = timeout
+        return Response([])
 
     def fake_post(url, headers=None, json=None, timeout=None):
         calls["url"] = url
@@ -28,6 +40,7 @@ def test_ensure_character_memory_record_posts_upsert(monkeypatch):
         calls["timeout"] = timeout
         return Response()
 
+    monkeypatch.setattr(client.requests, "get", fake_get)
     monkeypatch.setattr(client.requests, "post", fake_post)
 
     ok = client.ensure_character_memory_record(
@@ -45,6 +58,57 @@ def test_ensure_character_memory_record_posts_upsert(monkeypatch):
     assert calls["json"]["owner_user_id"] == "+15551234567"
     assert calls["json"]["last_device_id"] == "90:e5:b1:00:00:01"
     assert calls["json"]["next_starter"] is None
+
+
+def test_ensure_character_memory_record_patches_existing_row_without_clearing_starter(
+    monkeypatch,
+):
+    from core.utils import next_starter_client as client
+
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role")
+    monkeypatch.setenv("SUPABASE_CHARACTER_MEMORY_TABLE", "character_memory_model")
+
+    calls = {}
+
+    class Response:
+        def __init__(self, payload=None):
+            self._payload = payload or []
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url, headers=None, timeout=None):
+        calls["get_url"] = url
+        return Response([{"character_id": "char_123"}])
+
+    def fake_patch(url, headers=None, json=None, timeout=None):
+        calls["patch_url"] = url
+        calls["patch_headers"] = headers
+        calls["patch_json"] = json
+        calls["patch_timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(client.requests, "get", fake_get)
+    monkeypatch.setattr(client.requests, "patch", fake_patch)
+
+    ok = client.ensure_character_memory_record(
+        "char_123",
+        owner_user_id="+15551234567",
+        last_device_id="90:e5:b1:00:00:01",
+    )
+
+    assert ok is True
+    assert calls["patch_url"] == (
+        "https://example.supabase.co/rest/v1/character_memory_model"
+        "?character_id=eq.char_123"
+    )
+    assert calls["patch_json"]["owner_user_id"] == "+15551234567"
+    assert calls["patch_json"]["last_device_id"] == "90:e5:b1:00:00:01"
+    assert "next_starter" not in calls["patch_json"]
 
 
 def test_character_switch_refresh_reloads_next_starter(monkeypatch):
@@ -152,3 +216,32 @@ def test_character_switch_refresh_reloads_next_starter(monkeypatch):
             },
         )
     ]
+
+
+def test_get_ready_next_starter_allows_text_only_payload(monkeypatch):
+    from core.utils import next_starter_client as client
+
+    monkeypatch.setenv("NEXT_STARTER_MAX_AGE_DAYS", "7")
+    monkeypatch.setattr(
+        client,
+        "_fetch_next_starter_row",
+        lambda cid: (
+            {
+                "next_starter": {
+                    "status": "ready",
+                    "characterId": cid,
+                    "text": "Hey, tell me more.",
+                    "generatedAt": "2026-05-01T07:00:00+00:00",
+                    "sourceSessionId": "sess_1",
+                }
+            },
+            "https://example.supabase.co",
+            "service-role",
+            2.0,
+        ),
+    )
+
+    payload = client.get_ready_next_starter("char_123")
+
+    assert payload is not None
+    assert payload["text"] == "Hey, tell me more."
