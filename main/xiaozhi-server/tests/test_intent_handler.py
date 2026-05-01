@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import pathlib
-import queue
 import sys
 from types import SimpleNamespace
 
@@ -70,49 +69,24 @@ def test_speak_txt_sends_frontend_llm_message(monkeypatch):
     assert '"text": "mirror reply"' in sent_messages[0]
 
 
-def test_handle_user_intent_queues_bedtime_audio(monkeypatch):
-    sent_stt = []
-    played = []
-    dialogue_messages = []
+def test_handle_user_intent_no_longer_intercepts_good_night(monkeypatch):
+    async def fake_check_wakeup_words(conn, text):
+        return False
 
-    async def fake_send_stt_message(conn, text):
-        sent_stt.append(text)
-
-    async def fake_send_audio_message(conn, sentence_type, audios, text):
-        played.append((sentence_type, audios, text))
-
-    monkeypatch.setattr(intentHandler, "checkWakeupWords", lambda conn, text: asyncio.sleep(0, result=False))
-    monkeypatch.setattr(intentHandler, "send_stt_message", fake_send_stt_message)
-    monkeypatch.setattr(intentHandler, "sendAudioMessage", fake_send_audio_message)
-    monkeypatch.setattr(intentHandler, "audio_to_data", lambda path: [b"bedtime-audio"] * 1205)
-    monkeypatch.setattr(intentHandler.os.path, "exists", lambda path: True)
+    monkeypatch.setattr(intentHandler, "checkWakeupWords", fake_check_wakeup_words)
 
     conn = SimpleNamespace(
         cmd_exit=[],
         intent_type="function_call",
         logger=_Logger(),
-        config={"easter_eggs": {"bedtime_sound_path": "config/assets/goodnight.wav"}},
-        tts=SimpleNamespace(tts_audio_queue=queue.Queue()),
-        dialogue=SimpleNamespace(put=lambda message: dialogue_messages.append(message)),
-        mode_specific_instructions="",
-        persistent_mode_specific_instructions="",
+        config={},
         client_abort=True,
     )
 
     handled = asyncio.run(intentHandler.handle_user_intent(conn, "good night"))
 
-    assert handled is True
-    assert sent_stt == ["good night"]
-    assert played[0][0] == SentenceType.FIRST
-    assert len(played[0][1]) == 1000
-    assert played[0][1][0] == b"bedtime-audio"
-    assert played[1][0] == SentenceType.LAST
-    assert conn.mode_specific_instructions == ""
-    assert "잘자요아가씨" in conn.persistent_mode_specific_instructions
-    assert "ASMRZ" in conn.persistent_mode_specific_instructions
-    assert dialogue_messages
-    assert "잘자요아가씨" in dialogue_messages[0].content
-    assert conn.client_abort is False
+    assert handled is False
+    assert conn.client_abort is True
 
 
 def test_handle_user_intent_replies_to_magic_spell(monkeypatch):
