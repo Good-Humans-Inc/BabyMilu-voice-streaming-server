@@ -139,6 +139,7 @@ class ConnectionHandler:
         self.websocket = None
         self.headers = None
         self.device_id: Optional[str] = None
+        self.active_character_id: Optional[str] = None
         self.client_ip = None
         self.prompt = None
         self.welcome_msg = None
@@ -426,17 +427,17 @@ class ConnectionHandler:
                 self.voice_id = str(fields.get("voice"))
 
             # Invalidate prompt cache for this device then rebuild prompt with latest character.
-            try:
-                invalidated = self.prompt_manager.invalidate_device_prompt_cache(
-                    self.device_id
-                )
-                self.logger.bind(tag=TAG).info(
-                    f"Prompt cache invalidated for {self.device_id}: {invalidated} entries"
-                )
-            except Exception as e:
-                self.logger.bind(tag=TAG).warning(
-                    f"Failed to invalidate prompt cache for {self.device_id}: {e}"
-                )
+            # try:
+            #     invalidated = self.prompt_manager.invalidate_device_prompt_cache(
+            #         self.device_id
+            #     )
+            #     self.logger.bind(tag=TAG).info(
+            #         f"Prompt cache invalidated for {self.device_id}: {invalidated} entries"
+            #     )
+            # except Exception as e:
+            #     self.logger.bind(tag=TAG).warning(
+            #     f"Failed to invalidate prompt cache for {self.device_id}: {e}"
+            # )
 
             base_prompt = self.common_config.get("prompt", self.config.get("prompt", ""))
             refreshed_prompt = base_prompt
@@ -612,17 +613,14 @@ class ConnectionHandler:
             user_name = "Unknown User"
             new_prompt = self.config.get("prompt", "")
 
-            cached_enhanced_prompt = self.prompt_manager.get_cached_enhanced_prompt(
-                self.device_id, prompt_text=self.config.get("prompt")
-            )
-            if cached_enhanced_prompt:
-                # Important: prompt caching must NOT skip Firestore fetches that
-                # resolve per-user settings (e.g., voice_id). Otherwise we fall back
-                # to provider defaults (often "Caleb" on ElevenLabs).
-                self.logger.bind(tag=TAG).info(
-                    f"Enhanced prompt cache hit for device {self.device_id} (prompt cached); "
-                    "still fetching Firestore profile for voice/user binding"
-                )
+            # cached_enhanced_prompt = self.prompt_manager.get_cached_enhanced_prompt(
+            #     self.device_id, prompt_text=self.config.get("prompt")
+            # )
+            # if cached_enhanced_prompt:
+            #     self.logger.bind(tag=TAG).info(
+            #         f"Enhanced prompt cache hit for device {self.device_id} (prompt cached); "
+            #         "still fetching Firestore profile for voice/user binding"
+            #     )
 
             # 从云端获取角色配置（voice, bio 等），并应用到本次会话
             fields = {}
@@ -2358,13 +2356,13 @@ Return ONLY the JSON array, no other explanation."""
 
         # For active websocket sessions, re-check character binding on user turns.
         # This ensures voice_id/prompt switch quickly after app-side character changes.
-        if depth == 0 and is_user_input:
-            try:
-                self._refresh_character_binding_if_needed(force=False)
-            except Exception as e:
-                self.logger.bind(tag=TAG).warning(
-                    f"Runtime character refresh failed (non-fatal): {e}"
-                )
+        # if depth == 0 and is_user_input:
+        #     try:
+        #         self._refresh_character_binding_if_needed(force=False)
+        #     except Exception as e:
+        #         self.logger.bind(tag=TAG).warning(
+        #             f"Runtime character refresh failed (non-fatal): {e}"
+        #         )
 
         # Genuine user input cancels any pending follow-up
         if query and is_user_input:
