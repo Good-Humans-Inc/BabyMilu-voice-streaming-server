@@ -139,6 +139,7 @@ class ConnectionHandler:
         self.websocket = None
         self.headers = None
         self.device_id: Optional[str] = None
+        self.active_character_id: Optional[str] = None
         self.client_ip = None
         self.prompt = None
         self.welcome_msg = None
