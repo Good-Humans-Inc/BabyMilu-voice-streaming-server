@@ -15,6 +15,7 @@ The harness currently ships with staged scenarios for:
 
 - `scheduled.reminder`
 - `scheduled.alarm`
+- `interaction.next_starter`
 
 Those scenarios already exercise the four core layers:
 
@@ -162,6 +163,17 @@ python3 tools/smoke/run.py run \
   --device-id 90:e5:b1:d6:f8:58 \
   --repeat weekly \
   --label "shared smoke alarm"
+```
+
+### Example: Next Starter Latency Smoke
+
+```bash
+python3 tools/smoke/run.py run \
+  --env staging \
+  --scenario interaction.next_starter \
+  --device-id <TEST_DEVICE_ID> \
+  --ssh-host <SSH_HOST> \
+  --skip-preflight
 ```
 
 ## Codex Workflow

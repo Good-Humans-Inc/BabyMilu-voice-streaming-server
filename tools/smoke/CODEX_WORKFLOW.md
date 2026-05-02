@@ -121,6 +121,17 @@ python3 tools/smoke/run.py run \
   --label "codex shared alarm smoke"
 ```
 
+Next starter example:
+
+```bash
+python3 tools/smoke/run.py run \
+  --env staging \
+  --scenario interaction.next_starter \
+  --device-id <TEST_DEVICE_ID> \
+  --ssh-host <SSH_HOST> \
+  --skip-preflight
+```
+
 ## Environment Config
 
 The committed staging config is:

@@ -28,6 +28,8 @@ class ScheduledReminderScenario(BaseScenario):
     async def run(self, context: ScenarioContext) -> ScenarioResult:
         started = utc_now_iso()
         args = context.args
+        if not args.uid:
+            raise RuntimeError("--uid is required for scheduled.reminder")
         adapter = FirestoreDataAdapter(context.firestore)
         user = adapter.get_user(args.uid)
         if not user:
@@ -111,6 +113,8 @@ class ScheduledAlarmScenario(BaseScenario):
     async def run(self, context: ScenarioContext) -> ScenarioResult:
         started = utc_now_iso()
         args = context.args
+        if not args.uid:
+            raise RuntimeError("--uid is required for scheduled.alarm")
         if not args.device_id:
             raise RuntimeError("--device-id is required for alarm scenarios")
         adapter = FirestoreDataAdapter(context.firestore)

@@ -39,8 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = subparsers.add_parser("run", parents=[common], help="Run a named smoke scenario")
     run.add_argument("--scenario", required=True, help="Scenario name, e.g. scheduled.reminder")
-    run.add_argument("--uid", required=True, help="User UID, usually a phone number")
+    run.add_argument("--uid", help="User UID, usually a phone number")
     run.add_argument("--device-id", help="Device ID to simulate for plushie scenarios")
+    run.add_argument("--ssh-host", help="SSH host alias for scenarios that need VM log validation")
     run.add_argument("--label", help="Human-readable label for the test document")
     run.add_argument(
         "--repeat",
@@ -103,7 +104,8 @@ async def handle_run(args: argparse.Namespace) -> int:
 
     scenario = make_scenario(args.scenario)
     writer = ArtifactWriter(env.artifact_root)
-    artifact_dir = writer.begin_run(args.scenario, args.uid)
+    run_subject = args.uid or args.device_id or args.scenario
+    artifact_dir = writer.begin_run(args.scenario, run_subject)
     context = ScenarioContext(
         environment=env,
         args=args,
