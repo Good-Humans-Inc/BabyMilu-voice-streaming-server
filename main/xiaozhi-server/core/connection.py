@@ -2654,6 +2654,11 @@ Return ONLY the JSON array, no other explanation."""
                         )
                     )
 
+        if self._session_created and hasattr(self.llm, "get_last_usage"):
+            usage = self.llm.get_last_usage(self.session_id)
+            if usage > 0:
+                self.chat_store.add_token_usage(self.session_id, usage)
+
         if tool_call_flag:
             bHasError = False
             if function_id is None:

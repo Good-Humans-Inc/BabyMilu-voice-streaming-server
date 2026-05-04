@@ -75,6 +75,21 @@ class LLMProvider(LLMProviderBase):
             timeout=httpx.Timeout(self.timeout)
         )
         self._conversations = {}
+        self._last_usage: dict[str, int] = {}
+
+    def get_last_usage(self, session_id: str) -> int:
+        """Return and clear the token count recorded for the last API call on this session."""
+        return self._last_usage.pop(session_id, 0)
+
+    def _record_usage(self, session_id: str, event) -> None:
+        usage = getattr(getattr(event, "response", None), "usage", None)
+        if usage is None:
+            return
+        total = getattr(usage, "total_tokens", None)
+        if total is None:
+            total = getattr(usage, "input_tokens", 0) + getattr(usage, "output_tokens", 0)
+        if total:
+            self._last_usage[session_id] = self._last_usage.get(session_id, 0) + total
 
     def ensure_conversation(self, session_id):
         """Ensure and return an OpenAI conversation id for a given session_id."""
@@ -179,6 +194,7 @@ class LLMProvider(LLMProviderBase):
                                     if tail:
                                         yield tail
                         elif event.type == "response.completed":
+                            self._record_usage(session_id, event)
                             break
                 return  # success — exit retry loop
 
@@ -291,6 +307,7 @@ class LLMProvider(LLMProviderBase):
                             pass
                         
                         elif event_type == "response.completed":
+                            self._record_usage(session_id, event)
                             break
 
                     # Emit consolidated function call if we collected one

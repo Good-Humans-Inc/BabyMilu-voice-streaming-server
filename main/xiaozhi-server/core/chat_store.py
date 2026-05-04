@@ -324,6 +324,21 @@ class SQLiteChatStore:
                     f"[ChatStore:sqlite] update_session_conversation_id rowcount={cur.rowcount}"
                 )
 
+    def add_token_usage(self, session_id: str, token_count: int):
+        if self.logger:
+            self.logger.info(
+                f"[ChatStore:sqlite] add_token_usage(session_id={session_id}, token_count={token_count})"
+            )
+        with get_db() as db:
+            db.execute(
+                """
+                UPDATE sessions
+                SET token_usage = COALESCE(token_usage, 0) + ?
+                WHERE session_id = ?
+                """,
+                (token_count, session_id),
+            )
+
     def ensure_memory_profile_identity(self, user_id: str, device_id: str = ""):
         return
 
@@ -828,6 +843,20 @@ class SupabaseChatStore:
             {"conversation_id": conversation_id},
         )
 
+    def add_token_usage(self, session_id: str, token_count: int):
+        if self.logger:
+            self.logger.info(
+                f"[ChatStore:supabase] add_token_usage(session_id={session_id}, token_count={token_count})"
+            )
+        existing = self._select_eq(self.sessions_table, "session_id", session_id) or {}
+        current = existing.get("token_usage") or 0
+        self._update_eq(
+            self.sessions_table,
+            "session_id",
+            session_id,
+            {"token_usage": current + token_count},
+        )
+
 
 class ChatStore:
     def __init__(self, logger=None):
@@ -902,6 +931,16 @@ class ChatStore:
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ChatStore] update_session_conversation_id failed: {e}")
+
+    def add_token_usage(self, session_id: str, token_count: int):
+        if not token_count:
+            return
+        try:
+            if hasattr(self.store, "add_token_usage"):
+                self.store.add_token_usage(session_id=session_id, token_count=token_count)
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"[ChatStore] add_token_usage failed: {e}")
 
     def ensure_memory_profile_identity(self, user_id: str, device_id: str = ""):
         try:
