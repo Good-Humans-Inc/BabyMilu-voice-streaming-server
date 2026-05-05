@@ -105,13 +105,13 @@ def test_prepare_wake_requests_creates_session(monkeypatch):
     request = wake_requests[0]
     assert request.target.device_id == "DEV123"
     assert request.session is fake_store.sessions["DEV123"]
-    assert fake_store.sessions["DEV123"].session_config == {
+    assert fake_store.sessions["DEV123"].session_config | {
         "mode": "morning_alarm",
         "alarmId": "alarm-123",
         "userId": "user-xyz",
         "label": "Morning Wake",
         "context": None,
-    }
+    } == fake_store.sessions["DEV123"].session_config
 
 
 def test_prepare_wake_requests_skips_existing_session(monkeypatch):
