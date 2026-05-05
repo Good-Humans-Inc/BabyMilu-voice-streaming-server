@@ -52,6 +52,8 @@ from core.utils.firestore_client import (
     update_conversation_state_for_device,
     get_most_recent_character_via_user_for_device
 )
+from core.utils.next_starter_client import get_ready_next_starter
+
 from services.session_context import store as session_context_store
 from services.alarms.config import MODE_CONFIG
 from services import log_context
@@ -137,6 +139,7 @@ class ConnectionHandler:
         self.websocket = None
         self.headers = None
         self.device_id: Optional[str] = None
+        self.active_character_id: Optional[str] = None
         self.client_ip = None
         self.prompt = None
         self.welcome_msg = None
@@ -231,6 +234,9 @@ class ConnectionHandler:
         self.sentence_id = None
         self.voice_id = None
         self.tts_MessageText = ""
+        self.active_character_id = None
+        self.next_starter_payload: Optional[Dict[str, Any]] = None
+        self.next_starter_scheduled = False
 
         # IOT/MCP
         self.iot_descriptors = {}
@@ -404,6 +410,9 @@ class ConnectionHandler:
             old_char = self.current_character_id
             old_voice = self.voice_id
             self.current_character_id = char_id
+            self.active_character_id = str(char_id)
+            self.next_starter_payload = None
+            self.next_starter_scheduled = False
 
             fields = {}
             try:
@@ -418,17 +427,17 @@ class ConnectionHandler:
                 self.voice_id = str(fields.get("voice"))
 
             # Invalidate prompt cache for this device then rebuild prompt with latest character.
-            try:
-                invalidated = self.prompt_manager.invalidate_device_prompt_cache(
-                    self.device_id
-                )
-                self.logger.bind(tag=TAG).info(
-                    f"Prompt cache invalidated for {self.device_id}: {invalidated} entries"
-                )
-            except Exception as e:
-                self.logger.bind(tag=TAG).warning(
-                    f"Failed to invalidate prompt cache for {self.device_id}: {e}"
-                )
+            # try:
+            #     invalidated = self.prompt_manager.invalidate_device_prompt_cache(
+            #         self.device_id
+            #     )
+            #     self.logger.bind(tag=TAG).info(
+            #         f"Prompt cache invalidated for {self.device_id}: {invalidated} entries"
+            #     )
+            # except Exception as e:
+            #     self.logger.bind(tag=TAG).warning(
+            #     f"Failed to invalidate prompt cache for {self.device_id}: {e}"
+            # )
 
             base_prompt = self.common_config.get("prompt", self.config.get("prompt", ""))
             refreshed_prompt = base_prompt
@@ -482,6 +491,27 @@ class ConnectionHandler:
             except Exception as e:
                 self.logger.bind(tag=TAG).warning(
                     f"Failed to rebuild user profile context after character switch: {e}"
+                )
+
+            try:
+                owner_phone = get_owner_phone_for_device(self.device_id) or getattr(
+                    self, "user_id", ""
+                )
+                self.chat_store.ensure_character_memory_record(
+                    self.active_character_id,
+                    owner_user_id=owner_phone if isinstance(owner_phone, str) else "",
+                    device_id=self.device_id or "",
+                )
+                self.next_starter_payload = get_ready_next_starter(
+                    self.active_character_id
+                )
+                if self.next_starter_payload:
+                    self.logger.bind(tag=TAG).info(
+                        f"Reloaded next_starter after character switch for character_id={self.active_character_id}"
+                    )
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(
+                    f"Failed to refresh character-scoped memory for {self.device_id}: {e}"
                 )
 
             self.config["prompt"] = refreshed_prompt
@@ -583,17 +613,14 @@ class ConnectionHandler:
             user_name = "Unknown User"
             new_prompt = self.config.get("prompt", "")
 
-            cached_enhanced_prompt = self.prompt_manager.get_cached_enhanced_prompt(
-                self.device_id, prompt_text=self.config.get("prompt")
-            )
-            if cached_enhanced_prompt:
-                # Important: prompt caching must NOT skip Firestore fetches that
-                # resolve per-user settings (e.g., voice_id). Otherwise we fall back
-                # to provider defaults (often "Caleb" on ElevenLabs).
-                self.logger.bind(tag=TAG).info(
-                    f"Enhanced prompt cache hit for device {self.device_id} (prompt cached); "
-                    "still fetching Firestore profile for voice/user binding"
-                )
+            # cached_enhanced_prompt = self.prompt_manager.get_cached_enhanced_prompt(
+            #     self.device_id, prompt_text=self.config.get("prompt")
+            # )
+            # if cached_enhanced_prompt:
+            #     self.logger.bind(tag=TAG).info(
+            #         f"Enhanced prompt cache hit for device {self.device_id} (prompt cached); "
+            #         "still fetching Firestore profile for voice/user binding"
+            #     )
 
             # 从云端获取角色配置（voice, bio 等），并应用到本次会话
             fields = {}
@@ -620,12 +647,17 @@ class ConnectionHandler:
 
                 if char_id:
                     self.current_character_id = char_id
+                    self.active_character_id = str(char_id)
                     self.logger.info(f"char_id={char_id!r}")
+                    self.logger.bind(tag=TAG, device_id=self.device_id).info(
+                        f"Active character id: {char_id!r}"
+                    )
                     char_doc = get_character_profile(char_id)
                     fields = extract_character_profile_fields(char_doc or {})
 
                     if not self.voice_id and fields.get("voice"):
                         self.voice_id = str(fields.get("voice"))
+
 
                     if not self.voice_id:
                         # This is the key condition that will trigger TTS provider default voice.
@@ -720,8 +752,6 @@ class ConnectionHandler:
                 self.logger.bind(tag=TAG).error(
                     f"❌ Failed to fetch/apply character profile: {e}"
                 )
-                import traceback
-
                 self.logger.bind(tag=TAG).error(
                     f"Traceback: {traceback.format_exc()}"
                 )
@@ -736,6 +766,24 @@ class ConnectionHandler:
                     name=self.user_name,
                     device_id=self.device_id,
                 )
+                if self.active_character_id:
+                    try:
+                        self.chat_store.ensure_character_memory_record(
+                            self.active_character_id,
+                            owner_user_id=self.user_id,
+                            device_id=self.device_id or "",
+                        )
+                        self.next_starter_payload = get_ready_next_starter(
+                            self.active_character_id
+                        )
+                        if self.next_starter_payload:
+                            self.logger.bind(tag=TAG).info(
+                                f"Loaded ready next_starter for character_id={self.active_character_id}"
+                            )
+                    except Exception as starter_error:
+                        self.logger.bind(tag=TAG).warning(
+                            f"Failed to initialize character-scoped next_starter for character_id={self.active_character_id}: {starter_error}"
+                        )
 
                 self.chat_store.create_session(
                     session_id=self.session_id,
@@ -1979,8 +2027,19 @@ Return ONLY the JSON array, no other explanation."""
 
         if mode == "scheduled_conversation":
             # Dynamic assembly from LLM-generated intake fields stored in session_config.
-            # No static instructions file — each conversation is unique.
-            label                 = (session_config.get("label") or "").strip()
+            # No static instructions file: each conversation is unique.
+            label = (
+                session_config.get("label")
+                or session_config.get("title")
+                or session_config.get("context")
+                or ""
+            ).strip()
+            content = (
+                session_config.get("content")
+                or session_config.get("context")
+                or label
+                or ""
+            ).strip()
             character_reminder    = (session_config.get("characterReminder") or
                 "Review your character setting and remind the user in the way your character would."
             ).strip()
@@ -1989,7 +2048,8 @@ Return ONLY the JSON array, no other explanation."""
             type_hint             = (session_config.get("typeHint") or "").strip()
             priority              = (session_config.get("priority") or "").strip()
             conversation_outline  = (session_config.get("conversationOutline") or
-                "1. Remind the user — use the reminder title above to understand the topic. "
+                "1. Remind the user: use the reminder title above as the meaning to convey. "
+                "Your very first spoken sentence must already contain the reminder reason. "
                 "2. Engage in conversation if the user wants to talk."
             ).strip()
             completion_signal     = (session_config.get("completionSignal") or "").strip()
@@ -2000,6 +2060,7 @@ Return ONLY the JSON array, no other explanation."""
             parts.append(
                 f"[CONTEXT FOR THIS CONVERSATION]\n"
                 f"Reminder title (as titled by the user): \"{label}\"\n"
+                f"Reminder content: \"{content}\"\n"
                 f"Emotional context: {emotional_context}\n"
                 f"Delivery preference: {delivery_pref}\n"
                 f"Type: {type_hint} | Priority: {priority}"
@@ -2061,13 +2122,20 @@ Return ONLY the JSON array, no other explanation."""
                 reminder_context = reminder_context.strip()
             else:
                 reminder_context = ""
+            if not reminder_context:
+                fallback_context = session_config.get("title") or session_config.get("label")
+                if isinstance(fallback_context, str):
+                    reminder_context = fallback_context.strip()
+                else:
+                    reminder_context = ""
             if reminder_context:
                 # Make reminder purpose explicit in first-turn prompt guidance so
                 # server-initiated alarm speech consistently mentions the reason.
                 context_block = (
                     "\n\nReminder context:\n"
                     f"- The user asked to be reminded about: \"{reminder_context}\".\n"
-                    "- Mention this reason explicitly in your very first sentence."
+                    "- Use this as the reminder meaning, not as raw text to parrot back.\n"
+                    "- Your very first spoken sentence must already contain the reminder reason."
                 )
                 instructions = (instructions or "") + context_block
 
@@ -2371,13 +2439,13 @@ Return ONLY the JSON array, no other explanation."""
 
         # For active websocket sessions, re-check character binding on user turns.
         # This ensures voice_id/prompt switch quickly after app-side character changes.
-        if depth == 0 and is_user_input:
-            try:
-                self._refresh_character_binding_if_needed(force=False)
-            except Exception as e:
-                self.logger.bind(tag=TAG).warning(
-                    f"Runtime character refresh failed (non-fatal): {e}"
-                )
+        # if depth == 0 and is_user_input:
+        #     try:
+        #         self._refresh_character_binding_if_needed(force=False)
+        #     except Exception as e:
+        #         self.logger.bind(tag=TAG).warning(
+        #             f"Runtime character refresh failed (non-fatal): {e}"
+        #         )
 
         # Genuine user input cancels any pending follow-up and marks the session as engaged
         if query and is_user_input:

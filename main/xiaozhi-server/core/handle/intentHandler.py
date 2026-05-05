@@ -1,25 +1,15 @@
 import json
-import os
 import random
 import uuid
 import asyncio
-from typing import Optional
-from core.utils.dialogue import Message
 from core.providers.tts.dto.dto import ContentType
 from core.handle.helloHandle import checkWakeupWords
-from core.handle.sendAudioHandle import sendAudioMessage
 from plugins_func.register import Action, ActionResponse
 from core.handle.sendAudioHandle import send_stt_message
-from core.utils.util import remove_punctuation_and_length, audio_to_data
-from core.providers.tts.dto.dto import TTSMessageDTO, SentenceType
+from core.utils.util import remove_punctuation_and_length
+from core.providers.tts.dto.dto import TTSMessageDTO
 
 TAG = __name__
-DEFAULT_BEDTIME_SOUND_PATH = "config/assets/goodnight.wav"
-BEDTIME_CLIP_MS = 60_000
-BEDTIME_AUDIO_CONTEXT = (
-    "You just played the bedtime audio clip '잘자요아가씨' "
-    "('Goodnight Miss') by ASMRZ for the user."
-)
 MAGIC_SPELL = "Milu milu on the wall, who's the fairest of them all"
 MAGIC_SPELL_REPLIES = (
     "Hmm... I checked... and it says... me",
@@ -29,36 +19,10 @@ MAGIC_SPELL_REPLIES = (
     "Can I pick you anyway?",
 )
 
-BEDTIME_TRIGGER_PHRASES = (
-    "goodnight",
-    "good night",
-    "bedtime story",
-    "sleep story",
-    "go to sleep",
-    "going to sleep",
-    "its bedtime",
-    "it's bedtime",
-    "time for bed",
-    "going to bed",
-    "tell me a bedtime story",
-    "can you tell me a bedtime story",
-    "read me a bedtime story",
-)
-
-
 def _get_match_variants(text, filtered_text):
     raw = (text or "").strip().lower()
     squashed = (filtered_text or "").strip().lower()
     return raw, squashed
-
-
-def _contains_phrase(text, filtered_text, phrases) -> bool:
-    raw, squashed = _get_match_variants(text, filtered_text)
-    return any(phrase in raw or phrase.replace(" ", "") in squashed for phrase in phrases)
-
-
-def _should_play_bedtime_audio(text, filtered_text) -> bool:
-    return _contains_phrase(text, filtered_text, BEDTIME_TRIGGER_PHRASES)
 
 
 def _normalize_magic_spell_text(text: str) -> str:
@@ -95,69 +59,6 @@ def _is_magic_spell(text, filtered_text) -> bool:
     )
 
 
-def _get_bedtime_sound_path(conn) -> str:
-    easter_eggs = conn.config.get("easter_eggs", {}) if hasattr(conn, "config") else {}
-    path = easter_eggs.get("bedtime_sound_path") or DEFAULT_BEDTIME_SOUND_PATH
-    return str(path)
-
-
-def _load_audio_packets(conn, file_path: str, max_duration_ms: Optional[int] = None):
-    if not file_path or not os.path.exists(file_path):
-        conn.logger.bind(tag=TAG).warning(f"音频文件不存在，跳过彩蛋音效: {file_path}")
-        return None
-    try:
-        opus_packets = audio_to_data(file_path)
-        if max_duration_ms and max_duration_ms > 0:
-            max_frames = max_duration_ms // 60
-            if max_frames > 0:
-                opus_packets = opus_packets[:max_frames]
-        return opus_packets
-    except Exception as e:
-        conn.logger.bind(tag=TAG).warning(f"播放彩蛋音效失败: {e}")
-        return None
-
-
-async def _play_audio_packets(conn, opus_packets) -> bool:
-    if not opus_packets:
-        return False
-    await sendAudioMessage(conn, SentenceType.FIRST, opus_packets, None)
-    await sendAudioMessage(conn, SentenceType.LAST, [], None)
-    return True
-
-
-def _remember_bedtime_audio_context(conn):
-    context_note = (
-        f"[Internal context, not spoken to user: {BEDTIME_AUDIO_CONTEXT}]"
-    )
-    conn.dialogue.put(Message(role="assistant", content=context_note))
-    persistent_instruction = (
-        "\n\nBedtime audio session fact: "
-        f"{BEDTIME_AUDIO_CONTEXT} "
-        "Remember this for the rest of the current session. "
-        "If the user asks what you just played, answer that it was "
-        "\"잘자요아가씨\" (\"Goodnight Miss\") by ASMRZ. "
-        "Do not say you did not play anything, and do not claim you cannot play audio. "
-        "Do not proactively mention the track unless the user asks."
-    )
-    current = getattr(conn, "persistent_mode_specific_instructions", "") or ""
-    conn.persistent_mode_specific_instructions = current + persistent_instruction
-
-
-async def _trigger_bedtime_flow(conn, original_text: str):
-    await send_stt_message(conn, original_text)
-    conn.client_abort = False
-    opus_packets = _load_audio_packets(
-        conn,
-        _get_bedtime_sound_path(conn),
-        max_duration_ms=BEDTIME_CLIP_MS,
-    )
-    if opus_packets:
-        conn.logger.bind(tag=TAG).info("开始播放晚安彩蛋音频")
-        await _play_audio_packets(conn, opus_packets)
-    _remember_bedtime_audio_context(conn)
-    conn.logger.bind(tag=TAG).info("晚安彩蛋播放完成，等待用户继续对话")
-
-
 async def _trigger_magic_spell(conn, original_text: str):
     await send_stt_message(conn, original_text)
     conn.client_abort = False
@@ -184,10 +85,6 @@ async def handle_user_intent(conn, text):
 
     # 检查是否是唤醒词
     if await checkWakeupWords(conn, filtered_text):
-        return True
-
-    if _should_play_bedtime_audio(text, filtered_text):
-        await _trigger_bedtime_flow(conn, text)
         return True
 
     if _is_magic_spell(text, filtered_text):

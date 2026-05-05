@@ -40,23 +40,38 @@ def _build_client() -> firestore.Client:
     return firestore.Client()
 
 
+def _fetch_device_doc(client, device_id: str, timeout: float):
+    """Fetch a Firestore device document with case-insensitive fallback.
+
+    Tries device_id as-is first; if not found, retries with the uppercased form.
+    Returns (doc, resolved_id) where resolved_id is the form that matched.
+    """
+    doc = client.collection("devices").document(device_id).get(timeout=timeout)
+    if doc.exists:
+        return doc, device_id
+    upper = device_id.upper()
+    if upper != device_id:
+        doc = client.collection("devices").document(upper).get(timeout=timeout)
+        if doc.exists:
+            return doc, upper
+    return doc, device_id  # not found; return original id for logging
+
+
 def get_active_character_for_device(device_id: str, timeout: float = 3.0) -> Optional[str]:
     try:
         client = _build_client()
-        doc = client.collection("devices").document(device_id).get(timeout=timeout)
+        doc, resolved_id = _fetch_device_doc(client, device_id, timeout)
         if not doc.exists:
             logger.bind(tag=TAG).warning(f"Firestore devices/{device_id} not found")
             return None
         data = doc.to_dict() or {}
-        # Debug visibility into what we actually fetched from Firestore
         try:
             pretty_doc = json.dumps(data, ensure_ascii=False, default=str, indent=2)
             logger.bind(tag=TAG).info(
-                f"Firestore devices/{device_id} read: project={getattr(client, 'project', None)}, "
+                f"Firestore devices/{resolved_id} read: project={getattr(client, 'project', None)}, "
                 f"exists={doc.exists}, full_doc=\n{pretty_doc}"
             )
         except Exception:
-            # Logging must not break the read path
             pass
         return data.get("activeCharacterId")
     except Exception as e:
@@ -67,7 +82,7 @@ def get_active_character_for_device(device_id: str, timeout: float = 3.0) -> Opt
 def get_device_doc(device_id: str, timeout: float = 3.0) -> Optional[Dict[str, Any]]:
     try:
         client = _build_client()
-        doc = client.collection("devices").document(device_id).get(timeout=timeout)
+        doc, _ = _fetch_device_doc(client, device_id, timeout)
         if not doc.exists:
             logger.bind(tag=TAG).warning(f"Firestore devices/{device_id} not found")
             return None
@@ -178,7 +193,7 @@ def get_conversation_state_for_device(device_id: str, timeout: float = 3.0) -> O
     """Return the full conversation metadata block for devices/{device_id} if present."""
     try:
         client = _build_client()
-        doc = client.collection("devices").document(device_id).get(timeout=timeout)
+        doc, _ = _fetch_device_doc(client, device_id, timeout)
         if not doc.exists:
             logger.bind(tag=TAG).warning(f"Firestore devices/{device_id} not found")
             return None
@@ -221,7 +236,8 @@ def update_conversation_state_for_device(
         # Remove legacy flat field if present to keep the document consistent
         payload["conversationId"] = firestore.DELETE_FIELD
 
-        client.collection("devices").document(device_id).set(
+        _, resolved_id = _fetch_device_doc(client, device_id, timeout)
+        client.collection("devices").document(resolved_id).set(
             payload,
             merge=True,
             timeout=timeout,

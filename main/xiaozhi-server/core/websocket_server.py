@@ -43,7 +43,9 @@ class WebSocketServer:
         port = int(server_config.get("port", 8000))
 
         async with websockets.serve(
-            self._handle_connection, host, port,
+            self._handle_connection,
+            host,
+            port,
             process_request=self._http_response,
             compression=None,
         ):

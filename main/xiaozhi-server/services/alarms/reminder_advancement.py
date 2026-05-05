@@ -1,6 +1,6 @@
 """
 Reminder next-occurrence math aligned with babymilu-backend
-`services/reminder_helper.py` (used by sendReminderPush / advance_recurring_reminder).
+`services/reminder_helper.py` (used by the reminder advancement flow).
 
 Uses zoneinfo.ZoneInfo instead of pytz to avoid an extra dependency.
 """
@@ -10,6 +10,16 @@ import calendar
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 from zoneinfo import ZoneInfo
+
+DAY_MAP = {
+    "Mon": 0,
+    "Tue": 1,
+    "Wed": 2,
+    "Thu": 3,
+    "Fri": 4,
+    "Sat": 5,
+    "Sun": 6,
+}
 
 
 def parse_time_local(time_str: str) -> tuple[int, int]:
@@ -33,9 +43,21 @@ def _as_utc(value: datetime) -> datetime:
 
 def _normalize_repeat(schedule: Dict[str, Any]) -> Optional[str]:
     raw = schedule.get("repeat")
-    if raw is None:
+    if raw is not None:
+        normalized = str(raw).strip().lower()
+        return normalized or None
+
+    days = schedule.get("days") or []
+    if not isinstance(days, list) or not days:
         return None
-    return str(raw).strip().lower()
+    if all(isinstance(day, int) for day in days):
+        return "monthly"
+    weekday_days = [day for day in days if isinstance(day, str)]
+    if len(weekday_days) == len(DAY_MAP):
+        return "daily"
+    if weekday_days:
+        return "weekly"
+    return None
 
 
 def get_next_occurrence_utc(

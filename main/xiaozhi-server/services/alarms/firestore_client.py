@@ -42,12 +42,12 @@ def _build_client() -> firestore.Client:
             # Directory detected but no JSON file found inside - clear it to avoid errors
             if "GOOGLE_APPLICATION_CREDENTIALS" in os.environ:
                 del os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
-    
+
     return firestore.Client()
 
 
 def _collection_group(client: firestore.Client):
-    return client.collection_group("reminders")
+    return client.collection_group("alarms")
 
 
 def fetch_due_alarms(
@@ -146,6 +146,7 @@ def fetch_due_alarms(
 def _build_alarm_doc(
     doc, data: dict, schedule: models.AlarmSchedule, targets: List[models.AlarmTarget]
 ) -> models.AlarmDoc:
+    user_block = data.get("user") if isinstance(data.get("user"), dict) else {}
     return models.AlarmDoc(
         alarm_id=doc.id,
         user_id=_resolve_user_id(doc),
@@ -160,6 +161,7 @@ def _build_alarm_doc(
         raw=data,
         doc_path=doc.reference.path,
         last_processed_utc=_parse_datetime(data.get("lastProcessedUTC")),
+        user_timezone=user_block.get("timezone"),
         content=data.get("content"),
         type_hint=data.get("typeHint"),
         priority=data.get("priority"),
@@ -420,6 +422,32 @@ def _resolve_user_id(doc) -> str:
     return parent.id if parent else ""
 
 
+def fetch_user_timezone(
+    user_id: str,
+    client: Optional[firestore.Client] = None,
+) -> Optional[str]:
+    client = client or _build_client()
+    try:
+        snapshot = client.collection("users").document(user_id).get()
+        if not snapshot.exists:
+            return None
+        payload = snapshot.to_dict() or {}
+        timezone_value = (
+            payload.get("timezone")
+            or payload.get("timeZone")
+            or payload.get("timezoneId")
+            or payload.get("userTimezone")
+        )
+        if not timezone_value:
+            return None
+        return str(timezone_value).strip() or None
+    except Exception as exc:
+        logger.bind(tag=TAG).warning(
+            f"Failed to fetch timezone for users/{user_id}: {exc}"
+        )
+        return None
+
+
 def create_alarm(
     uid: str,
     device_id: str,
@@ -429,7 +457,7 @@ def create_alarm(
     tz_str: str,
     client: Optional[firestore.Client] = None,
 ) -> str:
-    """Write a one-time alarm doc to /users/{uid}/reminders/{alarm_id} and return the alarm_id.
+    """Write a one-time alarm doc to /users/{uid}/alarms/{alarm_id} and return the alarm_id.
 
     Args:
         uid: The user's document ID (ownerPhone).
@@ -451,8 +479,10 @@ def create_alarm(
         "label": label,
         "context": context,
         "schedule": {
+            # Keep "once" for compatibility with deployed scheduler revisions.
+            "repeat": "once",
             "timeLocal": time_local,
-            "dateLocal": date_local,
+            "days": [date_local],
         },
         "nextOccurrenceUTC": _format_datetime(resolved_dt),
         "status": models.AlarmStatus.ON.value,
@@ -463,7 +493,7 @@ def create_alarm(
         "updatedAt": _format_datetime(now_utc),
     }
 
-    client.collection("users").document(uid).collection("reminders").document(alarm_id).set(doc)
+    client.collection("users").document(uid).collection("alarms").document(alarm_id).set(doc)
     logger.bind(tag=TAG).info(
         f"Created one-time alarm {alarm_id} for user {uid} device {device_id} "
         f"at {_format_datetime(resolved_dt)} (local {time_local} {tz_str}): '{label}'"

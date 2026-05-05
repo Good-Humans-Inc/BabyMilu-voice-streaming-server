@@ -57,6 +57,13 @@ log:
 
 # 使用完声音文件后删除文件(Delete the sound file when you are done using it)
 delete_audio: true
+# ASR音频文件保留策略：
+# - delete: 识别后删除临时WAV（推荐线上默认）
+# - archive: 识别后移动到 archive_dir，避免 tmp/ 无限增长
+# - keep: 保留在 output_dir，不推荐线上使用
+# 如果 provider 没有显式配置 audio_retention_mode，则会自动推导：
+# - delete_audio=true  -> delete
+# - delete_audio=false -> archive
 # 没有语音输入多久后断开连接(秒)，默认2分钟，即120秒
 close_connection_no_voice_time: 120
 # TTS请求超时时间(秒)
@@ -107,10 +114,6 @@ wakeup_words:
 # MCP接入点地址，地址格式为：ws://你的mcp接入点ip或者域名:端口号/mcp/?token=你的token
 # 详细教程 https://github.com/xinnan-tech/xiaozhi-esp32-server/blob/main/docs/mcp-endpoint-integration.md
 mcp_endpoint: 你的接入点 websocket地址
-# 彩蛋配置
-easter_eggs:
-  # English bedtime intent phrases trigger this cue; WAV chosen for the current BabyMilu setup
-  bedtime_sound_path: "config/assets/goodnight.wav"
 # 插件的基础配置
 plugins:
   # 获取天气插件的配置，这里填写你的api_key
@@ -391,6 +394,10 @@ ASR:
     base_url: https://api.openai.com/v1/audio/transcriptions
     model_name: gpt-4o-mini-transcribe
     output_dir: tmp/
+    # 可选：覆盖默认保留策略
+    # audio_retention_mode: delete
+    # audio_archive_dir: data/asr_archive
+    # audio_manifest_file: manifest.jsonl
   GroqASR:
     # Groq语音识别服务，需要先在Groq Console创建API密钥
     # 申请步骤：
@@ -442,7 +449,7 @@ VAD:
     threshold: 0.5
     threshold_low: 0.3
     model_dir: models/snakers4_silero-vad
-    min_silence_duration_ms: 200  # 如果说话停顿比较长，可以把这个值设置大一些
+    min_silence_duration_ms: 400  # 如果说话停顿比较长，可以把这个值设置大一些
 
 LLM:
   # 所有openai类型均可以修改超参，以AliLLM为例
@@ -685,6 +692,25 @@ TTS:
     rate: 44100
     api_key: "你的api_key"
     api_url: "http://127.0.0.1:8080/v1/tts"
+  FishAudio:
+    # Fish Audio HTTP streaming TTS.
+    # Voice cloning happens app-side; write the resulting Fish model id to
+    # characters/{characterId}.voice and the server will pick it up via conn.voice_id.
+    type: fish_audio
+    api_url: https://api.fish.audio/v1/tts
+    api_key: 你的fish audio api key
+    reference_id: 7328ffb8a94b41fe860e3992cb25a282
+    latency: normal
+    normalize: true
+    chunk_length: 100
+    top_p: 0.7
+    temperature: 0.7
+    repetition_penalty: 1.2
+    max_concurrent_requests: 3
+    retry_429_attempts: 1
+    retry_429_backoff_ms: 500
+    connect_timeout_seconds: 8
+    total_timeout_seconds: 60
   GPT_SOVITS_V2:
     # 定义TTS API类型
     #启动tts方法：

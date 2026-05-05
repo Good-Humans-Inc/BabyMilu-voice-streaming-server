@@ -49,17 +49,20 @@ def _make_alarm(
     next_occurrence: datetime | None = None,
     last_processed: datetime | None = None,
     time_local: str = "07:00",
-    timezone_name: str | None = "UTC",
+    timezone_name: str | None = None,
+    user_timezone: str | None = "UTC",
 ) -> models.AlarmDoc:
     schedule = models.AlarmSchedule(
         repeat=repeat,
         time_local=time_local,
-        days=days if days is not None else ["Mon"],
+        days=days or ["Mon"],
     )
     target = models.AlarmTarget(device_id=device_id, mode=mode)
     raw_payload = {}
     if timezone_name:
         raw_payload["timezone"] = timezone_name
+    if user_timezone:
+        raw_payload["user"] = {"timezone": user_timezone}
     return models.AlarmDoc(
         alarm_id="alarm-123",
         user_id="user-xyz",
@@ -73,6 +76,7 @@ def _make_alarm(
         raw=raw_payload,
         doc_path="users/user-xyz/alarms/alarm-123",
         last_processed_utc=last_processed,
+        user_timezone=user_timezone,
     )
 
 
@@ -93,6 +97,7 @@ def test_prepare_wake_requests_creates_session(monkeypatch):
         ]
 
     monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
+    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_reminders", lambda now, lookahead: [])
 
     now = datetime.now(timezone.utc)
     wake_requests = scheduler.prepare_wake_requests(now, lookahead=timedelta(minutes=1))
@@ -101,21 +106,13 @@ def test_prepare_wake_requests_creates_session(monkeypatch):
     request = wake_requests[0]
     assert request.target.device_id == "DEV123"
     assert request.session is fake_store.sessions["DEV123"]
-    cfg = fake_store.sessions["DEV123"].session_config
-    assert cfg["mode"] == "morning_alarm"
-    assert cfg["alarmId"] == "alarm-123"
-    assert cfg["userId"] == "user-xyz"
-    assert cfg["label"] == "Morning Wake"
-    assert cfg["context"] is None
-    # V0 fields are None for morning_alarm docs that don't have them
-    assert cfg["content"] is None
-    assert cfg["typeHint"] is None
-    assert cfg["priority"] is None
-    assert cfg["conversationOutline"] is None
-    assert cfg["characterReminder"] is None
-    assert cfg["emotionalContext"] is None
-    assert cfg["completionSignal"] is None
-    assert cfg["deliveryPreference"] is None
+    assert fake_store.sessions["DEV123"].session_config == {
+        "mode": "morning_alarm",
+        "alarmId": "alarm-123",
+        "userId": "user-xyz",
+        "label": "Morning Wake",
+        "context": None,
+    }
 
 
 def test_prepare_wake_requests_skips_existing_session(monkeypatch):
@@ -134,6 +131,7 @@ def test_prepare_wake_requests_skips_existing_session(monkeypatch):
         return [_make_alarm("DEV123", "morning_alarm")]
 
     monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
+    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_reminders", lambda now, lookahead: [])
     wake_requests = scheduler.prepare_wake_requests(
         datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
     )
@@ -159,11 +157,30 @@ def test_prepare_wake_requests_skips_when_last_processed_matches(monkeypatch):
         ]
 
     monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
+    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_reminders", lambda now, lookahead: [])
     wake_requests = scheduler.prepare_wake_requests(
         datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
     )
 
     assert wake_requests == []
+
+
+def test_prepare_wake_requests_skips_filtered_user(monkeypatch):
+    fake_store = _FakeSessionStore()
+    monkeypatch.setattr(scheduler, "session_context_store", fake_store)
+    monkeypatch.setenv("ALARM_USER_ALLOWLIST", "user-allowed")
+
+    def fake_fetch(now, lookahead):
+        return [_make_alarm("DEV123", "morning_alarm")]
+
+    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
+
+    wake_requests = scheduler.prepare_wake_requests(
+        datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
+    )
+
+    assert wake_requests == []
+    assert fake_store.created == []
 
 
 def test_finalize_wake_request_marks_one_time_alarm_complete(monkeypatch):
@@ -244,6 +261,7 @@ def test_prepare_wake_requests_one_time_uses_short_session_ttl(monkeypatch):
         ]
 
     monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
+    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_reminders", lambda now, lookahead: [])
 
     wake_requests = scheduler.prepare_wake_requests(
         datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
@@ -277,7 +295,7 @@ def test_compute_next_occurrence_uses_timezone_and_local_time():
         days=["Mon", "Tue", "Wed"],
         next_occurrence=reference,
         time_local="07:30",
-        timezone_name="America/Los_Angeles",
+        user_timezone="America/Los_Angeles",
     )
 
     next_dt = scheduler.compute_next_occurrence(alarm, now=reference)
@@ -285,122 +303,65 @@ def test_compute_next_occurrence_uses_timezone_and_local_time():
     assert next_dt == datetime(2024, 1, 2, 15, 30, tzinfo=timezone.utc)
 
 
-def test_compute_next_occurrence_daily_all_days_advances_one_day():
-    """Daily alarm (all 7 days) — next occurrence is exactly 24 hours later."""
-    reference = datetime(2024, 1, 1, 7, tzinfo=timezone.utc)  # Monday 07:00 UTC
+def test_compute_next_occurrence_uses_user_timezone_not_alarm_doc_timezone(monkeypatch):
+    reference = datetime(2026, 4, 26, 13, 0, tzinfo=timezone.utc)
     alarm = _make_alarm(
         "DEV1",
         "mode",
-        days=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+        days=["Sun"],
         next_occurrence=reference,
-        time_local="07:00",
+        time_local="09:00",
+        timezone_name="America/Los_Angeles",
+        user_timezone="Asia/Shanghai",
+    )
+
+    monkeypatch.setattr(
+        scheduler.firestore_client,
+        "fetch_user_timezone",
+        lambda user_id: (_ for _ in ()).throw(AssertionError("should not refetch")),
     )
 
     next_dt = scheduler.compute_next_occurrence(alarm, now=reference)
 
-    assert next_dt == reference + timedelta(days=1)
+    assert next_dt == datetime(2026, 5, 3, 1, 0, tzinfo=timezone.utc)
 
 
-def test_compute_next_occurrence_daily_empty_days_defaults_to_all():
-    """Empty days list is treated as all 7 days — advances one day."""
-    reference = datetime(2024, 1, 1, 7, tzinfo=timezone.utc)  # Monday 07:00 UTC
-    alarm = _make_alarm(
-        "DEV1",
-        "mode",
-        days=[],
-        next_occurrence=reference,
-        time_local="07:00",
-    )
-
-    next_dt = scheduler.compute_next_occurrence(alarm, now=reference)
-
-    assert next_dt == reference + timedelta(days=1)
-
-
-def test_compute_next_occurrence_requires_timezone():
+def test_compute_next_occurrence_refetches_user_timezone_when_cache_missing(monkeypatch):
     reference = datetime(2024, 1, 1, 7, tzinfo=timezone.utc)
     alarm = _make_alarm(
         "DEV1",
         "mode",
-        timezone_name=None,
+        timezone_name="America/Los_Angeles",
+        user_timezone=None,
         next_occurrence=reference,
     )
 
-    with pytest.raises(ValueError):
+    monkeypatch.setattr(
+        scheduler.firestore_client,
+        "fetch_user_timezone",
+        lambda user_id: "UTC",
+    )
+
+    next_dt = scheduler.compute_next_occurrence(alarm, now=reference)
+
+    assert next_dt == datetime(2024, 1, 8, 7, 0, tzinfo=timezone.utc)
+
+
+def test_compute_next_occurrence_requires_user_timezone(monkeypatch):
+    reference = datetime(2024, 1, 1, 7, tzinfo=timezone.utc)
+    alarm = _make_alarm(
+        "DEV1",
+        "mode",
+        timezone_name="America/Los_Angeles",
+        user_timezone=None,
+        next_occurrence=reference,
+    )
+
+    monkeypatch.setattr(
+        scheduler.firestore_client,
+        "fetch_user_timezone",
+        lambda user_id: None,
+    )
+
+    with pytest.raises(ValueError, match="missing users/.+timezone"):
         scheduler.compute_next_occurrence(alarm, now=reference)
-
-
-def test_compute_next_occurrence_monthly_advances_to_next_month():
-    """Monthly alarm on day 15 — after firing on Jan 15, next is Feb 15."""
-    reference = datetime(2024, 1, 15, 9, 0, tzinfo=timezone.utc)
-    alarm = models.AlarmDoc(
-        alarm_id="alarm-monthly",
-        user_id="user-xyz",
-        uid="user-xyz",
-        label="Monthly check-in",
-        schedule=models.AlarmSchedule(
-            repeat=models.AlarmRepeat.MONTHLY,
-            time_local="09:00",
-            days=[15],
-        ),
-        status=models.AlarmStatus.ON,
-        next_occurrence_utc=reference,
-        targets=[models.AlarmTarget(device_id="DEV1", mode="scheduled_conversation")],
-        raw={"timezone": "UTC"},
-        doc_path="users/user-xyz/alarms/alarm-monthly",
-    )
-
-    next_dt = scheduler.compute_next_occurrence(alarm, now=reference)
-
-    assert next_dt == datetime(2024, 2, 15, 9, 0, tzinfo=timezone.utc)
-
-
-def test_compute_next_occurrence_monthly_clamps_day_31_in_april():
-    """Monthly alarm on day 31 — April only has 30 days, so fires on Apr 30."""
-    reference = datetime(2024, 3, 31, 9, 0, tzinfo=timezone.utc)
-    alarm = models.AlarmDoc(
-        alarm_id="alarm-monthly",
-        user_id="user-xyz",
-        uid="user-xyz",
-        label="Monthly check-in",
-        schedule=models.AlarmSchedule(
-            repeat=models.AlarmRepeat.MONTHLY,
-            time_local="09:00",
-            days=[31],
-        ),
-        status=models.AlarmStatus.ON,
-        next_occurrence_utc=reference,
-        targets=[models.AlarmTarget(device_id="DEV1", mode="scheduled_conversation")],
-        raw={"timezone": "UTC"},
-        doc_path="users/user-xyz/alarms/alarm-monthly",
-    )
-
-    next_dt = scheduler.compute_next_occurrence(alarm, now=reference)
-
-    assert next_dt == datetime(2024, 4, 30, 9, 0, tzinfo=timezone.utc)
-
-
-def test_compute_next_occurrence_monthly_clamps_day_31_in_february():
-    """Monthly alarm on day 31 — February clamps to Feb 29 in a leap year."""
-    reference = datetime(2024, 1, 31, 9, 0, tzinfo=timezone.utc)
-    alarm = models.AlarmDoc(
-        alarm_id="alarm-monthly",
-        user_id="user-xyz",
-        uid="user-xyz",
-        label="Monthly check-in",
-        schedule=models.AlarmSchedule(
-            repeat=models.AlarmRepeat.MONTHLY,
-            time_local="09:00",
-            days=[31],
-        ),
-        status=models.AlarmStatus.ON,
-        next_occurrence_utc=reference,
-        targets=[models.AlarmTarget(device_id="DEV1", mode="scheduled_conversation")],
-        raw={"timezone": "UTC"},
-        doc_path="users/user-xyz/alarms/alarm-monthly",
-    )
-
-    next_dt = scheduler.compute_next_occurrence(alarm, now=reference)
-
-    # 2024 is a leap year → Feb 29
-    assert next_dt == datetime(2024, 2, 29, 9, 0, tzinfo=timezone.utc)

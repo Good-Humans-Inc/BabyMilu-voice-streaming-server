@@ -12,6 +12,7 @@ from core.utils.firestore_client import (
     get_user_profile_by_phone,
     extract_user_profile_fields,
 )
+from core.utils.next_starter_client import ensure_character_memory_record
 
 DB_PATH = os.environ.get("CHAT_DB_PATH", "/opt/xiaozhi-esp32-server/data/conversations.db")
 
@@ -937,3 +938,23 @@ class ChatStore:
             if self.logger:
                 self.logger.error(f"[ChatStore] get_system_memory_block failed: {e}")
         return ""
+
+    def ensure_character_memory_record(
+        self,
+        character_id: str,
+        *,
+        owner_user_id: str = "",
+        device_id: str = "",
+    ) -> bool:
+        try:
+            return ensure_character_memory_record(
+                character_id,
+                owner_user_id=owner_user_id,
+                last_device_id=device_id,
+            )
+        except Exception as e:
+            if self.logger:
+                self.logger.error(
+                    f"[ChatStore] ensure_character_memory_record failed for character_id={character_id}: {e}"
+                )
+        return False

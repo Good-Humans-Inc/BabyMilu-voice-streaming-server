@@ -13,13 +13,14 @@ logger = setup_logging()
 
 class ASRProvider(ASRProviderBase):
     def __init__(self, config: dict, delete_audio_file: bool):
+        super().__init__()
         self.interface_type = InterfaceType.NON_STREAM
         self.api_key = config.get("api_key")
         self.api_url = config.get("base_url")
-        self.model = config.get("model_name")        
+        self.model = config.get("model_name")
         self.output_dir = config.get("output_dir")
         self.language = config.get("language")  # Optional: ISO-639-1 format (e.g., "en")
-        self.delete_audio_file = delete_audio_file
+        self.configure_audio_retention(config, delete_audio_file)
 
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -42,12 +43,12 @@ class ASRProvider(ASRProviderBase):
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
             }
-            
+
             # 使用data参数传递模型名称和可选的语言参数
             data = {
                 "model": self.model
             }
-            
+
             # 如果配置了语言参数，添加到请求中
             if self.language:
                 data["language"] = self.language
@@ -74,16 +75,9 @@ class ASRProvider(ASRProviderBase):
                 return text, file_path
             else:
                 raise Exception(f"API请求失败: {response.status_code} - {response.text}")
-                
+
         except Exception as e:
             logger.bind(tag=TAG).error(f"语音识别失败: {e}")
             return "", None
         finally:
-            # 文件清理逻辑
-            if self.delete_audio_file and file_path and os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                    logger.bind(tag=TAG).debug(f"已删除临时音频文件: {file_path}")
-                except Exception as e:
-                    logger.bind(tag=TAG).error(f"文件删除失败: {file_path} | 错误: {e}")
-        
+            self.finalize_audio_file(file_path, session_id)

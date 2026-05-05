@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+import os
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from zoneinfo import ZoneInfo
@@ -43,6 +44,21 @@ session_context_store.set_expiry_callback(_on_session_expire)
 _DAY_TO_INDEX = {name: idx for idx, name in enumerate(models.DAY_NAMES)}
 
 
+def _parse_user_set(raw: str) -> set[str]:
+    return {token.strip() for token in (raw or "").split(",") if token.strip()}
+
+
+def _is_alarm_user_allowed(user_id: str) -> bool:
+    allowed = _parse_user_set(os.environ.get("ALARM_USER_ALLOWLIST", ""))
+    denied = _parse_user_set(os.environ.get("ALARM_USER_DENYLIST", ""))
+    normalized = (user_id or "").strip()
+    if normalized in denied:
+        return False
+    if not allowed:
+        return True
+    return normalized in allowed
+
+
 def prepare_wake_requests(
     now: datetime,
     lookahead: timedelta,
@@ -67,6 +83,11 @@ def prepare_wake_requests(
         if not alarm.targets:
             logger.bind(tag=TAG).warning(
                 f"Alarm {alarm.alarm_id} has no targets; skipping"
+            )
+            continue
+        if not _is_alarm_user_allowed(alarm.user_id):
+            logger.bind(tag=TAG).info(
+                f"Skipping alarm {alarm.alarm_id}: user {alarm.user_id} not allowed"
             )
             continue
         for target in alarm.targets:
@@ -212,14 +233,18 @@ def compute_next_occurrence(
 
 
 def _resolve_timezone(alarm: models.AlarmDoc) -> str:
+    tz_name = (alarm.user_timezone or "").strip()
     raw = alarm.raw or {}
-    tz_name = raw.get("timezone")
+    if not tz_name:
+        tz_name = raw.get("timezone")
     if not tz_name:
         user_block = raw.get("user")
         if isinstance(user_block, dict):
             tz_name = user_block.get("timezone")
     if not tz_name:
+        tz_name = (firestore_client.fetch_user_timezone(alarm.user_id) or "").strip()
+    if not tz_name:
         raise ValueError(
-            f"Alarm {alarm.alarm_id} (user={alarm.user_id}) missing timezone metadata."
+            f"Alarm {alarm.alarm_id} (user={alarm.user_id}) missing users/{alarm.user_id}.timezone."
         )
     return tz_name
