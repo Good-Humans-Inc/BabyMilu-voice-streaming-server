@@ -58,6 +58,7 @@ def test_ensure_character_memory_record_posts_create_when_row_missing(monkeypatc
     assert calls["json"]["owner_user_id"] == "+15551234567"
     assert calls["json"]["last_device_id"] == "90:e5:b1:00:00:01"
     assert calls["json"]["next_starter"] is None
+    assert calls["json"]["starter_fallback"] is None
 
 
 def test_ensure_character_memory_record_patches_existing_row_without_clearing_starter(
@@ -245,3 +246,53 @@ def test_get_ready_next_starter_allows_text_only_payload(monkeypatch):
 
     assert payload is not None
     assert payload["text"] == "Hey, tell me more."
+
+
+def test_get_ready_next_starter_falls_back_to_hi_audio(monkeypatch):
+    from core.utils import next_starter_client as client
+
+    monkeypatch.setenv("NEXT_STARTER_MAX_AGE_DAYS", "7")
+    monkeypatch.setenv("STARTER_FALLBACK_MAX_AGE_DAYS", "3650")
+    monkeypatch.setattr(
+        client,
+        "_fetch_next_starter_row",
+        lambda cid: (
+            {
+                "next_starter": None,
+                "starter_fallback": {
+                    "status": "ready",
+                    "characterId": cid,
+                    "text": "Hi, how's everything going?",
+                    "audioUrl": "https://example.supabase.co/storage/v1/object/public/next-starter-audio/char_123/fallback-hi.mp3",
+                    "audioFormat": "mp3",
+                    "generatedAt": "2026-05-01T07:00:00+00:00",
+                    "sourceType": "fallback_hi",
+                },
+            },
+            "https://example.supabase.co",
+            "service-role",
+            2.0,
+        ),
+    )
+
+    payload = client.get_ready_next_starter("char_123")
+
+    assert payload is not None
+    assert payload["sourceType"] == "fallback_hi"
+    assert payload["audioUrl"].endswith("fallback-hi.mp3")
+
+
+def test_mark_next_starter_consumed_ignores_hi_fallback():
+    from core.utils import next_starter_client as client
+
+    ok = client.mark_next_starter_consumed(
+        "char_123",
+        {
+            "status": "ready",
+            "characterId": "char_123",
+            "sourceType": "fallback_hi",
+            "generatedAt": "2026-05-01T07:00:00+00:00",
+        },
+    )
+
+    assert ok is False
