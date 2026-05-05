@@ -5,7 +5,7 @@ from datetime import datetime
 
 from plugins_func.register import register_function, ToolType, ActionResponse, Action
 from core.utils.firestore_client import get_timezone_for_device, get_owner_phone_for_device
-from services.alarms.firestore_client import create_scheduled_conversation
+from services.alarms.firestore_client import create_scheduled_conversation, write_alarm_outcome
 from config.logger import setup_logging
 
 TAG = __name__
@@ -280,7 +280,6 @@ def _maybe_write_snoozed_outcome(conn) -> None:
         uid = session_config.get("userId")
         if not alarm_id or not uid:
             return
-        from services.alarms.firestore_client import write_alarm_outcome
         write_alarm_outcome(uid, alarm_id, "snoozed")
         logger.bind(tag=TAG).info(
             f"Wrote outcome='snoozed' for alarm {alarm_id} (device={conn.device_id})"

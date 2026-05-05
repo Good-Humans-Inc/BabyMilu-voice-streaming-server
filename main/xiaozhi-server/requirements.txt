@@ -21,7 +21,7 @@ cozepy==0.19.0
 mem0ai==0.1.62
 bs4==0.0.2
 modelscope==1.23.2
-sherpa_onnx==1.12.19
+sherpa_onnx==1.12.40
 mcp==1.13.1
 cnlunar==0.2.0
 PySocks==1.7.1
@@ -37,6 +37,8 @@ portalocker==3.2.0
 Jinja2==3.1.6
 vosk==0.3.45
 google-cloud-firestore==2.17.0
+firebase-admin==6.6.0
+exponent-server-sdk==2.1.0
 elevenlabs==2.23.0
 paho-mqtt==2.1.0
 pytest==9.0.1

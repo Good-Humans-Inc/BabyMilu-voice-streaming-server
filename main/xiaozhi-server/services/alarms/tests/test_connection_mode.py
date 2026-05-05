@@ -89,7 +89,7 @@ def test_apply_mode_session_settings_injects_reminder_context(monkeypatch):
 
     assert "WAKE UP" in conn.mode_specific_instructions
     assert 'The user asked to be reminded about: "water plants".' in conn.mode_specific_instructions
-    assert "Mention this reason explicitly in your very first sentence." in conn.mode_specific_instructions
+    assert "Your very first spoken sentence must already contain the reminder reason." in conn.mode_specific_instructions
 
 
 # ---------------------------------------------------------------------------

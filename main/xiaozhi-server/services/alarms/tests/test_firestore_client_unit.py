@@ -21,7 +21,7 @@ class _FakeClient:
         self._docs = docs
 
     def collection_group(self, name):
-        assert name == "reminders"
+        assert name == "alarms"
         return _FakeQuery(self._docs)
 
     def collection(self, name):
