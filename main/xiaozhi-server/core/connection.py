@@ -399,7 +399,27 @@ class ConnectionHandler:
         if not self.device_id:
             return self.active_character_id if preserve_existing else None
 
-        char_id = get_active_character_for_device(self.device_id)
+        char_id = None
+        try:
+            prompt_build_up = self.chat_store.get_prompt_build_up(self.device_id)
+            prompt_character_id = prompt_build_up.get("character_id")
+            if prompt_character_id:
+                char_id = str(prompt_character_id)
+                self.logger.bind(tag=TAG, device_id=self.device_id).info(
+                    f"Resolved character_id from prompt_build_up: {char_id}"
+                )
+        except Exception as e:
+            self.logger.bind(tag=TAG, device_id=self.device_id).warning(
+                f"prompt_build_up character lookup failed: {e}"
+            )
+
+        if not char_id:
+            char_id = get_active_character_for_device(self.device_id)
+            if char_id and log_fallback:
+                self.logger.bind(tag=TAG, device_id=self.device_id).warning(
+                    f"prompt_build_up character_id missing; falling back to activeCharacterId={char_id}"
+                )
+
         if not char_id:
             fallback_id = get_most_recent_character_via_user_for_device(
                 self.device_id
@@ -407,7 +427,7 @@ class ConnectionHandler:
             if fallback_id:
                 if log_fallback:
                     self.logger.bind(tag=TAG, device_id=self.device_id).warning(
-                        f"activeCharacterId missing; falling back to {fallback_id}"
+                        f"prompt_build_up and activeCharacterId missing; falling back to most recent user character={fallback_id}"
                     )
                 char_id = fallback_id
 
@@ -606,7 +626,9 @@ class ConnectionHandler:
 
             # Optional test override for server-side debugging.
             # Priority: env TEST_DEVICE_ID > config.test_device_id > request header.
-            forced_device_id = "PA:TR:IC:KL:IU:03"
+            forced_device_id = os.getenv("TEST_DEVICE_ID") or self.config.get(
+                "test_device_id"
+            )
             if isinstance(forced_device_id, str) and forced_device_id.strip():
                 self.device_id = forced_device_id.strip().lower()
                 self.logger.bind(tag=TAG).warning(
@@ -800,7 +822,8 @@ class ConnectionHandler:
                     session_id=self.session_id,
                     user_id=self.user_id,
                     user_name=self.user_name,
-                    device_id=self.device_id
+                    device_id=self.device_id,
+                    character_id=self.active_character_id,
                 )
 
 

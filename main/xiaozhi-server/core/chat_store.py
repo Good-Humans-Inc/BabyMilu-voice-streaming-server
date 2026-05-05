@@ -111,6 +111,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "sessions", "memory_status_user", "TEXT")
     _add_column_if_missing(conn, "sessions", "memory_status_character", "TEXT")
     _add_column_if_missing(conn, "sessions", "turns", "TEXT")
+    _add_column_if_missing(conn, "sessions", "character_id", "TEXT")
     _add_column_if_missing(conn, "turns", "created_at", "TEXT")
     _add_column_if_missing(conn, "users", "device_ids", "TEXT")
 
@@ -166,20 +167,21 @@ class SQLiteChatStore:
                 (user_id, name, merged_device_ids),
             )
 
-    def create_session(self, *, session_id, user_id, user_name, device_id):
+    def create_session(self, *, session_id, user_id, user_name, device_id, character_id=None):
         if self.logger:
             self.logger.info(
-                f"[ChatStore:sqlite] create_session(session_id={session_id}, user_id={user_id}, user_name={user_name})"
+                f"[ChatStore:sqlite] create_session(session_id={session_id}, user_id={user_id}, user_name={user_name}, character_id={character_id})"
             )
         with get_db() as db:
             cur = db.execute(
                 """
-                INSERT INTO sessions (session_id, user_name, user_id, device_id, created_at, start_time, last_active_at, turns)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO sessions (session_id, user_name, user_id, device_id, character_id, created_at, start_time, last_active_at, turns)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     user_name = excluded.user_name,
                     user_id = excluded.user_id,
                     device_id = excluded.device_id,
+                    character_id = COALESCE(excluded.character_id, sessions.character_id),
                     created_at = excluded.created_at,
                     start_time = excluded.start_time,
                     end_time = NULL,
@@ -194,6 +196,7 @@ class SQLiteChatStore:
                     user_name,
                     user_id,
                     device_id,
+                    character_id,
                     _now_iso(),
                     _now_iso(),
                     _now_iso(),
@@ -723,10 +726,10 @@ class SupabaseChatStore:
                     f"[ChatStore:supabase] ensure user_memory_model failed for user_id={user_id}: {e}"
                 )
 
-    def create_session(self, *, session_id, user_id, user_name, device_id):
+    def create_session(self, *, session_id, user_id, user_name, device_id, character_id=None):
         if self.logger:
             self.logger.info(
-                f"[ChatStore:supabase] create_session(session_id={session_id}, user_id={user_id}, user_name={user_name})"
+                f"[ChatStore:supabase] create_session(session_id={session_id}, user_id={user_id}, user_name={user_name}, character_id={character_id})"
             )
         now_iso = _now_iso()
         payload = {
@@ -739,26 +742,31 @@ class SupabaseChatStore:
             "last_active_at": now_iso,
             "turns": [],
         }
+        if character_id is not None:
+            payload["character_id"] = character_id
         try:
             self._insert(self.sessions_table, payload)
         except RuntimeError as e:
             if "status=409" in str(e):
+                update_payload = {
+                    "user_name": user_name,
+                    "user_id": user_id,
+                    "device_id": device_id,
+                    "created_at": now_iso,
+                    "start_time": now_iso,
+                    "end_time": None,
+                    "analysis_status": None,
+                    "last_active_at": now_iso,
+                    "memory_status_user": None,
+                    "memory_status_character": None,
+                }
+                if character_id is not None:
+                    update_payload["character_id"] = character_id
                 self._update_eq(
                     self.sessions_table,
                     "session_id",
                     session_id,
-                    {
-                        "user_name": user_name,
-                        "user_id": user_id,
-                        "device_id": device_id,
-                        "created_at": now_iso,
-                        "start_time": now_iso,
-                        "end_time": None,
-                        "analysis_status": None,
-                        "last_active_at": now_iso,
-                        "memory_status_user": None,
-                        "memory_status_character": None,
-                    },
+                    update_payload,
                 )
             else:
                 raise
@@ -884,13 +892,14 @@ class ChatStore:
             if self.logger:
                 self.logger.error(f"[ChatStore] get_or_create_user failed: {e}")
 
-    def create_session(self, *, session_id, user_id, user_name, device_id):
+    def create_session(self, *, session_id, user_id, user_name, device_id, character_id=None):
         try:
             self.store.create_session(
                 session_id=session_id,
                 user_id=user_id,
                 user_name=user_name,
                 device_id=device_id,
+                character_id=character_id,
             )
         except Exception as e:
             if self.logger:
@@ -979,4 +988,3 @@ class ChatStore:
             if self.logger:
                 self.logger.error(f"[ChatStore] get_prompt_build_up failed: {e}")
         return {}
-
