@@ -25,7 +25,7 @@ class _FakeDocument:
     def set(self, data: dict, merge: bool = True):
         self.storage[self.key] = data
 
-    def get(self):
+    def get(self, **kwargs):
         return _FakeDocSnapshot(self.storage.get(self.key))
 
     def delete(self):

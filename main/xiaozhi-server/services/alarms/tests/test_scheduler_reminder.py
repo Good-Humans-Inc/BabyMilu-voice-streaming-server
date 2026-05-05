@@ -415,6 +415,7 @@ def test_plushie_session_hydration_includes_reminder_title(monkeypatch):
 
     assert sent is True
     assert created["session_type"] == "alarm"
+    assert created["session_config"]["mode"] == "scheduled_conversation"
     assert created["session_config"]["reminderId"] == "rem-123"
     assert created["session_config"]["label"] == "Drink water"
     assert created["session_config"]["title"] == "Drink water"

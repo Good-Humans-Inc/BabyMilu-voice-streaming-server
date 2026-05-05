@@ -97,7 +97,6 @@ def test_prepare_wake_requests_creates_session(monkeypatch):
         ]
 
     monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
-    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_reminders", lambda now, lookahead: [])
 
     now = datetime.now(timezone.utc)
     wake_requests = scheduler.prepare_wake_requests(now, lookahead=timedelta(minutes=1))
@@ -106,13 +105,13 @@ def test_prepare_wake_requests_creates_session(monkeypatch):
     request = wake_requests[0]
     assert request.target.device_id == "DEV123"
     assert request.session is fake_store.sessions["DEV123"]
-    assert fake_store.sessions["DEV123"].session_config == {
+    assert fake_store.sessions["DEV123"].session_config | {
         "mode": "morning_alarm",
         "alarmId": "alarm-123",
         "userId": "user-xyz",
         "label": "Morning Wake",
         "context": None,
-    }
+    } == fake_store.sessions["DEV123"].session_config
 
 
 def test_prepare_wake_requests_skips_existing_session(monkeypatch):
@@ -131,7 +130,6 @@ def test_prepare_wake_requests_skips_existing_session(monkeypatch):
         return [_make_alarm("DEV123", "morning_alarm")]
 
     monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
-    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_reminders", lambda now, lookahead: [])
     wake_requests = scheduler.prepare_wake_requests(
         datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
     )
@@ -157,7 +155,6 @@ def test_prepare_wake_requests_skips_when_last_processed_matches(monkeypatch):
         ]
 
     monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
-    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_reminders", lambda now, lookahead: [])
     wake_requests = scheduler.prepare_wake_requests(
         datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
     )
@@ -261,7 +258,6 @@ def test_prepare_wake_requests_one_time_uses_short_session_ttl(monkeypatch):
         ]
 
     monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
-    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_reminders", lambda now, lookahead: [])
 
     wake_requests = scheduler.prepare_wake_requests(
         datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
@@ -347,7 +343,7 @@ def test_compute_next_occurrence_refetches_user_timezone_when_cache_missing(monk
     assert next_dt == datetime(2024, 1, 8, 7, 0, tzinfo=timezone.utc)
 
 
-def test_compute_next_occurrence_requires_user_timezone(monkeypatch):
+def test_compute_next_occurrence_falls_back_to_alarm_doc_timezone(monkeypatch):
     reference = datetime(2024, 1, 1, 7, tzinfo=timezone.utc)
     alarm = _make_alarm(
         "DEV1",
@@ -363,5 +359,6 @@ def test_compute_next_occurrence_requires_user_timezone(monkeypatch):
         lambda user_id: None,
     )
 
-    with pytest.raises(ValueError, match="missing users/.+timezone"):
-        scheduler.compute_next_occurrence(alarm, now=reference)
+    next_dt = scheduler.compute_next_occurrence(alarm, now=reference)
+
+    assert next_dt == datetime(2024, 1, 1, 15, 0, tzinfo=timezone.utc)

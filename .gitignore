@@ -176,7 +176,7 @@ uploadfile
 *.json
 .vscode
 .cursor
- 
+
 !package.json
 !**/package.json
 
@@ -209,3 +209,6 @@ _build_alarms/
 # Shared smoke harness local state
 /tools/smoke/artifacts/
 /tools/smoke/environments/*.local.json
+
+# Local mock device credentials
+mock_device/sa.json

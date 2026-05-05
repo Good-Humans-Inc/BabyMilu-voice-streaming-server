@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Optional, Any
+from typing import Callable, Dict, Optional, Any
 
 from google.cloud import firestore
 
@@ -14,6 +14,15 @@ _UNSET = object()
 
 TAG = __name__
 logger = setup_logging()
+
+# Registered at startup by scheduler.py. Called when a session expires with
+# has_user_response=False so the ignored outcome can be written to Firestore.
+_on_session_expire: Optional[Callable[[models.ModeSession], None]] = None
+
+
+def set_expiry_callback(cb: Callable[[models.ModeSession], None]) -> None:
+    global _on_session_expire
+    _on_session_expire = cb
 
 
 class SessionContextStore:
@@ -27,7 +36,6 @@ class SessionContextStore:
         if self._firestore_client is None:
             creds_path = get_gcp_credentials_path()
             if creds_path:
-                # Explicitly set the env var to ensure it's used
                 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
             self._firestore_client = firestore.Client()
         return self._firestore_client
@@ -66,6 +74,7 @@ class SessionContextStore:
                 "sessionConfig": session.session_config,
                 "conversation": session.conversation,
                 "isSnoozeFollowUp": session.is_snooze_follow_up,
+                "hasUserResponse": False,
             },
             merge=True,
         )
@@ -88,7 +97,7 @@ class SessionContextStore:
                 f"Failed to get session from Firestore for {device_id}: {e}"
             )
             return None
-        
+
         if not doc.exists:
             return None
         data = doc.to_dict() or {}
@@ -100,9 +109,23 @@ class SessionContextStore:
                 f"SessionContext for {device_id} expired; delete={delete_if_expired}"
             )
             if delete_if_expired:
+                if not session.has_user_response and _on_session_expire is not None:
+                    try:
+                        _on_session_expire(session)
+                    except Exception as exc:
+                        logger.bind(tag=TAG).warning(
+                            f"Expiry callback failed for {device_id}: {exc}"
+                        )
                 self.delete_session(device_id)
             return None
         return session
+
+    def mark_user_responded(self, device_id: str) -> None:
+        """Flip hasUserResponse=True on the session doc. Call on first user message."""
+        self._collection().document(device_id).set(
+            {"hasUserResponse": True}, merge=True
+        )
+        logger.bind(tag=TAG).debug(f"Marked hasUserResponse=True for {device_id}")
 
     def delete_session(self, device_id: str) -> None:
         self._collection().document(device_id).delete()
@@ -154,9 +177,11 @@ class SessionContextStore:
         if not isinstance(conversation, dict):
             conversation = {}
         is_snooze_follow_up = bool(payload.get("isSnoozeFollowUp", False))
+        has_user_response = bool(payload.get("hasUserResponse", False))
         logger.bind(tag=TAG).debug(
             f"Hydrating session for {device_id}: conversation={conversation}, "
-            f"is_snooze_follow_up={is_snooze_follow_up}"
+            f"is_snooze_follow_up={is_snooze_follow_up}, "
+            f"has_user_response={has_user_response}"
         )
         try:
             return models.ModeSession(
@@ -168,6 +193,7 @@ class SessionContextStore:
                 session_config=session_config,
                 conversation=conversation,
                 is_snooze_follow_up=is_snooze_follow_up,
+                has_user_response=has_user_response,
             )
         except Exception as exc:
             logger.bind(tag=TAG).warning(
@@ -198,3 +224,6 @@ def delete_session(device_id: str) -> None:
 def update_session(device_id: str, **kwargs) -> None:
     _DEFAULT_STORE.update_session(device_id, **kwargs)
 
+
+def mark_user_responded(device_id: str) -> None:
+    _DEFAULT_STORE.mark_user_responded(device_id)

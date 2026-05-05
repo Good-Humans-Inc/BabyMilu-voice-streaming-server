@@ -17,7 +17,7 @@ class ASRProvider(ASRProviderBase):
         self.interface_type = InterfaceType.NON_STREAM
         self.api_key = config.get("api_key")
         self.api_url = config.get("base_url")
-        self.model = config.get("model_name")        
+        self.model = config.get("model_name")
         self.output_dir = config.get("output_dir")
         self.language = config.get("language")  # Optional: ISO-639-1 format (e.g., "en")
         self.configure_audio_retention(config, delete_audio_file)
@@ -43,12 +43,12 @@ class ASRProvider(ASRProviderBase):
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
             }
-            
+
             # 使用data参数传递模型名称和可选的语言参数
             data = {
                 "model": self.model
             }
-            
+
             # 如果配置了语言参数，添加到请求中
             if self.language:
                 data["language"] = self.language
@@ -75,10 +75,9 @@ class ASRProvider(ASRProviderBase):
                 return text, file_path
             else:
                 raise Exception(f"API请求失败: {response.status_code} - {response.text}")
-                
+
         except Exception as e:
             logger.bind(tag=TAG).error(f"语音识别失败: {e}")
             return "", None
         finally:
             self.finalize_audio_file(file_path, session_id)
-        
