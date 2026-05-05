@@ -377,6 +377,52 @@ class ConnectionHandler:
         if value is not None:
             self._followup_state.max = int(value)
 
+    def _set_active_character_id(self, character_id: Optional[str]) -> Optional[str]:
+        if not character_id:
+            self.active_character_id = None
+            self.current_character_id = None
+            return None
+
+        resolved_id = str(character_id)
+        self.active_character_id = resolved_id
+        self.current_character_id = resolved_id
+        return resolved_id
+
+    def _resolve_active_character_id(
+        self,
+        *,
+        preserve_existing: bool = True,
+        log_fallback: bool = True,
+        update_state: bool = True,
+    ) -> Optional[str]:
+        """Resolve the session character and keep connection state in sync."""
+        if not self.device_id:
+            return self.active_character_id if preserve_existing else None
+
+        char_id = get_active_character_for_device(self.device_id)
+        if not char_id:
+            fallback_id = get_most_recent_character_via_user_for_device(
+                self.device_id
+            )
+            if fallback_id:
+                if log_fallback:
+                    self.logger.bind(tag=TAG, device_id=self.device_id).warning(
+                        f"activeCharacterId missing; falling back to {fallback_id}"
+                    )
+                char_id = fallback_id
+
+        if char_id:
+            if not update_state:
+                return str(char_id)
+            return self._set_active_character_id(char_id)
+
+        if preserve_existing:
+            return self.active_character_id
+
+        if not update_state:
+            return None
+        return self._set_active_character_id(None)
+
     def _refresh_character_binding_if_needed(self, force: bool = False):
         """Refresh character-bound runtime fields (voice/prompt) on active connections.
 
@@ -405,9 +451,10 @@ class ConnectionHandler:
             ):
                 return
 
-            char_id = get_active_character_for_device(self.device_id)
-            if not char_id:
-                char_id = get_most_recent_character_via_user_for_device(self.device_id)
+            char_id = self._resolve_active_character_id(
+                preserve_existing=True,
+                update_state=False,
+            )
             if not char_id:
                 self._last_profile_refresh_ms = now_ms
                 return
@@ -419,8 +466,7 @@ class ConnectionHandler:
             # Character changed (or forced refresh): update voice + prompt and invalidate cache
             old_char = self.current_character_id
             old_voice = self.voice_id
-            self.current_character_id = char_id
-            self.active_character_id = str(char_id)
+            self._set_active_character_id(char_id)
             self.next_starter_payload = None
             self.next_starter_scheduled = False
 
@@ -611,27 +657,13 @@ class ConnectionHandler:
             fields = {}
             firestore_profile_fetch_start = time.perf_counter()
             try:
-                char_id = None
                 if self.device_id:
                     self.logger.bind(tag=TAG).info(
                         f"🔍 Looking up device: {self.device_id}"
                     )
-                    char_id = get_active_character_for_device(self.device_id)
-                    # persist active character id on the connection for downstream use
-                    self.active_character_id = char_id
-                    if not char_id:
-                        fallback_id = (
-                            get_most_recent_character_via_user_for_device(
-                                self.device_id
-                            )
-                        )
-                        if fallback_id:
-                            self.logger.bind(
-                                tag=TAG, device_id=self.device_id
-                            ).warning(
-                                f"activeCharacterId missing; falling back to {fallback_id}"
-                            )
-                            char_id = fallback_id
+                char_id = self._resolve_active_character_id(
+                    preserve_existing=False
+                )
 
                 if char_id:
                     self.logger.bind(tag=TAG, device_id=self.device_id).info(f"Active character id: {char_id!r}")
@@ -1368,18 +1400,9 @@ Return ONLY the JSON array, no other explanation."""
                         
                         # Build list of coroutines to run
                         coroutines = [self.memory.save_memory(self.dialogue.dialogue)]
-                        char_id = None
-                        if self.device_id:
-                            char_id = get_active_character_for_device(self.device_id)
-                            # persist active character id on the connection for downstream use
-                            self.active_character_id = char_id
-                            if not char_id:
-                                fallback_id = get_most_recent_character_via_user_for_device(self.device_id)
-                                if fallback_id:
-                                    self.logger.bind(tag=TAG, device_id=self.device_id).warning(
-                                        f"activeCharacterId missing; falling back to most recent user character: {fallback_id}"
-                                    )
-                                    char_id = fallback_id
+                        char_id = self._resolve_active_character_id(
+                            preserve_existing=True
+                        )
                         if char_id:
                             self.logger.bind(tag=TAG, device_id=self.device_id).info(f"Active character id: {char_id!r}")
                             char_doc = get_character_profile(char_id)
@@ -1424,7 +1447,14 @@ Return ONLY the JSON array, no other explanation."""
                         )
                         self.chat_store.delete_session(self.session_id)
                     else:
-                        self.chat_store.end_session(self.session_id, character_id=self.active_character_id)
+                        final_character_id = self._resolve_active_character_id(
+                            preserve_existing=True,
+                            log_fallback=False,
+                        )
+                        self.chat_store.end_session(
+                            self.session_id,
+                            character_id=final_character_id,
+                        )
                 finally:
                     self._session_closed = True
         except Exception as e:

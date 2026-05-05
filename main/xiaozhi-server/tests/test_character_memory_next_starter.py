@@ -218,6 +218,67 @@ def test_character_switch_refresh_reloads_next_starter(monkeypatch):
     ]
 
 
+def test_resolve_active_character_id_uses_fallback_and_updates_connection(
+    monkeypatch,
+):
+    import core.connection as conn_mod
+
+    monkeypatch.setattr(
+        conn_mod, "get_active_character_for_device", lambda did: None
+    )
+    monkeypatch.setattr(
+        conn_mod,
+        "get_most_recent_character_via_user_for_device",
+        lambda did: "char_fallback",
+    )
+
+    class FakeLogger:
+        def bind(self, **kwargs):
+            return self
+
+        def warning(self, *args, **kwargs):
+            return None
+
+    conn = SimpleNamespace()
+    conn.device_id = "device_aaa"
+    conn.active_character_id = None
+    conn.current_character_id = None
+    conn.logger = FakeLogger()
+
+    resolved = conn_mod.ConnectionHandler._resolve_active_character_id(
+        conn,
+        preserve_existing=False,
+    )
+
+    assert resolved == "char_fallback"
+    assert conn.active_character_id == "char_fallback"
+    assert conn.current_character_id == "char_fallback"
+
+
+def test_resolve_active_character_id_preserves_existing_when_lookup_empty(
+    monkeypatch,
+):
+    import core.connection as conn_mod
+
+    monkeypatch.setattr(
+        conn_mod, "get_active_character_for_device", lambda did: None
+    )
+    monkeypatch.setattr(
+        conn_mod, "get_most_recent_character_via_user_for_device", lambda did: None
+    )
+
+    conn = SimpleNamespace()
+    conn.device_id = "device_aaa"
+    conn.active_character_id = "char_existing"
+    conn.current_character_id = "char_existing"
+
+    resolved = conn_mod.ConnectionHandler._resolve_active_character_id(conn)
+
+    assert resolved == "char_existing"
+    assert conn.active_character_id == "char_existing"
+    assert conn.current_character_id == "char_existing"
+
+
 def test_get_ready_next_starter_allows_text_only_payload(monkeypatch):
     from core.utils import next_starter_client as client
 
