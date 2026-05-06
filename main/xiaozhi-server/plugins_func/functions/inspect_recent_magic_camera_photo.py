@@ -263,7 +263,7 @@ def _extract_response_text(response: Any) -> str:
     return ""
 
 
-def _parse_analysis_json(text: str) -> Dict[str, Any]:
+def _extract_json_object(text: str) -> str:
     candidate = text.strip()
     if candidate.startswith("```"):
         candidate = candidate.strip("`")
@@ -274,7 +274,53 @@ def _parse_analysis_json(text: str) -> Dict[str, Any]:
     end = candidate.rfind("}")
     if start == -1 or end == -1 or end < start:
         raise ValueError("Vision model did not return JSON")
-    parsed = json.loads(candidate[start : end + 1])
+    return candidate[start : end + 1]
+
+
+def _escape_invalid_json_backslashes(text: str) -> str:
+    valid_escapes = {'"', "\\", "/", "b", "f", "n", "r", "t", "u"}
+    sanitized: List[str] = []
+    in_string = False
+    escaped = False
+    i = 0
+
+    while i < len(text):
+        char = text[i]
+
+        if not in_string:
+            sanitized.append(char)
+            if char == '"':
+                in_string = True
+            i += 1
+            continue
+
+        if escaped:
+            sanitized.append(char)
+            escaped = False
+            i += 1
+            continue
+
+        if char == "\\":
+            next_char = text[i + 1] if i + 1 < len(text) else ""
+            if next_char in valid_escapes:
+                sanitized.append(char)
+                escaped = True
+            else:
+                sanitized.append("\\\\")
+            i += 1
+            continue
+
+        sanitized.append(char)
+        if char == '"':
+            in_string = False
+        i += 1
+
+    return "".join(sanitized)
+
+
+def _validate_analysis_payload(parsed: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(parsed, dict):
+        raise ValueError("Vision analysis JSON must be an object")
 
     required_keys = {
         "summary",
@@ -293,6 +339,20 @@ def _parse_analysis_json(text: str) -> Dict[str, Any]:
     if missing:
         raise ValueError(f"Vision analysis missing required keys: {', '.join(missing)}")
     return parsed
+
+
+def _parse_analysis_json(text: str) -> Dict[str, Any]:
+    candidate = _extract_json_object(text)
+    try:
+        return _validate_analysis_payload(json.loads(candidate))
+    except json.JSONDecodeError as exc:
+        sanitized = _escape_invalid_json_backslashes(candidate)
+        if sanitized != candidate:
+            try:
+                return _validate_analysis_payload(json.loads(sanitized))
+            except json.JSONDecodeError:
+                pass
+        raise ValueError(f"Vision model returned invalid JSON: {exc}") from exc
 
 
 def _analyze_magic_camera_photo(photo_url: str, conn: Any | None = None) -> Dict[str, Any]:

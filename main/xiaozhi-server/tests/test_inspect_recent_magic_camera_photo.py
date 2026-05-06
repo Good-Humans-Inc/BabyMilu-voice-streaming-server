@@ -114,6 +114,29 @@ def test_get_openai_client_falls_back_to_selected_llm_config(monkeypatch):
     }
 
 
+def test_parse_analysis_json_recovers_from_invalid_escape_sequences():
+    raw = r'''
+    {
+      "summary": "Monitor setup",
+      "detailed_description": "A command line shows C:\Users\yan and two screens.",
+      "notable_objects": ["dual monitors", "desk"],
+      "people_or_characters": [],
+      "colors": ["brown", "black"],
+      "composition": "Desk in foreground.",
+      "visible_text": ["C:\Users\yan"],
+      "style_cues": ["workspace"],
+      "mood_cues": ["focused"],
+      "grounded_interpretation_hints": ["The screens suggest active computer work."],
+      "uncertainties": []
+    }
+    '''
+
+    parsed = inspect_module._parse_analysis_json(raw)
+
+    assert parsed["summary"] == "Monitor setup"
+    assert parsed["visible_text"] == [r"C:\Users\yan"]
+
+
 def test_tool_returns_no_match_when_uid_is_missing(monkeypatch):
     monkeypatch.setattr(inspect_module, "get_owner_phone_for_device", lambda _: None)
 
