@@ -60,6 +60,9 @@ from services import log_context
 
 from core.utils.api_client import query_task, get_assigned_tasks_for_user, process_user_action
 TAG = __name__
+TOOL_WAIT_PLACEHOLDERS = {
+    "inspect_recent_magic_camera_photo": "hmmm",
+}
 
 auto_import_modules("plugins_func.functions")
 
@@ -2606,6 +2609,7 @@ Return ONLY the JSON array, no other explanation."""
                     "id": function_id,
                     "arguments": function_arguments,
                 }
+                self._maybe_emit_tool_wait_placeholder(function_name)
 
                 result = asyncio.run_coroutine_threadsafe(
                     self.func_handler.handle_llm_function_call(
@@ -2666,6 +2670,30 @@ Return ONLY the JSON array, no other explanation."""
         )
 
         return True
+
+    def _maybe_emit_tool_wait_placeholder(self, function_name):
+        placeholder = TOOL_WAIT_PLACEHOLDERS.get(function_name)
+        if not placeholder:
+            return
+        if self.tts is None:
+            return
+
+        play_interstitial = getattr(self.tts, "play_interstitial", None)
+        if not callable(play_interstitial):
+            self.logger.bind(tag=TAG).warning(
+                f"TTS provider does not support tool wait placeholder playback for {function_name}"
+            )
+            return
+
+        try:
+            play_interstitial(self, placeholder)
+            self.logger.bind(tag=TAG).info(
+                f"Emitted tool wait placeholder for {function_name}: {placeholder}"
+            )
+        except Exception as e:
+            self.logger.bind(tag=TAG).warning(
+                f"Failed to emit tool wait placeholder for {function_name}: {e}"
+            )
 
     def _handle_function_result(self, result, function_call_data, depth):
         using_conversation = False

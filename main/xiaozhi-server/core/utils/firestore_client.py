@@ -40,6 +40,11 @@ def _build_client() -> firestore.Client:
     return firestore.Client()
 
 
+def get_firestore_client() -> firestore.Client:
+    """Return the shared Firestore client configured for this server process."""
+    return _build_client()
+
+
 def _fetch_device_doc(client, device_id: str, timeout: float):
     """Fetch a Firestore device document with case-insensitive fallback.
 

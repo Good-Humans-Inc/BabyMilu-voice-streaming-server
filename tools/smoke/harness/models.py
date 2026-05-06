@@ -23,6 +23,7 @@ class EnvironmentConfig:
     compose_file: str = ""
     compose_service: str = "server"
     compose_workdir: str = "/opt/xiaozhi-esp32-server"
+    server_log_command_template: str = ""
     notes: str = ""
 
 

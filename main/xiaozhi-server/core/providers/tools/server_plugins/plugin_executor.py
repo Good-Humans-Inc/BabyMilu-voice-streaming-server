@@ -53,10 +53,26 @@ class ServerPluginExecutor(ToolExecutor):
         # 获取必要的函数
         necessary_functions = ["handle_exit_intent", "get_lunar"]
 
-        # 获取配置中的函数
-        config_functions = self.config["Intent"][
-            self.config["selected_module"]["Intent"]
-        ].get("functions", [])
+        # function-call tools are configured under LLM.function_call.functions.
+        llm_functions = (
+            self.config.get("LLM", {})
+            .get("function_call", {})
+            .get("functions", [])
+        )
+
+        # Some deployments also enable intent-side plugin functions; keep those too.
+        intent_module = self.config.get("selected_module", {}).get("Intent")
+        intent_functions = (
+            self.config.get("Intent", {})
+            .get(intent_module, {})
+            .get("functions", [])
+        )
+
+        config_functions = []
+        if isinstance(llm_functions, list):
+            config_functions.extend(llm_functions)
+        if isinstance(intent_functions, list):
+            config_functions.extend(intent_functions)
 
         # 转换为列表
         if not isinstance(config_functions, list):
