@@ -239,6 +239,7 @@ Intent:
       - play_music
       - set_alarm
       - set_reminder
+      - inspect_recent_magic_camera_photo
       - get_capabilities
       - self_introduction
       - lookup_recipe
