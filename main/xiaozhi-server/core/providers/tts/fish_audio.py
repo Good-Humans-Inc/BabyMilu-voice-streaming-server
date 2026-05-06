@@ -265,6 +265,12 @@ class TTSProvider(TTSProviderBase):
             output_rate=OPUS_SAMPLE_RATE,
         )
 
+    def play_interstitial(self, conn, text: str):
+        if not text or not text.strip():
+            return
+        self.conn = conn
+        asyncio.run(self.text_to_speak(text.strip(), is_last_segment=False))
+
     def _resolve_reference_id(self):
         reference_id, _ = self._resolve_reference_id_with_source()
         return reference_id

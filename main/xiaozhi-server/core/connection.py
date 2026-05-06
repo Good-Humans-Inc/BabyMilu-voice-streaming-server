@@ -2675,27 +2675,18 @@ Return ONLY the JSON array, no other explanation."""
         placeholder = TOOL_WAIT_PLACEHOLDERS.get(function_name)
         if not placeholder:
             return
-        if self.tts is None or not hasattr(self.tts, "tts_text_queue"):
+        if self.tts is None:
             return
 
-        original_tts_text = getattr(self, "tts_MessageText", "")
+        play_interstitial = getattr(self.tts, "play_interstitial", None)
+        if not callable(play_interstitial):
+            self.logger.bind(tag=TAG).warning(
+                f"TTS provider does not support tool wait placeholder playback for {function_name}"
+            )
+            return
+
         try:
-            self.tts_MessageText = placeholder
-            self.tts.tts_text_queue.put(
-                TTSMessageDTO(
-                    sentence_id=self.sentence_id,
-                    sentence_type=SentenceType.FIRST,
-                    content_type=ContentType.ACTION,
-                )
-            )
-            self.tts.tts_one_sentence(self, ContentType.TEXT, content_detail=placeholder)
-            self.tts.tts_text_queue.put(
-                TTSMessageDTO(
-                    sentence_id=self.sentence_id,
-                    sentence_type=SentenceType.LAST,
-                    content_type=ContentType.ACTION,
-                )
-            )
+            play_interstitial(self, placeholder)
             self.logger.bind(tag=TAG).info(
                 f"Emitted tool wait placeholder for {function_name}: {placeholder}"
             )
@@ -2703,8 +2694,6 @@ Return ONLY the JSON array, no other explanation."""
             self.logger.bind(tag=TAG).warning(
                 f"Failed to emit tool wait placeholder for {function_name}: {e}"
             )
-        finally:
-            self.tts_MessageText = original_tts_text
 
     def _handle_function_result(self, result, function_call_data, depth):
         using_conversation = False
