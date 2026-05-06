@@ -19,8 +19,8 @@ from plugins_func.functions import inspect_recent_magic_camera_photo as inspect_
 from plugins_func.register import Action
 
 
-def _conn(device_id: str = "AA:BB:CC:DD:EE:FF") -> SimpleNamespace:
-    return SimpleNamespace(device_id=device_id)
+def _conn(device_id: str = "AA:BB:CC:DD:EE:FF", config: dict | None = None) -> SimpleNamespace:
+    return SimpleNamespace(device_id=device_id, config=config or {})
 
 
 def _extract_payload(result) -> dict:
@@ -78,6 +78,40 @@ def test_select_photo_url_prefers_original_photo_url_over_processed_url():
     )
 
     assert selected_url == "https://example.com/original.png"
+
+
+def test_get_openai_client_falls_back_to_selected_llm_config(monkeypatch):
+    captured = {}
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.delenv("MAGIC_CAMERA_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("MAGIC_CAMERA_OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setattr(inspect_module, "OpenAI", FakeOpenAI)
+
+    conn = _conn(
+        config={
+            "selected_module": {"LLM": "OpenAILLM"},
+            "LLM": {
+                "OpenAILLM": {
+                    "type": "openai",
+                    "api_key": "config-openai-key",
+                    "base_url": "https://api.openai.com/v1",
+                }
+            },
+        }
+    )
+
+    inspect_module._get_openai_client(conn)
+
+    assert captured == {
+        "api_key": "config-openai-key",
+        "base_url": "https://api.openai.com/v1",
+    }
 
 
 def test_tool_returns_no_match_when_uid_is_missing(monkeypatch):
@@ -139,7 +173,7 @@ def test_tool_returns_analysis_payload_for_recent_photo(monkeypatch):
     monkeypatch.setattr(
         inspect_module,
         "_analyze_magic_camera_photo",
-        lambda photo_url: {
+        lambda photo_url, conn: {
             "summary": "A painted figurine sits on a desk.",
             "detailed_description": "The image shows a hand-painted figurine with blue accents on a light desk surface.",
             "notable_objects": ["painted figurine", "desk"],

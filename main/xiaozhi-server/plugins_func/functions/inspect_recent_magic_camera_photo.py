@@ -34,8 +34,12 @@ INSPECT_MAGIC_CAMERA_PHOTO_FUNCTION_DESC = {
     "function": {
         "name": "inspect_recent_magic_camera_photo",
         "description": (
-            "Use this when the user wants you to inspect, react to, discuss, or "
-            "interpret a recent photo taken with Magic Camera in the app. "
+            "Use this whenever the user wants you to inspect, react to, discuss, "
+            "or interpret a recent photo taken with Magic Camera in the app. "
+            "Also use it when the user refers to a photo, picture, image, "
+            "painting, drawing, artwork, selfie, or screenshot they just took, "
+            "sent, shared, uploaded, or want you to check, even if they do not "
+            "repeat the words Magic Camera in their latest sentence. "
             "The tool finds the most recent qualifying Magic Camera photo in the "
             "allowed recency window, analyzes it, and returns a rich grounded "
             "description for your in-character response. If no qualifying photo "
@@ -91,11 +95,65 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _get_openai_client() -> OpenAI:
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("Missing OPENAI_API_KEY environment variable")
-    return OpenAI(api_key=api_key)
+def _resolve_openai_client_config(conn: Any | None = None) -> Dict[str, str]:
+    env_api_key = (
+        os.environ.get("MAGIC_CAMERA_OPENAI_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or ""
+    ).strip()
+    env_base_url = (
+        os.environ.get("MAGIC_CAMERA_OPENAI_BASE_URL")
+        or os.environ.get("OPENAI_BASE_URL")
+        or ""
+    ).strip()
+    if env_api_key:
+        resolved = {"api_key": env_api_key}
+        if env_base_url:
+            resolved["base_url"] = env_base_url
+        return resolved
+
+    config = getattr(conn, "config", None) or {}
+    llm_config = config.get("LLM", {}) if isinstance(config, dict) else {}
+    selected_llm = (
+        config.get("selected_module", {}).get("LLM") if isinstance(config, dict) else None
+    )
+
+    candidate_names: List[str] = []
+    if selected_llm:
+        candidate_names.append(str(selected_llm))
+    if "OpenAILLM" not in candidate_names:
+        candidate_names.append("OpenAILLM")
+
+    for candidate_name in candidate_names:
+        candidate = llm_config.get(candidate_name)
+        if not isinstance(candidate, dict):
+            continue
+        if str(candidate.get("type") or "").strip().lower() != "openai":
+            continue
+
+        api_key = str(candidate.get("api_key") or "").strip()
+        if not api_key:
+            continue
+
+        resolved = {"api_key": api_key}
+        base_url = str(candidate.get("base_url") or candidate.get("url") or "").strip()
+        if base_url:
+            resolved["base_url"] = base_url
+        return resolved
+
+    raise RuntimeError(
+        "Missing Magic Camera OpenAI credentials in environment and selected LLM config"
+    )
+
+
+def _get_openai_client(conn: Any | None = None) -> OpenAI:
+    client_config = _resolve_openai_client_config(conn)
+    if client_config.get("base_url"):
+        return OpenAI(
+            api_key=client_config["api_key"],
+            base_url=client_config["base_url"],
+        )
+    return OpenAI(api_key=client_config["api_key"])
 
 
 def _normalize_datetime(value: Any) -> Optional[datetime]:
@@ -237,8 +295,8 @@ def _parse_analysis_json(text: str) -> Dict[str, Any]:
     return parsed
 
 
-def _analyze_magic_camera_photo(photo_url: str) -> Dict[str, Any]:
-    client = _get_openai_client()
+def _analyze_magic_camera_photo(photo_url: str, conn: Any | None = None) -> Dict[str, Any]:
+    client = _get_openai_client(conn)
     image_input = _download_image_as_data_url(photo_url)
     response = client.responses.create(
         model=OPENAI_MODEL,
@@ -312,7 +370,7 @@ def inspect_recent_magic_camera_photo(conn) -> ActionResponse:
             }
             return ActionResponse(action=Action.REQLLM, result=_build_tool_result(payload))
 
-        analysis = _analyze_magic_camera_photo(photo_url)
+        analysis = _analyze_magic_camera_photo(photo_url, conn)
         created_at = _normalize_datetime(photo.get("createdAt"))
         payload = {
             "status": "found",
