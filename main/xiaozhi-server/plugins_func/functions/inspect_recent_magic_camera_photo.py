@@ -122,7 +122,7 @@ def _normalize_datetime(value: Any) -> Optional[datetime]:
 
 
 def _select_photo_url(photo: Dict[str, Any]) -> Optional[str]:
-    for key in ("processedPhotoUrl", "photoUrl", "cardUrl"):
+    for key in ("photoUrl", "processedPhotoUrl", "cardUrl"):
         value = str(photo.get(key) or "").strip()
         if value:
             return value
@@ -266,7 +266,8 @@ def _build_tool_result(payload: Dict[str, Any]) -> str:
         "mention specific visible details, react with genuine feeling, add only "
         "light grounded interpretation, and invite the user's story when natural. "
         "If status is 'no_match', clearly say you couldn't find a recent Magic "
-        "Camera photo to inspect and ask the user to take one in the app. "
+        "Camera photo to inspect, ask the user to take one in the app, and say "
+        "you can patiently wait for them to come back with their masterpiece. "
         "If status is 'error', briefly say you couldn't look at the photo just now "
         "and invite them to try again."
     )

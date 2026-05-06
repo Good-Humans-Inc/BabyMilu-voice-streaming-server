@@ -68,6 +68,18 @@ def test_select_recent_magic_photo_skips_deleted_or_url_less_entries():
     assert selected is None
 
 
+def test_select_photo_url_prefers_original_photo_url_over_processed_url():
+    selected_url = inspect_module._select_photo_url(
+        {
+            "photoUrl": "https://example.com/original.png",
+            "processedPhotoUrl": "https://example.com/processed.png",
+            "cardUrl": "https://example.com/card.png",
+        }
+    )
+
+    assert selected_url == "https://example.com/original.png"
+
+
 def test_tool_returns_no_match_when_uid_is_missing(monkeypatch):
     monkeypatch.setattr(inspect_module, "get_owner_phone_for_device", lambda _: None)
 
