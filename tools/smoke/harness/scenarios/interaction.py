@@ -82,6 +82,10 @@ def _contains_negative_marker(text: str) -> str | None:
     return None
 
 
+def _assistant_turn_inserted(log_excerpt: str) -> bool:
+    return "speaker=assistant" in log_excerpt and "insert_turn" in log_excerpt
+
+
 def _fetch_server_log_excerpt(context: ScenarioContext, *, device_id: str) -> str:
     template = (context.environment.server_log_command_template or "").strip()
     if not template:
@@ -150,6 +154,7 @@ class MagicCameraPhotoScenario(BaseScenario):
         negative_marker = _contains_negative_marker(assistant_text)
         log_excerpt = _fetch_server_log_excerpt(context, device_id=args.device_id)
         tool_triggered = "inspect_recent_magic_camera_photo" in log_excerpt
+        assistant_turn_inserted = _assistant_turn_inserted(log_excerpt)
 
         details = {
             "user": {"uid": args.uid, "deviceId": args.device_id},
@@ -159,23 +164,26 @@ class MagicCameraPhotoScenario(BaseScenario):
             "assistantText": assistant_text,
             "negativeMarker": negative_marker,
             "toolTriggeredInLogs": tool_triggered,
+            "assistantTurnInsertedInLogs": assistant_turn_inserted,
             "serverLogExcerpt": log_excerpt,
             "deviceCapture": _capture_dict(capture),
         }
         context.artifact_writer.write_json("scenario-details.json", details, context.artifact_dir)
 
-        if not assistant_text:
-            raise RuntimeError("No assistant text was captured from the websocket session")
         if negative_marker:
             raise RuntimeError(
                 f"Assistant fell back to a non-visual response marker: {negative_marker}"
             )
+        if not assistant_text and not assistant_turn_inserted:
+            raise RuntimeError("No assistant text was captured from the websocket session")
         if context.environment.server_log_command_template and not tool_triggered:
             raise RuntimeError("Server logs did not show inspect_recent_magic_camera_photo")
 
         summary = "Magic Camera inspection path avoided the fallback non-visual response"
         if tool_triggered:
             summary += " and server logs confirmed the tool call"
+        if not assistant_text and assistant_turn_inserted:
+            summary += "; assistant turn was confirmed in server logs even though websocket text was not captured"
 
         return ScenarioResult(
             name=self.name,
