@@ -2027,37 +2027,100 @@ Return ONLY the JSON array, no other explanation."""
         )
 
         instructions = config.get("instructions", "")
-        instructions_file = config.get("instructions_file")
-        if instructions_file:
-            try:
-                with open(instructions_file, "r", encoding="utf-8") as fp:
-                    instructions = fp.read().strip()
-            except Exception as exc:
-                self.logger.bind(tag=TAG).warning(
-                    f"Failed to load mode instructions from {instructions_file}: {exc}"
-                )
+        if mode == "scheduled_conversation":
+            label = (
+                session_config.get("label")
+                or session_config.get("title")
+                or session_config.get("context")
+                or ""
+            ).strip()
+            content = (
+                session_config.get("content")
+                or session_config.get("context")
+                or label
+                or ""
+            ).strip()
+            character_reminder = (
+                session_config.get("characterReminder")
+                or "Review your character setting and remind the user in the way your character would."
+            ).strip()
+            emotional_context = (session_config.get("emotionalContext") or "none").strip()
+            delivery_pref = (session_config.get("deliveryPreference") or "none").strip()
+            type_hint = (session_config.get("typeHint") or "").strip()
+            priority = (session_config.get("priority") or "").strip()
+            conversation_outline = (
+                session_config.get("conversationOutline")
+                or "1. Remind the user: use the reminder title above as the meaning to convey. "
+                "Your very first spoken sentence must already contain the reminder reason. "
+                "2. Engage in conversation if the user wants to talk."
+            ).strip()
+            completion_signal = (session_config.get("completionSignal") or "").strip()
 
-        reminder_context = session_config.get("context")
-        if isinstance(reminder_context, str):
-            reminder_context = reminder_context.strip()
+            parts = []
+            if character_reminder:
+                parts.append(f"[CHARACTER REMINDER]\n{character_reminder}")
+            parts.append(
+                f"[CONTEXT FOR THIS CONVERSATION]\n"
+                f"Reminder title (as titled by the user): \"{label}\"\n"
+                f"Reminder content: \"{content}\"\n"
+                f"Emotional context: {emotional_context}\n"
+                f"Delivery preference: {delivery_pref}\n"
+                f"Type: {type_hint} | Priority: {priority}"
+            )
+            if conversation_outline:
+                parts.append(f"[CONVERSATION OUTLINE]\n{conversation_outline}")
+            if completion_signal:
+                parts.append(f"[COMPLETION SIGNAL]\n{completion_signal}")
+            parts.append(
+                "[SNOOZE INSTRUCTION]\n"
+                "If the user wants to delay this reminder, call schedule_conversation with "
+                "the new time and reuse the saved reminder fields. Snooze is always one-time."
+            )
+            parts.append(
+                "[OUTCOME INSTRUCTION]\n"
+                "When the conversation reaches its natural end, call complete_reminder "
+                "with outcome 'done' or 'resisting'. Do not call this for snooze."
+            )
+            instructions = "\n\n".join(parts)
+
+            from services.alarms.config import PRIORITY_FOLLOWUP_MAX
+
+            priority_key = (session_config.get("priority") or "medium").strip().lower()
+            priority_max = PRIORITY_FOLLOWUP_MAX.get(priority_key)
+            if priority_max is not None:
+                config["followup_max"] = priority_max
         else:
-            reminder_context = ""
-        if not reminder_context:
-            fallback_context = session_config.get("title") or session_config.get("label")
-            if isinstance(fallback_context, str):
-                reminder_context = fallback_context.strip()
+            instructions_file = config.get("instructions_file")
+            if instructions_file:
+                try:
+                    with open(instructions_file, "r", encoding="utf-8") as fp:
+                        instructions = fp.read().strip()
+                except Exception as exc:
+                    self.logger.bind(tag=TAG).warning(
+                        f"Failed to load mode instructions from {instructions_file}: {exc}"
+                    )
+
+            reminder_context = session_config.get("context")
+            if isinstance(reminder_context, str):
+                reminder_context = reminder_context.strip()
             else:
                 reminder_context = ""
-        if reminder_context:
-            # Make reminder purpose explicit in first-turn prompt guidance so
-            # server-initiated alarm speech consistently mentions the reason.
-            context_block = (
-                "\n\nReminder context:\n"
-                f"- The user asked to be reminded about: \"{reminder_context}\".\n"
-                "- Use this as the reminder meaning, not as raw text to parrot back.\n"
-                "- Your very first spoken sentence must already contain the reminder reason."
-            )
-            instructions = (instructions or "") + context_block
+            if not reminder_context:
+                fallback_context = session_config.get("title") or session_config.get("label")
+                if isinstance(fallback_context, str):
+                    reminder_context = fallback_context.strip()
+                else:
+                    reminder_context = ""
+            if reminder_context:
+                # Make reminder purpose explicit in first-turn prompt guidance so
+                # server-initiated alarm speech consistently mentions the reason.
+                context_block = (
+                    "\n\nReminder context:\n"
+                    f"- The user asked to be reminded about: \"{reminder_context}\".\n"
+                    "- Use this as the reminder meaning, not as raw text to parrot back.\n"
+                    "- Your very first spoken sentence must already contain the reminder reason."
+                )
+                instructions = (instructions or "") + context_block
 
         self.mode_specific_instructions = instructions
         self.server_initiate_chat = config.get("server_initiate_chat", False)
@@ -2367,12 +2430,21 @@ Return ONLY the JSON array, no other explanation."""
         #             f"Runtime character refresh failed (non-fatal): {e}"
         #         )
 
-        # Genuine user input cancels any pending follow-up
+        # Genuine user input cancels any pending follow-up and marks the session as engaged.
         if query and is_user_input:
             self.followup_user_has_responded = True
             if self.followup_task and not self.followup_task.done():
                 self.followup_task.cancel()
                 self.logger.bind(tag=TAG).info("User responded - cancelling follow-up")
+            if getattr(self, "mode_session", None) is not None:
+                try:
+                    from services.session_context.store import mark_user_responded
+
+                    mark_user_responded(self.device_id)
+                except Exception as exc:
+                    self.logger.bind(tag=TAG).warning(
+                        f"mark_user_responded failed (non-fatal): {exc}"
+                    )
 
         if depth == 0:
             self.sentence_id = str(uuid.uuid4().hex)

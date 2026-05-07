@@ -65,7 +65,12 @@ class ScheduledReminderScenario(BaseScenario):
         scheduler_response = None
         try:
             if args.trigger_mode == "invoke-function":
-                scheduler_response = trigger_scheduler(context.environment)
+                if capture_task:
+                    await asyncio.sleep(1.0)
+                scheduler_response = await asyncio.to_thread(
+                    trigger_scheduler,
+                    context.environment,
+                )
 
             final_doc = await _wait_for(
                 lambda: _reminder_ready(adapter, created.path, args.channel, args.repeat),
@@ -145,7 +150,11 @@ class ScheduledAlarmScenario(BaseScenario):
         scheduler_response = None
         try:
             if args.trigger_mode == "invoke-function":
-                scheduler_response = trigger_scheduler(context.environment)
+                await asyncio.sleep(1.0)
+                scheduler_response = await asyncio.to_thread(
+                    trigger_scheduler,
+                    context.environment,
+                )
 
             final_doc = await _wait_for(
                 lambda: _alarm_ready(adapter, created.path, args.repeat),

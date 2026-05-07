@@ -11,33 +11,29 @@ ALARM_TIMING = {
 
 # Default mode configuration for server-owned proactive sessions.
 # These values are referenced by the runtime when no per-session overrides exist.
+PRIORITY_FOLLOWUP_MAX: Dict[str, int] = {
+    "critical": 3,  # must-not-miss reminders such as medication
+    "high": 2,
+    "medium": 1,
+    "low": 0,
+}
+
 MODE_CONFIG: Dict[str, Dict[str, Any]] = {
     "morning_alarm": {
         "instructions_file": "services/alarms/mode_instructions/morning_alarm.txt",
         "server_initiate_chat": True,
-        # Alarm persistence: keep trying to wake user up.
-        # 1 initial + 2 follow-ups = 3 total voice messages.
+        # Alarm persistence: 1 initial + 2 follow-ups = 3 total voice messages.
         "followup_enabled": True,
-        "followup_delay": 10,  # seconds between follow-ups
+        "followup_delay": 10,
         "followup_max": 2,
         "use_separate_conversation": True,
     },
-    "reminder": {
-        # Inline instructions — no separate .txt file needed.
-        # The context block ("The user asked to be reminded about: X") is appended
-        # automatically by _apply_mode_session_settings() from session_config["context"].
-        "instructions": (
-            "You have one job: deliver the reminder stated in the context below "
-            "as a natural spoken reminder. "
-            "Your very first spoken sentence must already include the reminder reason. "
-            "Do not begin with filler, small talk, or a standalone greeting before the reminder reason. "
-            "Treat the reminder context as the meaning to convey, not as text to quote verbatim unless quoting is necessary. "
-            "Keep it clear, warm, and concise. After delivering it, wish the user well and end naturally. "
-            "Do not ask follow-up questions or continue the conversation."
-        ),
+    "scheduled_conversation": {
+        # Dynamic instructions are assembled from session_config fields at delivery.
         "server_initiate_chat": True,
-        # Only 1 voice message for reminders — no follow-ups.
-        "followup_enabled": False,
+        "followup_enabled": True,
+        "followup_delay": 10,
+        "followup_max": 1,
         "use_separate_conversation": True,
     },
 }

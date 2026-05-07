@@ -256,6 +256,35 @@ def _resolve_delivery_channels(reminder_data: Dict[str, Any]) -> List[str]:
     return normalized or [APP_CHANNEL]
 
 
+def _normalized_repeat(reminder_data: Dict[str, Any]) -> Optional[str]:
+    schedule = reminder_data.get("schedule") or {}
+    raw = schedule.get("repeat")
+    if raw is not None:
+        normalized = str(raw).strip().lower()
+        return normalized or None
+    days = schedule.get("days") or []
+    if not isinstance(days, list) or not days:
+        return None
+    if all(isinstance(day, int) for day in days):
+        return "monthly"
+    weekday_days = [day for day in days if isinstance(day, str)]
+    if len(weekday_days) == 7:
+        return "daily"
+    if weekday_days:
+        return "weekly"
+    return None
+
+
+def _is_one_time_reminder(reminder_data: Dict[str, Any]) -> bool:
+    repeat = _normalized_repeat(reminder_data)
+    if repeat in ONE_TIME_REPEATS:
+        return True
+    if repeat is None:
+        schedule = reminder_data.get("schedule") or {}
+        return not bool(schedule.get("days")) and bool(schedule.get("dateLocal"))
+    return False
+
+
 def _resolve_ws_url() -> str:
     return os.environ.get("ALARM_WS_URL") or os.environ.get("DEFAULT_WS_URL", "")
 
@@ -525,13 +554,21 @@ def _send_plushie_notification(
             ttl=REMINDER_SESSION_TTL,
             triggered_at=now,
             session_config={
-                "mode": target.get("mode") or "reminder",
+                "mode": "scheduled_conversation",
                 "alarmId": reminder_id,
                 "reminderId": reminder_id,
                 "userId": uid,
                 "title": label,
                 "label": label,
                 "context": reminder_data.get("context"),
+                "content": reminder_data.get("content"),
+                "typeHint": reminder_data.get("typeHint"),
+                "priority": reminder_data.get("priority"),
+                "conversationOutline": reminder_data.get("conversationOutline"),
+                "characterReminder": reminder_data.get("characterReminder"),
+                "emotionalContext": reminder_data.get("emotionalContext"),
+                "completionSignal": reminder_data.get("completionSignal"),
+                "deliveryPreference": reminder_data.get("deliveryPreference"),
                 "firstMessage": first_message,
             },
         )
@@ -566,8 +603,7 @@ def _build_finalize_updates(
     if plushie_sent:
         updates["lastDelivered.plushie.at"] = now_iso
 
-    repeat = str(reminder_data.get("schedule", {}).get("repeat", "")).strip().lower()
-    if repeat in ONE_TIME_REPEATS:
+    if _is_one_time_reminder(reminder_data):
         updates["status"] = "off"
         return updates
 
@@ -729,8 +765,7 @@ def run_send_reminder_push_job(
                 user_cache[uid] = user_snap.to_dict() or {}
             user_data = user_cache[uid]
             user_timezone = _resolve_user_timezone(user_data)
-            repeat = str(reminder_data.get("schedule", {}).get("repeat", "")).strip().lower()
-            if repeat not in ONE_TIME_REPEATS and not user_timezone:
+            if not _is_one_time_reminder(reminder_data) and not user_timezone:
                 skipped += 1
                 results.append(
                     {
