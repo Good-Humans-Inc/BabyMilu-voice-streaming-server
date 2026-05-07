@@ -23,6 +23,8 @@ async def _maybe_play_next_starter(conn) -> bool:
     starter_text = payload.get("text") or ""
     if not character_id or (not audio_url and not starter_text):
         return False
+    if getattr(conn, "active_mode", None) in {"scheduled_conversation", "morning_alarm"}:
+        return False
     if getattr(conn, "next_starter_scheduled", False):
         return False
 
