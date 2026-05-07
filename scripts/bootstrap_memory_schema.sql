@@ -59,6 +59,7 @@ create table if not exists public.character_memory_model (
   summary text,
   memory_state jsonb not null default '{}'::jsonb,
   next_starter jsonb,
+  starter_fallback jsonb,
   updated_at timestamptz not null default now()
 );
 
@@ -120,6 +121,7 @@ alter table public.character_memory_model
   add column if not exists summary text,
   add column if not exists memory_state jsonb not null default '{}'::jsonb,
   add column if not exists next_starter jsonb,
+  add column if not exists starter_fallback jsonb,
   add column if not exists updated_at timestamptz not null default now();
 
 alter table public.memory_jobs
