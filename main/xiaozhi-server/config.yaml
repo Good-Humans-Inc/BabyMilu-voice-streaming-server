@@ -238,7 +238,11 @@ Intent:
       - get_weather
       - play_music
       - set_alarm
-      - set_reminder
+      - schedule_conversation
+      - list_reminders
+      - cancel_reminder
+      - modify_reminder
+      - complete_reminder
       - inspect_recent_magic_camera_photo
       - get_capabilities
       - self_introduction

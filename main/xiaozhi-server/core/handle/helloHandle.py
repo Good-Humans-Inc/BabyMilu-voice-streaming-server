@@ -22,32 +22,44 @@ def _build_server_initiated_query(conn) -> str:
     mode_session = getattr(conn, "mode_session", None)
     session_config = (getattr(mode_session, "session_config", None) or {}) if mode_session else {}
     mode = session_config.get("mode")
-    if mode != "reminder":
+    if mode != "scheduled_conversation":
         return ""
 
-    reminder_context = session_config.get("context")
+    reminder_context = (
+        session_config.get("content")
+        or session_config.get("context")
+        or session_config.get("title")
+        or session_config.get("label")
+    )
     if isinstance(reminder_context, str):
         reminder_context = reminder_context.strip()
     else:
         reminder_context = ""
-    if not reminder_context:
-        fallback_context = session_config.get("title") or session_config.get("label")
-        if isinstance(fallback_context, str):
-            reminder_context = fallback_context.strip()
-        else:
-            reminder_context = ""
 
     if not reminder_context:
         return ""
 
+    first_message = session_config.get("firstMessage")
+    first_message_hint = ""
+    if isinstance(first_message, str) and first_message.strip():
+        first_message_hint = (
+            f" A precomputed reminder phrasing is available for context: {first_message.strip()}"
+        )
+
     return (
-        "Deliver the reminder naturally right now. "
+        "Start the scheduled conversation naturally right now. "
         f"The reminder reason is: {reminder_context}. "
         "Your first spoken sentence must already contain that reminder reason. "
         "Do not start with a standalone greeting before the reminder."
+        f"{first_message_hint}"
     )
 
 def _get_precomputed_reminder_message(conn) -> str:
+    """Legacy reminder sessions may provide a one-shot message.
+
+    Scheduled conversations should go through the LLM so they can use the rich
+    V1.4 prompt fields and call complete_reminder/schedule_conversation.
+    """
     mode_session = getattr(conn, "mode_session", None)
     session_config = (getattr(mode_session, "session_config", None) or {}) if mode_session else {}
     if session_config.get("mode") != "reminder":

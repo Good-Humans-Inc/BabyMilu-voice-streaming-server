@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import os
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
@@ -9,12 +10,36 @@ from services.logging import setup_logging
 from services.alarms import firestore_client, models, tasks
 from services.alarms.config import ALARM_TIMING
 from services.session_context import store as session_context_store
+from services.session_context.models import ModeSession
 
 TAG = __name__
 logger = setup_logging()
 SESSION_TYPE = "alarm"
 SESSION_TTL = ALARM_TIMING["session_ttl"]
 ONE_TIME_SESSION_TTL = ALARM_TIMING["one_time_session_ttl"]
+
+
+def _on_session_expire(session: ModeSession) -> None:
+    """Write lastOutcome='ignored' when a delivery session expires with no user response."""
+    session_config = session.session_config or {}
+    if session_config.get("mode") != "scheduled_conversation":
+        return
+    alarm_id = session_config.get("alarmId")
+    uid = session_config.get("userId")
+    if not alarm_id or not uid:
+        return
+    try:
+        firestore_client.write_alarm_outcome(uid, alarm_id, "ignored")
+        logger.bind(tag=TAG).info(
+            f"Wrote outcome='ignored' for alarm {alarm_id} (uid={uid}) on session expiry"
+        )
+    except Exception as exc:
+        logger.bind(tag=TAG).warning(
+            f"Failed to write ignored outcome for alarm {alarm_id}: {exc}"
+        )
+
+
+session_context_store.set_expiry_callback(_on_session_expire)
 
 _DAY_TO_INDEX = {name: idx for idx, name in enumerate(models.DAY_NAMES)}
 
@@ -39,8 +64,8 @@ def prepare_wake_requests(
     lookahead: timedelta,
     ) -> List[tasks.WakeRequest]:
     wake_requests: List[tasks.WakeRequest] = []
-    alarms = firestore_client.fetch_due_alarms(now, lookahead=lookahead)
-    for alarm in alarms:
+    all_docs = firestore_client.fetch_due_alarms(now, lookahead=lookahead)
+    for alarm in all_docs:
         if not alarm.next_occurrence_utc:
             logger.bind(tag=TAG).warning(
                 f"Alarm {alarm.alarm_id} missing next_occurrence_utc; skipping"
@@ -83,6 +108,15 @@ def prepare_wake_requests(
                 "userId": alarm.user_id,
                 "label": alarm.label,
                 "context": alarm.context,  # reason/purpose for the alarm conversation
+                # V0 scheduled_conversation fields — None for morning_alarm docs
+                "content": alarm.content,
+                "typeHint": alarm.type_hint,
+                "priority": alarm.priority,
+                "conversationOutline": alarm.conversation_outline,
+                "characterReminder": alarm.character_reminder,
+                "emotionalContext": alarm.emotional_context,
+                "completionSignal": alarm.completion_signal,
+                "deliveryPreference": alarm.delivery_preference,
             }
             ttl = (
                 ONE_TIME_SESSION_TTL
@@ -132,13 +166,42 @@ def compute_next_occurrence(
     ) -> datetime:
     tzinfo = ZoneInfo(_resolve_timezone(alarm))
     alarm_time = datetime.strptime(alarm.schedule.time_local, "%H:%M").time()
-    allowed_days = sorted({_DAY_TO_INDEX[day] for day in alarm.schedule.days})
-    if not allowed_days:
-        allowed_days = list(range(7))
 
     now_utc = now or datetime.now(timezone.utc)
     start_utc = max(alarm.next_occurrence_utc or now_utc, now_utc)
     start_local = start_utc.astimezone(tzinfo)
+
+    if alarm.schedule.repeat == models.AlarmRepeat.MONTHLY:
+        target_day = alarm.schedule.days[0] if alarm.schedule.days else start_local.day
+        # Iterate up to 13 months forward to find the next valid occurrence.
+        # Clamp to the last day of the month for short months (e.g. day 31 → April 30).
+        for month_offset in range(13):
+            total_months = (start_local.year * 12 + start_local.month - 1) + month_offset
+            year = total_months // 12
+            month = total_months % 12 + 1
+            last_day = calendar.monthrange(year, month)[1]
+            actual_day = min(target_day, last_day)
+            try:
+                candidate_local = datetime(
+                    year, month, actual_day, alarm_time.hour, alarm_time.minute, tzinfo=tzinfo
+                )
+                if candidate_local > start_local:
+                    result = candidate_local.astimezone(timezone.utc)
+                    logger.bind(tag=TAG).info(
+                        f"Next occurrence for alarm {alarm.alarm_id} (user={alarm.user_id}, "
+                        f"tz={tzinfo.key}, local={candidate_local.isoformat()}) "
+                        f"is {result.isoformat()} UTC"
+                    )
+                    return result
+            except ValueError:
+                continue
+        raise ValueError(
+            f"Failed to find next monthly occurrence for alarm {alarm.alarm_id}"
+        )
+
+    allowed_days = sorted({_DAY_TO_INDEX[day] for day in alarm.schedule.days})
+    if not allowed_days:
+        allowed_days = list(range(7))
 
     for delta in range(0, 8):
         candidate_date = start_local.date() + timedelta(days=delta)
@@ -173,6 +236,13 @@ def _resolve_timezone(alarm: models.AlarmDoc) -> str:
     tz_name = (alarm.user_timezone or "").strip()
     if not tz_name:
         tz_name = (firestore_client.fetch_user_timezone(alarm.user_id) or "").strip()
+    raw = alarm.raw or {}
+    if not tz_name:
+        tz_name = raw.get("timezone")
+    if not tz_name:
+        user_block = raw.get("user")
+        if isinstance(user_block, dict):
+            tz_name = user_block.get("timezone")
     if not tz_name:
         raise ValueError(
             f"Alarm {alarm.alarm_id} (user={alarm.user_id}) missing users/{alarm.user_id}.timezone."
