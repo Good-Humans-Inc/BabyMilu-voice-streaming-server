@@ -20,6 +20,7 @@ class ASRProvider(ASRProviderBase):
         self.model = config.get("model_name")        
         self.output_dir = config.get("output_dir")
         self.language = config.get("language")  # Optional: ISO-639-1 format (e.g., "en")
+        self.timeout_seconds = float(config.get("timeout_seconds", 20))
         self.configure_audio_retention(config, delete_audio_file)
 
         os.makedirs(self.output_dir, exist_ok=True)
@@ -64,7 +65,8 @@ class ASRProvider(ASRProviderBase):
                     self.api_url,
                     files=files,
                     data=data,
-                    headers=headers
+                    headers=headers,
+                    timeout=self.timeout_seconds,
                 )
                 logger.bind(tag=TAG).debug(
                     f"语音识别耗时: {time.time() - start_time:.3f}s | 结果: {response.text}"
