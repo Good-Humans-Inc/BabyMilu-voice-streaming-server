@@ -6,20 +6,24 @@ from config.logger import setup_logging
 TAG = __name__
 logger = setup_logging()
 
-# From api https://us-central1-composed-augury-469200-g6.cloudfunctions.net/get-tasks-for-user
+# From api https://us-central1-composed-augury-469200-g6.cloudfunctions.net/tasks-api/tasks
 def get_assigned_tasks_for_user(user_id: str) -> List[Dict[str, Any]]:
     try:
-        body = {
+        params = {
             "uid": user_id,
-            "status": ["action"],
-            "extra": True
+            "extra": "true"
         }
-        response = requests.post(f"https://us-central1-composed-augury-469200-g6.cloudfunctions.net/get-tasks-for-user", json=body)
+        response = requests.get(
+            "https://us-central1-composed-augury-469200-g6.cloudfunctions.net/tasks-api/tasks",
+            params=params,
+        )
 
         if response.status_code != 200:
             logger.bind(tag=TAG).error(f"get assigned tasks error: {response.status_code} {response.text}")
             return []
-        return list(filter(lambda x: x["device"] == "plushie", response.json()["tasks"]))
+        response_data = response.json()
+        tasks = response_data.get("data", {}).get("tasks", response_data.get("tasks", []))
+        return list(filter(lambda x: x["device"] == "plushie", tasks))
     except Exception as e:
         logger.bind(tag=TAG).error(f"get assigned tasks error: {e}")
         return []
@@ -62,10 +66,12 @@ def process_user_action(user_id: str, tasks: List[Dict[str, Any]]) -> bool:
             action = task.get("task_action", "")
             body = {
                 "uid": user_id,
-                "actionType": action,
-                "actionData": {}
+                "actionType": action
             }
-            response = requests.post(f"https://us-central1-composed-augury-469200-g6.cloudfunctions.net/process-user-action", json=body)
+            response = requests.post(
+                "https://us-central1-composed-augury-469200-g6.cloudfunctions.net/tasks-api/tasks/process",
+                json=body,
+            )
             
             if response.status_code != 200:
                 logger.bind(tag=TAG).error(f"process user action error: {response.status_code} {response.text}")
