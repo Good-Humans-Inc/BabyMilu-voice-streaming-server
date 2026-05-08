@@ -23,7 +23,7 @@ def get_assigned_tasks_for_user(user_id: str) -> List[Dict[str, Any]]:
             return []
         response_data = response.json()
         tasks = response_data.get("data", {}).get("tasks", response_data.get("tasks", []))
-        return list(filter(lambda x: x["device"] == "plushie", tasks))
+        return list(filter(lambda x: isinstance(x, dict) and x.get("device") == "plushie", tasks))
     except Exception as e:
         logger.bind(tag=TAG).error(f"get assigned tasks error: {e}")
         return []
