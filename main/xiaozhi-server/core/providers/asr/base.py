@@ -204,20 +204,37 @@ class ASRProviderBase(ABC):
                     return None
             
             # 使用线程池执行器并行运行
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as thread_executor:
+            thread_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+            asr_future = None
+            voiceprint_future = None
+            try:
                 asr_future = thread_executor.submit(run_asr)
                 
                 if conn.voiceprint_provider and wav_data:
                     voiceprint_future = thread_executor.submit(run_voiceprint)
                     
                     # 等待两个线程都完成
-                    asr_result = asr_future.result(timeout=15)
-                    voiceprint_result = voiceprint_future.result(timeout=15)
+                    asr_result, voiceprint_result = await asyncio.gather(
+                        asyncio.wait_for(asyncio.wrap_future(asr_future), timeout=15),
+                        asyncio.wait_for(asyncio.wrap_future(voiceprint_future), timeout=15),
+                    )
                     
                     results = {"asr": asr_result, "voiceprint": voiceprint_result}
                 else:
-                    asr_result = asr_future.result(timeout=15)
+                    asr_result = await asyncio.wait_for(
+                        asyncio.wrap_future(asr_future),
+                        timeout=15,
+                    )
                     results = {"asr": asr_result, "voiceprint": None}
+            except asyncio.TimeoutError:
+                logger.bind(tag=TAG).error("ASR/voiceprint recognition timed out")
+                if asr_future:
+                    asr_future.cancel()
+                if voiceprint_future:
+                    voiceprint_future.cancel()
+                results = {"asr": ("", None), "voiceprint": None}
+            finally:
+                thread_executor.shutdown(wait=False, cancel_futures=True)
             
             
             # 处理结果
