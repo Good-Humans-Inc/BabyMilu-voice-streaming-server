@@ -12,6 +12,7 @@ from core.utils import textUtils
 from typing import Callable, Any
 from abc import ABC, abstractmethod
 from config.logger import setup_logging
+from core.concurrency import DropOldestQueue
 from core.utils.tts import MarkdownCleaner
 from core.utils.output_counter import add_device_output
 from core.handle.reportHandle import enqueue_tts_report
@@ -35,8 +36,16 @@ class TTSProviderBase(ABC):
         self.delete_audio_file = delete_audio_file
         self.audio_file_type = "wav"
         self.output_file = config.get("output_dir", "tmp/")
-        self.tts_text_queue = queue.Queue()
-        self.tts_audio_queue = queue.Queue()
+        concurrency = config.get("concurrency", {}) or {}
+        queue_config = concurrency.get("queues", {}) or {}
+        self.tts_text_queue = DropOldestQueue(
+            int(queue_config.get("tts_text_queue_size", 256)),
+            name="tts_text",
+        )
+        self.tts_audio_queue = DropOldestQueue(
+            int(queue_config.get("tts_audio_queue_size", 512)),
+            name="tts_audio",
+        )
         self.tts_audio_first_sentence = True
         self.before_stop_play_files = []
 
@@ -143,7 +152,7 @@ class TTSProviderBase(ABC):
             except Exception as e:
                 logger.bind(tag=TAG).error(f"Failed to generate TTS file: {e}")
                 return None
-    
+
     def to_tts(self, text):
         text = MarkdownCleaner.clean_markdown(text)
         max_repeat_time = 5

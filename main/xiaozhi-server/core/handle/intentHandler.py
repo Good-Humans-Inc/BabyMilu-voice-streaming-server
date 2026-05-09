@@ -2,12 +2,14 @@ import json
 import random
 import uuid
 import asyncio
+import concurrent.futures
 from core.providers.tts.dto.dto import ContentType
 from core.handle.helloHandle import checkWakeupWords
 from plugins_func.register import Action, ActionResponse
 from core.handle.sendAudioHandle import send_stt_message
+from core.utils.dialogue import Message
 from core.utils.util import remove_punctuation_and_length
-from core.providers.tts.dto.dto import TTSMessageDTO
+from core.providers.tts.dto.dto import SentenceType, TTSMessageDTO
 
 TAG = __name__
 MAGIC_SPELL = "Milu milu on the wall, who's the fairest of them all"
@@ -153,10 +155,10 @@ async def process_intent_result(conn, intent_result, original_text):
             if function_name == "result_for_context":
                 await send_stt_message(conn, original_text)
                 conn.client_abort = False
-                
+
                 def process_context_result():
                     conn.dialogue.put(Message(role="user", content=original_text))
-                    
+
                     from core.utils.current_time import get_current_time_info
                     from core.utils.firestore_client import get_timezone_for_device
 
@@ -165,17 +167,17 @@ async def process_intent_result(conn, intent_result, original_text):
                     except Exception:
                         tz = None
                     current_time, today_date, today_weekday, lunar_date = get_current_time_info()
-                    
+
                     # 构建带上下文的基础提示
                     context_prompt = f"""当前时间：{current_time}
                                         今天日期：{today_date} ({today_weekday})
                                         今天农历：{lunar_date}
 
                                         请根据以上信息回答用户的问题：{original_text}"""
-                    
+
                     response = conn.intent.replyResult(context_prompt, original_text)
                     speak_txt(conn, response)
-                
+
                 conn.executor.submit(process_context_result)
                 return True
 
@@ -203,12 +205,27 @@ async def process_intent_result(conn, intent_result, original_text):
 
                 # 使用统一工具处理器处理所有工具调用
                 try:
-                    result = asyncio.run_coroutine_threadsafe(
+                    future = asyncio.run_coroutine_threadsafe(
                         conn.func_handler.handle_llm_function_call(
                             conn, function_call_data
                         ),
                         conn.loop,
-                    ).result()
+                    )
+                    timeout_for = getattr(conn, "executor_timeout", lambda _name: 20.0)
+                    result = future.result(timeout=timeout_for("tool"))
+                except concurrent.futures.TimeoutError:
+                    try:
+                        future.cancel()
+                    except Exception:
+                        pass
+                    conn.logger.bind(tag=TAG).error(
+                        f"宸ュ叿璋冪敤瓒呮椂: {function_name}"
+                    )
+                    result = ActionResponse(
+                        action=Action.ERROR,
+                        result="Tool call timed out",
+                        response="Tool call timed out",
+                    )
                 except Exception as e:
                     conn.logger.bind(tag=TAG).error(f"工具调用失败: {e}")
                     result = ActionResponse(
