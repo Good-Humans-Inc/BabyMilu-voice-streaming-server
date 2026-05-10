@@ -7,6 +7,7 @@ import queue
 import sys
 import threading
 import types
+from collections import deque
 from types import SimpleNamespace
 
 import pytest
@@ -483,3 +484,70 @@ def test_component_channel_boundary_timeout_and_errors_are_observed(
         assert handler.components_initialized.is_set()
 
     asyncio.run(_scenario())
+
+
+def test_shared_silero_vad_uses_per_connection_opus_decoders(monkeypatch):
+    class FakeScore:
+        def item(self):
+            return 0.9
+
+    class FakeModel:
+        def __call__(self, _audio_tensor, _sample_rate):
+            return FakeScore()
+
+    class FakeNoGrad:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *_args):
+            return False
+
+    torch_stub = types.ModuleType("torch")
+    torch_stub.hub = SimpleNamespace(load=lambda **_kwargs: (FakeModel(), None))
+    torch_stub.from_numpy = lambda audio: audio
+    torch_stub.no_grad = lambda: FakeNoGrad()
+    monkeypatch.setitem(sys.modules, "torch", torch_stub)
+
+    from core.providers.vad import silero
+
+    created_decoders = []
+
+    class FakeDecoder:
+        def __init__(self, sample_rate, channels):
+            self.sample_rate = sample_rate
+            self.channels = channels
+            self.decode_calls = []
+            created_decoders.append(self)
+
+        def decode(self, packet, frame_size):
+            self.decode_calls.append((packet, frame_size))
+            return b"\x01\x00" * 512
+
+    monkeypatch.setattr(silero.opuslib_next, "Decoder", FakeDecoder, raising=False)
+    monkeypatch.setattr(silero.opuslib_next, "OpusError", Exception, raising=False)
+
+    provider = silero.VADProvider({"model_dir": "unused"})
+    provider.frame_window_threshold = 1
+
+    def make_conn():
+        return SimpleNamespace(
+            client_audio_buffer=bytearray(),
+            client_have_voice=False,
+            client_voice_window=deque(maxlen=5),
+            last_activity_time=0,
+            client_voice_stop=False,
+            last_is_voice=False,
+        )
+
+    conn_a = make_conn()
+    conn_b = make_conn()
+
+    assert provider.is_vad(conn_a, b"frame-a") is True
+    assert provider.is_vad(conn_b, b"frame-b") is True
+    assert provider.is_vad(conn_a, b"frame-a2") is True
+
+    assert len(created_decoders) == 2
+    assert conn_a._vad_opus_decoder is created_decoders[0]
+    assert conn_b._vad_opus_decoder is created_decoders[1]
+    assert conn_a._vad_opus_decoder is not conn_b._vad_opus_decoder
+    assert not hasattr(provider, "decoder")
