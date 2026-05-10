@@ -54,6 +54,7 @@ def build_character_memory_payload(
         "summary": "",
         "memory_state": {},
         "next_starter": None,
+        "starter_fallback": None,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -151,40 +152,69 @@ def ensure_character_memory_record(
 def _fetch_next_starter_row(character_id: str):
     return _fetch_character_memory_row(
         character_id,
-        select_fields="next_starter",
+        select_fields="next_starter,starter_fallback",
     )
+
+
+def _is_valid_starter_payload(
+    payload: Any,
+    *,
+    character_id: str,
+    max_age_days: int,
+    payload_label: str,
+) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("status") != "ready":
+        return False
+    if payload.get("characterId") and str(payload.get("characterId")) != str(character_id):
+        return False
+    if not payload.get("audioUrl") and not payload.get("text"):
+        return False
+
+    generated_at = _parse_iso8601(payload.get("generatedAt"))
+    if generated_at is None:
+        return False
+    if generated_at < datetime.now(timezone.utc) - timedelta(days=max_age_days):
+        logger.bind(tag=TAG).info(
+            f"Skipping stale {payload_label} for character_id={character_id}, generated_at={generated_at.isoformat()}"
+        )
+        return False
+    return True
 
 
 def get_ready_next_starter(character_id: str) -> Optional[Dict[str, Any]]:
     max_age_days = int(_env("NEXT_STARTER_MAX_AGE_DAYS", "7") or "7")
+    fallback_max_age_days = int(_env("STARTER_FALLBACK_MAX_AGE_DAYS", "3650") or "3650")
     row, _, _, _ = _fetch_next_starter_row(character_id)
     if not row:
         return None
 
     payload = row.get("next_starter")
-    if not isinstance(payload, dict):
-        return None
-    if payload.get("status") != "ready":
-        return None
-    if payload.get("characterId") and str(payload.get("characterId")) != str(character_id):
-        return None
-    if not payload.get("audioUrl") and not payload.get("text"):
-        return None
+    if _is_valid_starter_payload(
+        payload,
+        character_id=character_id,
+        max_age_days=max_age_days,
+        payload_label="next_starter",
+    ):
+        return payload
 
-    generated_at = _parse_iso8601(payload.get("generatedAt"))
-    if generated_at is None:
-        return None
-    if generated_at < datetime.now(timezone.utc) - timedelta(days=max_age_days):
-        logger.bind(tag=TAG).info(
-            f"Skipping stale next_starter for character_id={character_id}, generated_at={generated_at.isoformat()}"
-        )
-        return None
+    fallback_payload = row.get("starter_fallback")
+    if _is_valid_starter_payload(
+        fallback_payload,
+        character_id=character_id,
+        max_age_days=fallback_max_age_days,
+        payload_label="starter_fallback",
+    ):
+        return fallback_payload
 
-    return payload
+    return None
 
 
 def mark_next_starter_consumed(character_id: str, payload: Dict[str, Any]) -> bool:
     if not character_id or not isinstance(payload, dict):
+        return False
+    if payload.get("sourceType") == "fallback_hi":
         return False
 
     row, supabase_url, service_role_key, request_timeout = _fetch_next_starter_row(character_id)
