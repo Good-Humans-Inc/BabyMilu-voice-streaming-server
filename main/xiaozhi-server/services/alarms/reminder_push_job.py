@@ -688,6 +688,16 @@ def run_send_reminder_push_job(
         reminder_id = reminder_doc.id
         try:
             reminder_data = reminder_doc.to_dict() or {}
+            if reminder_data.get("typeHint") == "alarm":
+                skipped += 1
+                results.append(
+                    {
+                        "reminderId": reminder_id,
+                        "processed": False,
+                        "skipped": "typeHint_alarm",
+                    }
+                )
+                continue
             delivery_channels = _resolve_delivery_channels(reminder_data)
             uid = _resolve_uid_from_reminder_doc(reminder_doc, reminder_data)
             next_occurrence_str = reminder_data.get("nextOccurrenceUTC")

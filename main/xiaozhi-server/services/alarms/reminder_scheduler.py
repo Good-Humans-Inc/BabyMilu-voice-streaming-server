@@ -111,6 +111,8 @@ def fetch_due_reminders(
     user_tz_cache: Dict[str, Optional[str]] = {}
     for doc in query.stream():
         data = doc.to_dict() or {}
+        if data.get("typeHint") == "alarm":
+            continue
         user_id = _resolve_user_id(doc)
         if not user_id:
             logger.bind(tag=TAG).warning(
