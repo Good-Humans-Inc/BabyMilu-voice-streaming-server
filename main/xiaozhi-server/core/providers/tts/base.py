@@ -77,6 +77,7 @@ class TTSProviderBase(ABC):
         self.tts_stop_request = False
         self.processed_chars = 0
         self.is_first_sentence = True
+        self._audio_play_disconnect_logged = False
 
     def generate_filename(self, extension=".wav"):
         return os.path.join(
@@ -261,6 +262,7 @@ class TTSProviderBase(ABC):
 
     async def open_audio_channels(self, conn):
         self.conn = conn
+        self._audio_play_disconnect_logged = False
         # tts 消化线程
         self.tts_priority_thread = threading.Thread(
             target=self.tts_text_priority_thread, daemon=True
@@ -362,7 +364,71 @@ class TTSProviderBase(ABC):
                     add_device_output(self.conn.headers.get("device-id"), len(text))
 
             except Exception as e:
-                logger.bind(tag=TAG).error(f"audio_play_priority_thread: {text} {e}")
+                self._log_audio_play_exception(text, e)
+
+    def _log_audio_play_exception(self, text, exc):
+        conn = getattr(self, "conn", None)
+        device_id = getattr(conn, "device_id", None) or self._header_device_id(conn)
+        session_id = getattr(conn, "session_id", None)
+        close_error = self._is_connection_close_error(exc)
+
+        if self._is_audio_play_shutdown(conn):
+            event = "audio_play_priority_thread send stopped during shutdown"
+            level = "debug"
+        elif close_error:
+            event = "audio_play_priority_thread device disconnected abruptly"
+            level = (
+                "debug"
+                if getattr(self, "_audio_play_disconnect_logged", False)
+                else "warning"
+            )
+            self._audio_play_disconnect_logged = True
+        else:
+            event = "audio_play_priority_thread send failed"
+            level = "warning"
+
+        message = (
+            f"{event}: "
+            f"device_id={device_id or 'unknown'} "
+            f"session_id={session_id or 'unknown'} text={text!r} "
+            f"error={type(exc).__name__}: {exc}"
+        )
+        bound_logger = logger.bind(tag=TAG, device_id=device_id, session_id=session_id)
+
+        if level == "debug":
+            bound_logger.debug(message)
+            return
+
+        bound_logger.warning(message)
+
+    @staticmethod
+    def _header_device_id(conn):
+        headers = getattr(conn, "headers", None)
+        getter = getattr(headers, "get", None)
+        if callable(getter):
+            return getter("device-id")
+        return None
+
+    @staticmethod
+    def _is_connection_close_error(exc) -> bool:
+        error_text = str(exc).lower()
+        error_type = type(exc).__name__.lower()
+        return (
+            "no close frame received or sent" in error_text
+            or "sent 1000" in error_text
+            or "connectionclosed" in error_type
+        )
+
+    @staticmethod
+    def _is_audio_play_shutdown(conn) -> bool:
+        if getattr(conn, "_closing", False):
+            return True
+
+        stop_event = getattr(conn, "stop_event", None)
+        if callable(getattr(stop_event, "is_set", None)) and stop_event.is_set():
+            return True
+
+        return False
 
     async def start_session(self, session_id):
         pass
