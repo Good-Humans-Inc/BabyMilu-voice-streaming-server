@@ -34,6 +34,11 @@ class VADProvider(VADProviderBase):
         # 至少要多少帧才算有语音
         self.frame_window_threshold = 3
 
+    def reset_states(self):
+        reset = getattr(self.model, "reset_states", None)
+        if callable(reset):
+            reset()
+
     def _get_decoder(self, conn):
         decoder = getattr(conn, "_vad_opus_decoder", None)
         if decoder is None:

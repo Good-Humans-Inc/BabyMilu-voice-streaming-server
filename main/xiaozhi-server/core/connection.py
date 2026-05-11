@@ -193,8 +193,9 @@ class ConnectionHandler:
         self.report_tts_enable = self.read_config_from_api
 
         # 组件
-        # VAD and ASR are stateless processors — safe to share across connections.
-        # LLM is keyed by unique session_id — sharing is a P1 memory-leak but not
+        # Server-level VAD is a lease pool because Silero TorchScript mutates
+        # model state during inference. ASR remains a shared template/fallback.
+        # LLM is keyed by unique session_id; sharing is a P1 memory-leak but not
         # a correctness issue.
         # Memory, Task, and Intent carry per-device mutable state (role_id,
         # short_memory, cached prompts).  Storing the server-level references here
@@ -205,7 +206,23 @@ class ConnectionHandler:
         self.asr = None
         self.tts = None
         self._asr = _asr
-        self._vad = _vad
+        if self._is_vad_pool(_vad):
+            self._vad_pool = _vad
+            self._vad = None
+        else:
+            server_vad_pool = getattr(server, "_vad_pool", None)
+            if _vad is None and self._is_vad_pool(server_vad_pool):
+                self._vad_pool = server_vad_pool
+                self._vad = None
+            else:
+                self._vad_pool = None
+                self._vad = _vad
+        self._leased_vad_pool = None
+        self._closing = False
+        self._vad_inflight = 0
+        self._vad_inflight_lock = threading.Lock()
+        self._vad_inflight_done = threading.Event()
+        self._vad_inflight_done.set()
         self.llm = _llm
         # IMPORTANT: Set to None so no code can accidentally mutate the shared
         # server-level provider before _ensure_per_connection_providers() runs.
@@ -315,6 +332,12 @@ class ConnectionHandler:
                 "audio": 15.0,
                 "persistence": 10.0,
             }.get(name, 10.0)
+
+    @staticmethod
+    def _is_vad_pool(candidate) -> bool:
+        return callable(getattr(candidate, "acquire", None)) and callable(
+            getattr(candidate, "release", None)
+        )
 
     async def run_sync(
         self,
@@ -1706,7 +1729,7 @@ Return ONLY the JSON array, no other explanation."""
                 )
 
             if self.vad is None:
-                self.vad = self._vad
+                self._acquire_vad_provider()
             if self.asr is None:
                 self.asr = self._initialize_asr()
 
@@ -1735,6 +1758,71 @@ Return ONLY the JSON array, no other explanation."""
         finally:
             self.loop.call_soon_threadsafe(self.components_initialized.set)
             self.loop.call_soon_threadsafe(self._flush_early_audio)
+
+    def _acquire_vad_provider(self):
+        if self.vad is not None:
+            return
+
+        if self._vad_pool is not None:
+            self.vad = self._vad_pool.acquire()
+            self._leased_vad_pool = self._vad_pool
+            self.logger.bind(tag=TAG).debug(
+                f"Checked out VAD provider from pool for {self.device_id}"
+            )
+            return
+
+        self.vad = self._vad
+
+    def _release_vad_provider(self, *, return_to_pool: bool = True):
+        if self._leased_vad_pool is None or self.vad is None:
+            return
+
+        provider = self.vad
+        pool = self._leased_vad_pool
+        self.vad = None
+        self._leased_vad_pool = None
+        self.reset_vad_states()
+        if hasattr(self, "_vad_opus_decoder"):
+            delattr(self, "_vad_opus_decoder")
+
+        if return_to_pool:
+            pool.release(provider)
+            self.logger.bind(tag=TAG).debug(
+                f"Returned VAD provider to pool for {self.device_id}"
+            )
+        else:
+            self.logger.bind(tag=TAG).warning(
+                "Keeping VAD provider out of pool because audio worker did not stop"
+            )
+
+    def _begin_vad_call(self) -> bool:
+        with self._vad_inflight_lock:
+            if self._closing or self.stop_event.is_set():
+                return False
+            self._vad_inflight += 1
+            self._vad_inflight_done.clear()
+            return True
+
+    def _end_vad_call(self):
+        with self._vad_inflight_lock:
+            self._vad_inflight = max(0, self._vad_inflight - 1)
+            if self._vad_inflight == 0:
+                self._vad_inflight_done.set()
+
+    def run_vad(self, audio) -> bool:
+        if not self._begin_vad_call():
+            return False
+        try:
+            provider = self.vad
+            if provider is None:
+                return False
+            return provider.is_vad(self, audio)
+        finally:
+            self._end_vad_call()
+
+    async def _wait_for_vad_calls_to_finish(self) -> bool:
+        timeout = min(max(self.executor_timeout("audio") + 1.0, 1.0), 20.0)
+        return await asyncio.to_thread(self._vad_inflight_done.wait, timeout)
 
     def _init_prompt_enhancement(self):
         self.prompt_manager.update_context_info(self, self.client_ip)
@@ -1923,6 +2011,7 @@ Return ONLY the JSON array, no other explanation."""
         if modules.get("tts") is not None:
             self.tts = modules["tts"]
         if modules.get("vad") is not None:
+            self._release_vad_provider()
             self.vad = modules["vad"]
         if modules.get("asr") is not None:
             self.asr = modules["asr"]
@@ -3078,7 +3167,9 @@ Return ONLY the JSON array, no other explanation."""
         self.logger.bind(tag=TAG).debug("清除服务端讲话状态")
 
     async def close(self, ws=None):
+        vad_can_return_to_pool = True
         try:
+            self._closing = True
             if (
                 not self._llm_conversation_released
                 and self.llm is not None
@@ -3128,6 +3219,7 @@ Return ONLY the JSON array, no other explanation."""
                 self.stop_event.set()
 
             self.clear_queues()
+            vad_can_return_to_pool = await self._wait_for_vad_calls_to_finish()
 
             try:
                 if ws:
@@ -3170,6 +3262,7 @@ Return ONLY the JSON array, no other explanation."""
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"关闭连接时出错: {e}")
         finally:
+            self._release_vad_provider(return_to_pool=vad_can_return_to_pool)
             if self.stop_event:
                 self.stop_event.set()
 

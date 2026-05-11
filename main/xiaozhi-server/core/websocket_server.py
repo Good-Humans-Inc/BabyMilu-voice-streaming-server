@@ -3,6 +3,7 @@ import websockets
 from config.logger import setup_logging
 from core.concurrency import ServerExecutors
 from core.connection import ConnectionHandler
+from core.vad_pool import VadProviderPool
 from config.config_loader import get_config_from_api
 from core.utils.modules_initialize import initialize_modules
 from core.utils.util import check_vad_update, check_asr_update
@@ -23,7 +24,7 @@ class WebSocketServer:
         modules = initialize_modules(
             self.logger,
             self.config,
-            "VAD" in self.config["selected_module"],
+            False,
             "ASR" in self.config["selected_module"],
             "LLM" in self.config["selected_module"],
             False,
@@ -31,7 +32,8 @@ class WebSocketServer:
             "Intent" in self.config["selected_module"],
             "Task" in self.config["selected_module"],
         )
-        self._vad = modules["vad"] if "vad" in modules else None
+        self._vad_pool = VadProviderPool.from_config(self.config, self.logger)
+        self._vad = self._vad_pool
         self._asr = modules["asr"] if "asr" in modules else None
         self._llm = modules["llm"] if "llm" in modules else None
         self._intent = modules["intent"] if "intent" in modules else None
@@ -135,7 +137,7 @@ class WebSocketServer:
                     initialize_modules,
                     self.logger,
                     new_config,
-                    update_vad,
+                    False,
                     update_asr,
                     "LLM" in new_config["selected_module"],
                     False,
@@ -146,8 +148,15 @@ class WebSocketServer:
                 )
 
                 # 更新组件实例
-                if "vad" in modules:
-                    self._vad = modules["vad"]
+                if update_vad:
+                    self._vad_pool = await self.executors.run_sync(
+                        "provider",
+                        VadProviderPool.from_config,
+                        new_config,
+                        self.logger,
+                        timeout=self.executors.timeout_for("provider"),
+                    )
+                    self._vad = self._vad_pool
                 if "asr" in modules:
                     self._asr = modules["asr"]
                 if "llm" in modules:

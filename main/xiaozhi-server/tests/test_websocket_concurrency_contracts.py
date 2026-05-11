@@ -238,6 +238,29 @@ def _make_handler(executors=None) -> ConnectionHandler:
     )
 
 
+class _FakeVadProvider:
+    def __init__(self):
+        self.reset_count = 0
+
+    def reset_states(self):
+        self.reset_count += 1
+
+
+class _FakeVadPool:
+    def __init__(self):
+        self.provider = _FakeVadProvider()
+        self.acquire_count = 0
+        self.released = []
+
+    def acquire(self):
+        self.acquire_count += 1
+        return self.provider
+
+    def release(self, provider):
+        self.released.append(provider)
+        provider.reset_states()
+
+
 def _executor_queue_limit(executor) -> int:
     for attr in ("max_queue_size", "_max_queue_size", "queue_maxsize"):
         value = getattr(executor, attr, None)
@@ -551,3 +574,35 @@ def test_shared_silero_vad_uses_per_connection_opus_decoders(monkeypatch):
     assert conn_b._vad_opus_decoder is created_decoders[1]
     assert conn_a._vad_opus_decoder is not conn_b._vad_opus_decoder
     assert not hasattr(provider, "decoder")
+
+
+def test_connection_checks_out_and_returns_vad_provider(connection_fakes):
+    async def _scenario():
+        pool = _FakeVadPool()
+        executors = conn_mod.ServerExecutors.from_config(_base_config())
+        handler = ConnectionHandler(
+            _base_config(),
+            _vad=pool,
+            _asr=_TemplateASR(),
+            _llm=None,
+            _memory=None,
+            _task=None,
+            _intent=None,
+            server=None,
+            executors=executors,
+        )
+
+        try:
+            handler._acquire_vad_provider()
+            assert handler.vad is pool.provider
+            assert pool.acquire_count == 1
+
+            await handler.close()
+
+            assert handler.vad is None
+            assert pool.released == [pool.provider]
+            assert pool.provider.reset_count == 1
+        finally:
+            executors.shutdown()
+
+    asyncio.run(_scenario())

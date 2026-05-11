@@ -13,7 +13,16 @@ TAG = __name__
 async def handleAudioMessage(conn, audio):
     # 当前片段是否有人说话
     try:
-        if hasattr(conn, "run_sync"):
+        if hasattr(conn, "run_sync") and hasattr(conn, "run_vad"):
+            have_voice = await conn.run_sync(
+                "audio",
+                conn.run_vad,
+                audio,
+                timeout=getattr(conn, "executor_timeout", lambda _name: 15.0)(
+                    "audio"
+                ),
+            )
+        elif hasattr(conn, "run_sync"):
             have_voice = await conn.run_sync(
                 "audio",
                 conn.vad.is_vad,
