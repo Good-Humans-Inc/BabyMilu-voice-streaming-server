@@ -10,6 +10,21 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 util_stub = types.ModuleType("core.utils.util")
 util_stub.audio_to_data = lambda *args, **kwargs: []
+util_stub.audio_bytes_to_data = lambda *args, **kwargs: []
+util_stub.opus_datas_to_wav_bytes = lambda *args, **kwargs: b""
+util_stub.remove_punctuation_and_length = lambda text: (len(text), text)
+util_stub.filter_sensitive_info = lambda data: data
+util_stub.check_vad_update = lambda *args, **kwargs: False
+util_stub.check_asr_update = lambda *args, **kwargs: False
+
+
+def _missing_util_stub(name):
+    if name.startswith("check_"):
+        return lambda *args, **kwargs: False
+    return lambda *args, **kwargs: args[0] if args else None
+
+
+util_stub.__getattr__ = _missing_util_stub
 sys.modules.setdefault("core.utils.util", util_stub)
 
 from core.handle import sendAudioHandle
@@ -40,6 +55,44 @@ def test_send_audio_message_sends_stop_on_last_even_if_llm_not_finished(monkeypa
 
     assert ("stop", None) in states
     assert conn.client_is_speaking is False
+
+
+def test_send_audio_message_releases_vad_before_first_tts(monkeypatch):
+    events = []
+
+    async def fake_send_tts_message(conn, state, text=None):
+        events.append(("tts", state, text))
+
+    async def fake_send_audio(conn, audios):
+        events.append(("audio", audios))
+
+    def release_vad_lease(*, reset_connection_state=True):
+        events.append(("release", reset_connection_state))
+
+    monkeypatch.setattr(sendAudioHandle, "send_tts_message", fake_send_tts_message)
+    monkeypatch.setattr(sendAudioHandle, "sendAudio", fake_send_audio)
+
+    conn = SimpleNamespace(
+        tts=SimpleNamespace(tts_audio_first_sentence=False),
+        client_is_speaking=False,
+        close_after_chat=False,
+        release_vad_lease=release_vad_lease,
+        logger=SimpleNamespace(
+            bind=lambda **kwargs: SimpleNamespace(
+                info=lambda *args, **kwargs: None
+            )
+        ),
+    )
+
+    asyncio.run(
+        sendAudioHandle.sendAudioMessage(conn, SentenceType.FIRST, [b"audio"], "hello")
+    )
+
+    assert events[:2] == [
+        ("release", False),
+        ("tts", "sentence_start", "hello"),
+    ]
+    assert conn.client_is_speaking is True
 
 
 def test_send_audio_message_keeps_mqtt_sequences_monotonic_across_segments():

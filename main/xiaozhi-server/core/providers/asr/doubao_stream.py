@@ -183,6 +183,9 @@ class ASRProvider(ASRProviderBase):
                                 logger.bind(tag=TAG).error(f"识别文本：空")
                                 self.text = ""
                                 conn.reset_vad_states()
+                                release_vad = getattr(conn, "release_vad_lease", None)
+                                if callable(release_vad):
+                                    release_vad(reset_connection_state=False)
                                 if len(audio_data) > 15:  # 确保有足够音频数据
                                     await self.handle_voice_stop(conn, audio_data)
                                 break
@@ -194,6 +197,9 @@ class ASRProvider(ASRProviderBase):
                                         f"识别到文本: {self.text}"
                                     )
                                     conn.reset_vad_states()
+                                    release_vad = getattr(conn, "release_vad_lease", None)
+                                    if callable(release_vad):
+                                        release_vad(reset_connection_state=False)
                                     if len(audio_data) > 15:  # 确保有足够音频数据
                                         await self.handle_voice_stop(conn, audio_data)
                                     break

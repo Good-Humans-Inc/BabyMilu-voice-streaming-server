@@ -1,11 +1,16 @@
 import threading
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+
+def _fresh_generated_at() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def test_ensure_character_memory_record_posts_create_when_row_missing(monkeypatch):
@@ -232,7 +237,7 @@ def test_get_ready_next_starter_allows_text_only_payload(monkeypatch):
                     "status": "ready",
                     "characterId": cid,
                     "text": "Hey, tell me more.",
-                    "generatedAt": "2026-05-01T07:00:00+00:00",
+                    "generatedAt": _fresh_generated_at(),
                     "sourceSessionId": "sess_1",
                 }
             },

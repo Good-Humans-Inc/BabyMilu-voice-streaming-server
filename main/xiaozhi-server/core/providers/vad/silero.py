@@ -19,8 +19,6 @@ class VADProvider(VADProviderBase):
             force_reload=False,
         )
 
-        self.decoder = opuslib_next.Decoder(16000, 1)
-
         # 处理空字符串的情况
         threshold = config.get("threshold", "0.5")
         threshold_low = config.get("threshold_low", "0.2")
@@ -36,9 +34,21 @@ class VADProvider(VADProviderBase):
         # 至少要多少帧才算有语音
         self.frame_window_threshold = 3
 
+    def reset_states(self):
+        reset = getattr(self.model, "reset_states", None)
+        if callable(reset):
+            reset()
+
+    def _get_decoder(self, conn):
+        decoder = getattr(conn, "_vad_opus_decoder", None)
+        if decoder is None:
+            decoder = opuslib_next.Decoder(16000, 1)
+            conn._vad_opus_decoder = decoder
+        return decoder
+
     def is_vad(self, conn, opus_packet):
         try:
-            pcm_frame = self.decoder.decode(opus_packet, 960)
+            pcm_frame = self._get_decoder(conn).decode(opus_packet, 960)
             conn.client_audio_buffer.extend(pcm_frame)  # 将新数据加入缓冲区
 
             # 处理缓冲区中的完整帧（每次处理512采样点）

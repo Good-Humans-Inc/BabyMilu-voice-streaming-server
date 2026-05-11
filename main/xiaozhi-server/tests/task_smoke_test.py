@@ -2,11 +2,17 @@ import argparse
 import asyncio
 import json
 import os
+import pathlib
+import sys
 import time
 from datetime import datetime, timezone
 
 import requests
 from google.cloud import firestore
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from config.config_loader import load_config
 from core.utils import llm as llm_utils
