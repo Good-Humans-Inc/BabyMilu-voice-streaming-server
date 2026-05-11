@@ -98,6 +98,83 @@ def test_maybe_play_next_starter_text_only(monkeypatch):
     ]
 
 
+def test_listen_stop_releases_vad_after_buffer_flush(monkeypatch):
+    events = []
+
+    async def fake_handle_audio_message(conn, audio):
+        events.append(("flush", list(conn.asr_audio), audio))
+
+    def release_vad_lease(*, reset_connection_state=True):
+        events.append(("release", reset_connection_state))
+
+    monkeypatch.setattr(listen_mod, "handleAudioMessage", fake_handle_audio_message)
+
+    conn = SimpleNamespace(
+        client_listen_mode="auto",
+        client_have_voice=True,
+        client_voice_stop=False,
+        asr_audio=[b"frame"],
+        release_vad_lease=release_vad_lease,
+        logger=_Logger(),
+    )
+
+    handler = listen_mod.ListenTextMessageHandler()
+    asyncio.run(
+        handler.handle(
+            conn,
+            {
+                "type": "listen",
+                "state": "stop",
+                "session_id": "session-1",
+            },
+        )
+    )
+
+    assert events == [
+        ("flush", [b"frame"], b""),
+        ("release", False),
+    ]
+    assert conn.client_have_voice is False
+    assert conn.client_voice_stop is True
+
+
+def test_listen_stop_releases_vad_without_buffer(monkeypatch):
+    events = []
+
+    async def fake_handle_audio_message(conn, audio):
+        events.append(("flush", audio))
+
+    def release_vad_lease(*, reset_connection_state=True):
+        events.append(("release", reset_connection_state))
+
+    monkeypatch.setattr(listen_mod, "handleAudioMessage", fake_handle_audio_message)
+
+    conn = SimpleNamespace(
+        client_listen_mode="auto",
+        client_have_voice=True,
+        client_voice_stop=False,
+        asr_audio=[],
+        release_vad_lease=release_vad_lease,
+        logger=_Logger(),
+    )
+
+    handler = listen_mod.ListenTextMessageHandler()
+    asyncio.run(
+        handler.handle(
+            conn,
+            {
+                "type": "listen",
+                "state": "stop",
+                "session_id": "session-1",
+            },
+        )
+    )
+
+    assert events == [("release", False)]
+    assert conn.client_have_voice is False
+    assert conn.client_voice_stop is True
+
+
 @pytest.mark.parametrize("active_mode", ["scheduled_conversation", "morning_alarm"])
 def test_maybe_play_next_starter_skips_proactive_modes(monkeypatch, active_mode):
     payload = {
