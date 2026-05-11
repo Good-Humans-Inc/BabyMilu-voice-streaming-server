@@ -21,7 +21,7 @@ class _FakeClient:
         self._docs = docs
 
     def collection_group(self, name):
-        assert name == "alarms"
+        assert name == "reminders"
         return _FakeQuery(self._docs)
 
     def collection(self, name):
@@ -172,11 +172,12 @@ def test_fetch_due_alarms_skips_docs_without_targets(monkeypatch):
     now = datetime.now(timezone.utc)
     data = {
         "status": "on",
+        "typeHint": "alarm",
         "nextOccurrenceUTC": now.isoformat(),
         "schedule": {"repeat": "weekly", "timeLocal": "07:00", "days": ["Mon"]},
         # intentionally omit "targets"
     }
-    docs = [_FakeDoc("users/user-1/alarms/alarm-1", data)]
+    docs = [_FakeDoc("users/user-1/reminders/alarm-1", data)]
     client = _FakeClient(docs)
 
     monkeypatch.setattr(
@@ -191,16 +192,40 @@ def test_fetch_due_alarms_skips_docs_without_targets(monkeypatch):
     assert results == []
 
 
+def test_fetch_due_alarms_skips_non_alarm_typehint(monkeypatch):
+    now = datetime.now(timezone.utc)
+    data = {
+        "status": "on",
+        "typeHint": "habit",
+        "nextOccurrenceUTC": now.isoformat(),
+        "schedule": {"repeat": "weekly", "timeLocal": "07:00", "days": ["Mon"]},
+        "targets": [{"deviceId": "90:e5:b1:a8:e4:38", "mode": "scheduled_conversation"}],
+    }
+    docs = [_FakeDoc("users/user-1/reminders/rem-1", data)]
+    client = _FakeClient(docs)
+
+    monkeypatch.setattr(
+        firestore_client, "FieldFilter", lambda field_path, op, value: (field_path, op, value)
+    )
+
+    results = firestore_client.fetch_due_alarms(
+        now, lookahead=timedelta(minutes=1), client=client
+    )
+
+    assert results == []
+
+
 def test_fetch_due_alarms_ignores_invalid_repeat_when_days_present(monkeypatch):
     """New schema infers repeat from days — an invalid repeat field is ignored when days is valid."""
     now = datetime.now(timezone.utc)
     data = {
         "status": "on",
+        "typeHint": "alarm",
         "nextOccurrenceUTC": now.isoformat(),
         "schedule": {"repeat": "everyday", "timeLocal": "07:00", "days": ["Mon"]},
         "targets": [{"deviceId": "90:e5:b1:a8:e4:38", "mode": "morning_alarm"}],
     }
-    docs = [_FakeDoc("users/user-1/alarms/alarm-1", data)]
+    docs = [_FakeDoc("users/user-1/reminders/alarm-1", data)]
     client = _FakeClient(docs)
 
     monkeypatch.setattr(
@@ -221,11 +246,12 @@ def test_fetch_due_alarms_supports_none_repeat(monkeypatch):
     now = datetime.now(timezone.utc)
     data = {
         "status": "on",
+        "typeHint": "alarm",
         "nextOccurrenceUTC": now.isoformat(),
         "schedule": {"repeat": "none", "timeLocal": "07:00", "days": ["2026-03-02"]},
         "targets": [{"deviceId": "90:e5:b1:a8:e4:38", "mode": "morning_alarm"}],
     }
-    docs = [_FakeDoc("users/user-1/alarms/alarm-1", data)]
+    docs = [_FakeDoc("users/user-1/reminders/alarm-1", data)]
     client = _FakeClient(docs)
 
     monkeypatch.setattr(
@@ -250,7 +276,7 @@ def test_fetch_due_alarms_reads_scheduled_conversation_fields(monkeypatch):
         "schedule": {"repeat": "once", "timeLocal": "09:00", "days": ["2026-03-24"]},
         "targets": [{"deviceId": "90:e5:b1:a8:e4:38", "mode": "scheduled_conversation"}],
         "content": "take vitamins",
-        "typeHint": "habit",
+        "typeHint": "alarm",
         "priority": "medium",
         "conversationOutline": "1. Open gently.",
         "characterReminder": "Be warm.",
@@ -258,7 +284,7 @@ def test_fetch_due_alarms_reads_scheduled_conversation_fields(monkeypatch):
         "completionSignal": "Done: user confirms.",
         "deliveryPreference": "be gentle",
     }
-    docs = [_FakeDoc("users/user-1/alarms/alarm-1", data)]
+    docs = [_FakeDoc("users/user-1/reminders/alarm-1", data)]
     client = _FakeClient(docs)
 
     monkeypatch.setattr(
@@ -273,7 +299,7 @@ def test_fetch_due_alarms_reads_scheduled_conversation_fields(monkeypatch):
     assert len(results) == 1
     alarm = results[0]
     assert alarm.content == "take vitamins"
-    assert alarm.type_hint == "habit"
+    assert alarm.type_hint == "alarm"
     assert alarm.priority == "medium"
     assert alarm.conversation_outline == "1. Open gently."
     assert alarm.character_reminder == "Be warm."
@@ -287,11 +313,12 @@ def test_fetch_due_alarms_v0_fields_are_none_when_absent(monkeypatch):
     now = datetime.now(timezone.utc)
     data = {
         "status": "on",
+        "typeHint": "alarm",
         "nextOccurrenceUTC": now.isoformat(),
         "schedule": {"repeat": "weekly", "timeLocal": "07:00", "days": ["Mon"]},
         "targets": [{"deviceId": "90:e5:b1:a8:e4:38", "mode": "morning_alarm"}],
     }
-    docs = [_FakeDoc("users/user-1/alarms/alarm-1", data)]
+    docs = [_FakeDoc("users/user-1/reminders/alarm-1", data)]
     client = _FakeClient(docs)
 
     monkeypatch.setattr(
@@ -306,7 +333,7 @@ def test_fetch_due_alarms_v0_fields_are_none_when_absent(monkeypatch):
     assert len(results) == 1
     alarm = results[0]
     assert alarm.content is None
-    assert alarm.type_hint is None
+    assert alarm.type_hint == "alarm"
     assert alarm.conversation_outline is None
 
 
@@ -314,11 +341,12 @@ def test_fetch_due_alarms_supports_once_repeat_alias(monkeypatch):
     now = datetime.now(timezone.utc)
     data = {
         "status": "on",
+        "typeHint": "alarm",
         "nextOccurrenceUTC": now.isoformat(),
         "schedule": {"repeat": "once", "timeLocal": "07:00", "days": ["2026-03-02"]},
         "targets": [{"deviceId": "90:e5:b1:a8:e4:38", "mode": "morning_alarm"}],
     }
-    docs = [_FakeDoc("users/user-1/alarms/alarm-1", data)]
+    docs = [_FakeDoc("users/user-1/reminders/alarm-1", data)]
     client = _FakeClient(docs)
 
     monkeypatch.setattr(
@@ -339,11 +367,12 @@ def test_fetch_due_alarms_supports_daily_repeat(monkeypatch):
     now = datetime.now(timezone.utc)
     data = {
         "status": "on",
+        "typeHint": "alarm",
         "nextOccurrenceUTC": now.isoformat(),
         "schedule": {"repeat": "daily", "timeLocal": "08:00", "days": []},
         "targets": [{"deviceId": "90:e5:b1:a8:e4:38", "mode": "scheduled_conversation"}],
     }
-    docs = [_FakeDoc("users/user-1/alarms/alarm-1", data)]
+    docs = [_FakeDoc("users/user-1/reminders/alarm-1", data)]
     client = _FakeClient(docs)
 
     monkeypatch.setattr(
@@ -370,7 +399,7 @@ def test_fetch_active_alarms_for_user_returns_on_alarms(monkeypatch):
         "content": "take vitamins",
         "label": "take vitamins",
     }
-    docs = [_FakeDoc("users/user-1/alarms/alarm-42", data)]
+    docs = [_FakeDoc("users/user-1/reminders/alarm-42", data)]
     client = _FakeUserScopedClient(docs)
 
     monkeypatch.setattr(
@@ -393,12 +422,12 @@ def test_fetch_active_alarms_for_user_skips_morning_alarm_mode(monkeypatch):
         "schedule": {"repeat": "once", "timeLocal": "09:00", "days": ["2026-03-29"]},
     }
     docs = [
-        _FakeDoc("users/user-1/alarms/alarm-sc", {
+        _FakeDoc("users/user-1/reminders/alarm-sc", {
             **base,
             "targets": [{"deviceId": "aa:bb:cc:dd:ee:ff", "mode": "scheduled_conversation"}],
             "content": "gym",
         }),
-        _FakeDoc("users/user-1/alarms/alarm-ma", {
+        _FakeDoc("users/user-1/reminders/alarm-ma", {
             **base,
             "targets": [{"deviceId": "aa:bb:cc:dd:ee:ff", "mode": "morning_alarm"}],
         }),

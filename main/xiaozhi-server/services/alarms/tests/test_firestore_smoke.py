@@ -36,10 +36,11 @@ def test_firestore_prepare_wake_smoke(monkeypatch):
     monkeypatch.setenv("ALARM_USER_ALLOWLIST", user_id)
 
     alarm_ref = (
-        client.collection("users").document(user_id).collection("alarms").document(alarm_id)
+        client.collection("users").document(user_id).collection("reminders").document(alarm_id)
     )
     alarm_payload = {
         "status": "on",
+        "typeHint": "alarm",
         "label": "Smoke Test Alarm",
         "nextOccurrenceUTC": datetime.now(timezone.utc)
         .isoformat(timespec="milliseconds")
@@ -58,7 +59,7 @@ def test_firestore_prepare_wake_smoke(monkeypatch):
     }
     client.collection("sessionContexts").document(normalized_device_id).delete()
     alarm_ref.set(alarm_payload, merge=True)
-    print(f"[smoke] inserted alarm at users/{user_id}/alarms/{alarm_id} for device {device_id}")
+    print(f"[smoke] inserted alarm at users/{user_id}/reminders/{alarm_id} for device {device_id}")
 
     try:
         now = datetime.now(timezone.utc)

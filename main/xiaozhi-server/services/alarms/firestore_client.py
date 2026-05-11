@@ -47,7 +47,7 @@ def _build_client() -> firestore.Client:
 
 
 def _collection_group(client: firestore.Client):
-    return client.collection_group("alarms")
+    return client.collection_group("reminders")
 
 
 def fetch_due_alarms(
@@ -66,13 +66,16 @@ def fetch_due_alarms(
         f"{upper_bound_str} (window start={window_start}, lookahead={lookahead})"
     )
     query = _collection_group(client)
+    query = query.where(filter=FieldFilter("typeHint", "==", "alarm"))
     query = query.where(filter=FieldFilter("status", "==", "on"))
     query = query.where(filter=FieldFilter("nextOccurrenceUTC", "<=", upper_bound_str))
 
     docs: List[models.AlarmDoc] = []
     for doc in query.stream():
-        user_id = _resolve_user_id(doc)
         data = doc.to_dict() or {}
+        if data.get("typeHint") != "alarm":
+            continue
+        user_id = _resolve_user_id(doc)
         user_meta = _get_user_metadata(doc, user_cache)
         if user_meta:
             data = dict(data)
@@ -351,7 +354,7 @@ def _build_alarm_targets(
             for target in targets_payload
         ]
 
-    # Legacy alarm docs under users/{uid}/alarms/morning did not store targets.
+    # Legacy alarm docs may not store targets.
     # Fallback to all devices currently owned by the user so older alarms still fire.
     legacy_device_ids = _get_user_device_ids(user_id, client=client, cache=device_cache)
     return [
@@ -451,7 +454,7 @@ def create_alarm(
     tz_str: str,
     client: Optional[firestore.Client] = None,
 ) -> str:
-    """Write a one-time alarm doc to /users/{uid}/alarms/{alarm_id} and return the alarm_id.
+    """Write a one-time alarm doc to /users/{uid}/reminders/{alarm_id}.
 
     Args:
         uid: The user's document ID (ownerPhone).
@@ -482,12 +485,13 @@ def create_alarm(
         "status": models.AlarmStatus.ON.value,
         "targets": [{"deviceId": device_id, "mode": "morning_alarm"}],
         "uid": uid,
+        "typeHint": "alarm",
         "source": "voice",
         "createdAt": _format_datetime(now_utc),
         "updatedAt": _format_datetime(now_utc),
     }
 
-    client.collection("users").document(uid).collection("alarms").document(alarm_id).set(doc)
+    client.collection("users").document(uid).collection("reminders").document(alarm_id).set(doc)
     logger.bind(tag=TAG).info(
         f"Created one-time alarm {alarm_id} for user {uid} device {device_id} "
         f"at {_format_datetime(resolved_dt)} (local {time_local} {tz_str}): '{label}'"

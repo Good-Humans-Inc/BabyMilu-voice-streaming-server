@@ -101,6 +101,35 @@ def test_fetch_due_reminders_reads_collection_group(monkeypatch):
     assert results[0].repeat == "none"
 
 
+def test_fetch_due_reminders_skips_alarm_typehint(monkeypatch):
+    now = datetime.now(timezone.utc)
+    data = {
+        "status": "on",
+        "typeHint": "alarm",
+        "nextOccurrenceUTC": now.isoformat(),
+        "schedule": {"repeat": "none", "timeLocal": "08:00"},
+        "label": "Morning alarm",
+    }
+    docs = [
+        _FakeDoc(
+            path="users/user-1/reminders/alarm-1",
+            doc_id="alarm-1",
+            user_id="user-1",
+            data=data,
+        )
+    ]
+    client = _FakeClient(docs)
+    monkeypatch.setattr(
+        reminder_scheduler, "FieldFilter", lambda field_path, op, value: (field_path, op, value)
+    )
+
+    results = reminder_scheduler.fetch_due_reminders(
+        now=now, lookahead=timedelta(minutes=2), client=client
+    )
+
+    assert results == []
+
+
 def test_process_due_reminders_dry_run_does_not_write(monkeypatch):
     now = datetime.now(timezone.utc)
     data = {
