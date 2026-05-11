@@ -22,6 +22,7 @@ from exponent_server_sdk import (
 
 from openai import APIError, OpenAI
 
+from core.utils.firestore_factory import build_firestore_client
 from core.utils.mac import normalize_mac
 from services.alarms import reminder_advancement
 from services.alarms.config import ALARM_TIMING
@@ -667,7 +668,7 @@ def run_send_reminder_push_job(
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     now_iso = now.isoformat()
-    client = client or firestore.Client()
+    client = client or build_firestore_client()
 
     query = client.collection_group("reminders").where(
         filter=FieldFilter("status", "==", "on")

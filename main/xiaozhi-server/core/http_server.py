@@ -3,6 +3,7 @@ from aiohttp import web
 from config.logger import setup_logging
 from core.api.ota_handler import OTAHandler
 from core.api.vision_handler import VisionHandler
+from core.api.journal_handler import JournalHandler
 from services.messaging.mqtt import publish_ws_start, publish_auto_update
 import os
 import json
@@ -17,6 +18,7 @@ class SimpleHttpServer:
         self.logger = setup_logging()
         self.ota_handler = OTAHandler(config)
         self.vision_handler = VisionHandler(config)
+        self.journal_handler = JournalHandler(config)
 
     def _get_websocket_url(self, local_ip: str, port: int) -> str:
         """获取websocket地址
@@ -64,6 +66,8 @@ class SimpleHttpServer:
                     web.post("/alarm/ws_start", self.handle_alarm_ws_start),
                     # Publish animation auto_update to device via MQTT
                     web.post("/animation/auto_updates", self.handle_animation_auto_updates),
+                    web.post("/journals/delete", self.journal_handler.handle_delete),
+                    web.options("/journals/delete", self.handle_options),
                 ]
             )
 
@@ -82,6 +86,16 @@ class SimpleHttpServer:
             # 保持服务运行
             while True:
                 await asyncio.sleep(3600)  # 每隔 1 小时检查一次
+
+    async def handle_options(self, request: web.Request) -> web.Response:
+        response = web.Response(status=204)
+        response.headers["Access-Control-Allow-Headers"] = (
+            "authorization, client-id, content-type, device-id"
+        )
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+        return response
 
     async def handle_alarm_ws_start(self, request: web.Request) -> web.Response:
         """HTTP endpoint to publish ws_start to a device via MQTT.

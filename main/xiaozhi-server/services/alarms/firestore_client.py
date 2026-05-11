@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from google.cloud import firestore
 from google.cloud.firestore_v1 import FieldFilter
 
-from config.settings import get_gcp_credentials_path
+from core.utils.firestore_factory import build_firestore_client
 from services.logging import setup_logging
 from core.utils.mac import normalize_mac
 from services.alarms import models
@@ -29,21 +29,7 @@ _REPEAT_ALIASES = {
 
 
 def _build_client() -> firestore.Client:
-    creds_path = get_gcp_credentials_path()
-    if creds_path:
-        import os
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
-    else:
-        # If no valid credentials found, clear the env var if it points to a directory
-        # to prevent "Is a directory" errors from Firestore
-        import os
-        env_creds = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-        if env_creds and os.path.isdir(env_creds):
-            # Directory detected but no JSON file found inside - clear it to avoid errors
-            if "GOOGLE_APPLICATION_CREDENTIALS" in os.environ:
-                del os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
-
-    return firestore.Client()
+    return build_firestore_client()
 
 
 def _collection_group(client: firestore.Client):

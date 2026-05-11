@@ -168,12 +168,11 @@ def _get_profile_from_firestore(device_id: str, fs_conf: Dict[str, Any]) -> Dict
     global _firestore_client
     if _firestore_client is None:
         try:
-            from google.cloud import firestore
+            from core.utils.firestore_factory import build_firestore_client
         except Exception:
             return {}
         project_id = fs_conf.get("project_id")
-        # ADC on GCE; credentials picked automatically
-        _firestore_client = firestore.Client(project=project_id) if project_id else firestore.Client()
+        _firestore_client = build_firestore_client(project=project_id)
 
     try:
         collection = fs_conf.get("devices_collection", "devices")

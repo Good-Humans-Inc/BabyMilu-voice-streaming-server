@@ -6,6 +6,7 @@ from typing import Optional, Tuple, Dict, Any
 from google.cloud import firestore
 from config.settings import get_gcp_credentials_path
 from config.logger import setup_logging
+from core.utils.firestore_factory import build_firestore_client, firestore_database_label
 
 
 TAG = __name__
@@ -37,7 +38,12 @@ def _build_client() -> firestore.Client:
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
         logger.bind(tag=TAG).info(f"✅ Using GCP credentials file: {creds_path}")
     
-    return firestore.Client()
+    client = build_firestore_client()
+    logger.bind(tag=TAG).info(
+        f"Firestore client initialized: project={getattr(client, 'project', None)} "
+        f"database={firestore_database_label()}"
+    )
+    return client
 
 
 def _fetch_device_doc(client, device_id: str, timeout: float):

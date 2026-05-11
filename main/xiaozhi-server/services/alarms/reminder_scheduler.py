@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, List, Optional
 from google.cloud import firestore
 from google.cloud.firestore_v1 import FieldFilter
 
-from config.settings import get_gcp_credentials_path
+from core.utils.firestore_factory import build_firestore_client
 from services.alarms import reminder_advancement
 from services.logging import setup_logging
 
@@ -36,12 +36,7 @@ TriggerFn = Callable[[ReminderDoc], bool]
 
 
 def _build_client() -> firestore.Client:
-    creds_path = get_gcp_credentials_path()
-    if creds_path:
-        import os
-
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
-    return firestore.Client()
+    return build_firestore_client()
 
 
 def _collection_group(client: firestore.Client):

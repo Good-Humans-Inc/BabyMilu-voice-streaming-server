@@ -56,6 +56,8 @@ from core.utils.next_starter_client import get_ready_next_starter
 
 from services.session_context import store as session_context_store
 from services.alarms.config import MODE_CONFIG
+from services.journals.config import journals_enabled
+from services.journals.store import write_session_marker
 from services import log_context
 
 from core.utils.api_client import query_task, get_assigned_tasks_for_user, process_user_action
@@ -1424,6 +1426,31 @@ Return ONLY the JSON array, no other explanation."""
                         self.chat_store.delete_session(self.session_id)
                     else:
                         self.chat_store.end_session(self.session_id)
+                        if journals_enabled():
+                            try:
+                                marker_character_id = None
+                                if self.device_id:
+                                    marker_character_id = get_active_character_for_device(self.device_id)
+                                    if not marker_character_id:
+                                        marker_character_id = get_most_recent_character_via_user_for_device(self.device_id)
+                                user_turn_count = len(
+                                    [
+                                        msg
+                                        for msg in getattr(self.dialogue, "dialogue", [])
+                                        if getattr(msg, "role", "") == "user"
+                                    ]
+                                )
+                                write_session_marker(
+                                    user_id=getattr(self, "user_id", "") or "",
+                                    device_id=self.device_id or "",
+                                    character_id=marker_character_id or "",
+                                    session_id=self.session_id,
+                                    user_turn_count=user_turn_count,
+                                )
+                            except Exception as journal_err:
+                                self.logger.bind(tag=TAG).warning(
+                                    f"Journal session marker skipped: {journal_err}"
+                                )
                 finally:
                     self._session_closed = True
         except Exception as e:

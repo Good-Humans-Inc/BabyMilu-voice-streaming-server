@@ -3,17 +3,22 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
-from google.cloud import firestore
 
+from core.utils.firestore_factory import build_firestore_client
 from services.logging import setup_logging
 from services.alarms import reminder_push_job, scheduler, tasks
+from services.journals.jobs import (
+    process_journal_ready_sessions,
+    run_journal_generation_job,
+    run_journal_publish_job,
+)
 from services.messaging.mqtt import publish_ws_start
 from services.alarms.config import ALARM_TIMING
 from core.utils.mac import normalize_mac
 
 TAG = __name__
 logger = setup_logging()
-_db = firestore.Client()
+_db = build_firestore_client()
 
 
 def scan_due_alarms(request) -> Dict[str, Any]:
@@ -179,6 +184,21 @@ def scan_due_scheduled_items(request) -> Dict[str, Any]:
             + int(reminders_result.get("triggered", 0)),
         },
     }
+
+
+def process_journal_sessions(request) -> Dict[str, Any]:
+    execute = _env_bool("JOURNAL_PROCESSING_EXECUTE", False)
+    return process_journal_ready_sessions(execute=execute)
+
+
+def generate_journals(request) -> Dict[str, Any]:
+    execute = _env_bool("JOURNAL_GENERATION_EXECUTE", False)
+    return run_journal_generation_job(execute=execute)
+
+
+def publish_journals(request) -> Dict[str, Any]:
+    execute = _env_bool("JOURNAL_PUBLISH_EXECUTE", False)
+    return run_journal_publish_job(execute=execute)
 
 
 def _env_bool(name: str, default: bool) -> bool:
