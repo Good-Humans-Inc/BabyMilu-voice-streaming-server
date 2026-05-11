@@ -49,17 +49,23 @@ server:
 concurrency:
   vad_pool:
     # Each leased VAD provider owns one mutable Silero model instance.
-    size: 8
-    lease_timeout: 10.0
+    size: 20
+    lease_timeout: 20.0
     active_acquire_timeout: 0.05
     idle_release_ms: 1200
   executors:
     audio:
       # Shared worker pool for audio-side blocking work, including VAD calls.
-      max_workers: 16
+      max_workers: 28
       max_queue_size: 1000
   timeouts:
+    profile: 30.0
+    db: 20.0
+    provider: 120.0
+    tool: 45.0
     audio: 15.0
+    persistence: 20.0
+    bootstrap_text_wait: 30.0
 
 log:
   # 设置控制台输出的日志格式，时间、日志级别、标签、消息
@@ -735,8 +741,8 @@ TTS:
     max_concurrent_requests: 3
     retry_429_attempts: 1
     retry_429_backoff_ms: 500
-    connect_timeout_seconds: 8
-    total_timeout_seconds: 60
+    connect_timeout_seconds: 15
+    total_timeout_seconds: 120
   GPT_SOVITS_V2:
     # 定义TTS API类型
     #启动tts方法：
