@@ -106,6 +106,7 @@ sys.modules.setdefault("core.utils.voiceprint_provider", voiceprint_stub)
 
 from core import connection as conn_mod
 from core.connection import ConnectionHandler
+from core.providers.asr.base import ASRProviderBase
 
 
 def _base_config() -> dict:
@@ -241,24 +242,45 @@ def _make_handler(executors=None) -> ConnectionHandler:
 class _FakeVadProvider:
     def __init__(self):
         self.reset_count = 0
+        self.vad_calls = []
 
     def reset_states(self):
         self.reset_count += 1
 
+    def is_vad(self, _conn, audio):
+        self.vad_calls.append(audio)
+        return True
+
 
 class _FakeVadPool:
-    def __init__(self):
+    def __init__(self, *, empty=False):
         self.provider = _FakeVadProvider()
+        self.empty = empty
         self.acquire_count = 0
+        self.acquire_timeouts = []
         self.released = []
 
-    def acquire(self):
+    def acquire(self, timeout=None):
         self.acquire_count += 1
+        self.acquire_timeouts.append(timeout)
+        if self.empty:
+            raise TimeoutError("pool empty")
         return self.provider
 
     def release(self, provider):
         self.released.append(provider)
         provider.reset_states()
+
+
+class _BoundaryASR(ASRProviderBase):
+    def __init__(self):
+        self.voice_stop_audio = None
+
+    async def speech_to_text(self, opus_data, session_id, audio_format="opus"):
+        return "", None
+
+    async def handle_voice_stop(self, conn, asr_audio_task):
+        self.voice_stop_audio = list(asr_audio_task)
 
 
 def _executor_queue_limit(executor) -> int:
@@ -576,7 +598,7 @@ def test_shared_silero_vad_uses_per_connection_opus_decoders(monkeypatch):
     assert not hasattr(provider, "decoder")
 
 
-def test_connection_checks_out_and_returns_vad_provider(connection_fakes):
+def test_component_initialization_does_not_acquire_vad_provider(connection_fakes):
     async def _scenario():
         pool = _FakeVadPool()
         executors = conn_mod.ServerExecutors.from_config(_base_config())
@@ -593,15 +615,197 @@ def test_connection_checks_out_and_returns_vad_provider(connection_fakes):
         )
 
         try:
-            handler._acquire_vad_provider()
+            handler.device_id = "aa:bb:cc:dd:ee:ff"
+            handler.client_ip = "127.0.0.1"
+            handler.asr = object()
+            handler.tts = object()
+            handler._initialize_voiceprint = lambda: None
+            handler._ensure_per_connection_providers = lambda: None
+            handler._initialize_memory = lambda: None
+            handler._initialize_intent = lambda: None
+            handler._init_report_threads = lambda: None
+            handler._init_prompt_enhancement = lambda: None
+
+            handler._initialize_components()
+            await asyncio.sleep(0)
+
+            assert pool.acquire_count == 0
+            assert handler.vad is None
+            assert handler.components_initialized.is_set()
+        finally:
+            executors.shutdown()
+
+    asyncio.run(_scenario())
+
+
+def test_audio_routes_after_bootstrap_without_vad_lease(connection_fakes):
+    async def _scenario():
+        pool = _FakeVadPool()
+        executors = conn_mod.ServerExecutors.from_config(_base_config())
+        handler = ConnectionHandler(
+            _base_config(),
+            _vad=pool,
+            _asr=_TemplateASR(),
+            _llm=None,
+            _memory=None,
+            _task=None,
+            _intent=None,
+            server=None,
+            executors=executors,
+        )
+
+        try:
+            handler.asr = _TemplateASR()
+            handler.vad = None
+            handler.conn_from_mqtt_gateway = False
+            handler.components_initialized.set()
+
+            await handler._route_message(b"frame")
+
+            assert handler.asr_audio_queue.get_nowait() == b"frame"
+            assert pool.acquire_count == 0
+        finally:
+            executors.shutdown()
+
+    asyncio.run(_scenario())
+
+
+def test_connection_lazily_checks_out_and_returns_vad_provider_after_utterance(
+    connection_fakes,
+):
+    async def _scenario():
+        pool = _FakeVadPool()
+        executors = conn_mod.ServerExecutors.from_config(_base_config())
+        handler = ConnectionHandler(
+            _base_config(),
+            _vad=pool,
+            _asr=_TemplateASR(),
+            _llm=None,
+            _memory=None,
+            _task=None,
+            _intent=None,
+            server=None,
+            executors=executors,
+        )
+
+        try:
+            assert handler.vad is None
+
+            assert handler.run_vad(b"frame-1") is True
             assert handler.vad is pool.provider
             assert pool.acquire_count == 1
+            assert pool.provider.vad_calls == [b"frame-1"]
+
+            asr = _BoundaryASR()
+            handler.client_listen_mode = "auto"
+            handler.client_have_voice = True
+            handler.client_voice_stop = True
+            handler.asr_audio = [b"frame-1", b"frame-2", b"frame-3"]
+
+            await asr.receive_audio(handler, b"frame-4", audio_have_voice=False)
+
+            assert asr.voice_stop_audio == [
+                b"frame-1",
+                b"frame-2",
+                b"frame-3",
+                b"frame-4",
+            ]
+            assert handler.vad is None
+            assert pool.released == [pool.provider]
+            assert pool.provider.reset_count == 1
 
             await handler.close()
 
             assert handler.vad is None
             assert pool.released == [pool.provider]
-            assert pool.provider.reset_count == 1
+        finally:
+            executors.shutdown()
+
+    asyncio.run(_scenario())
+
+
+def test_run_vad_treats_empty_pool_as_silence(connection_fakes):
+    pool = _FakeVadPool(empty=True)
+    executors = conn_mod.ServerExecutors.from_config(_base_config())
+    handler = ConnectionHandler(
+        _base_config(),
+        _vad=pool,
+        _asr=_TemplateASR(),
+        _llm=None,
+        _memory=None,
+        _task=None,
+        _intent=None,
+        server=None,
+        executors=executors,
+    )
+
+    try:
+        assert handler.run_vad(b"frame") is False
+        assert handler.vad is None
+        assert pool.acquire_count == 1
+    finally:
+        executors.shutdown()
+
+
+def test_inactive_silence_releases_vad_after_idle_window(connection_fakes):
+    config = _base_config()
+    config["concurrency"] = {"vad_pool": {"idle_release_ms": 0}}
+    pool = _FakeVadPool()
+    executors = conn_mod.ServerExecutors.from_config(config)
+    handler = ConnectionHandler(
+        config,
+        _vad=pool,
+        _asr=_TemplateASR(),
+        _llm=None,
+        _memory=None,
+        _task=None,
+        _intent=None,
+        server=None,
+        executors=executors,
+    )
+
+    try:
+        assert handler.run_vad(b"silence") is True
+        handler.client_have_voice = False
+
+        handler.release_inactive_vad_lease()
+
+        assert handler.vad is None
+        assert pool.released == [pool.provider]
+    finally:
+        executors.shutdown()
+
+
+def test_short_utterance_releases_vad_even_without_asr_work(connection_fakes):
+    async def _scenario():
+        pool = _FakeVadPool()
+        executors = conn_mod.ServerExecutors.from_config(_base_config())
+        handler = ConnectionHandler(
+            _base_config(),
+            _vad=pool,
+            _asr=_TemplateASR(),
+            _llm=None,
+            _memory=None,
+            _task=None,
+            _intent=None,
+            server=None,
+            executors=executors,
+        )
+
+        try:
+            assert handler.run_vad(b"frame-1") is True
+
+            asr = _BoundaryASR()
+            handler.client_listen_mode = "auto"
+            handler.client_have_voice = True
+            handler.client_voice_stop = True
+            handler.asr_audio = [b"frame-1"]
+
+            await asr.receive_audio(handler, b"frame-2", audio_have_voice=False)
+
+            assert asr.voice_stop_audio is None
+            assert handler.vad is None
+            assert pool.released == [pool.provider]
         finally:
             executors.shutdown()
 

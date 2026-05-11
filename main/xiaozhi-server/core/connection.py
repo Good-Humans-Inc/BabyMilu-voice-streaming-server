@@ -218,6 +218,8 @@ class ConnectionHandler:
                 self._vad_pool = None
                 self._vad = _vad
         self._leased_vad_pool = None
+        self._vad_lease_lock = threading.Lock()
+        self._vad_lease_started_ms = 0
         self._closing = False
         self._vad_inflight = 0
         self._vad_inflight_lock = threading.Lock()
@@ -794,7 +796,7 @@ class ConnectionHandler:
             self.loop.call_soon_threadsafe(self.components_initialized.set)
         finally:
             self.bootstrap_complete.set()
-            if self.vad is not None and self.asr is not None:
+            if self.asr is not None:
                 self.components_initialized.set()
             self._flush_early_audio()
 
@@ -1575,7 +1577,7 @@ Return ONLY the JSON array, no other explanation."""
 
     async def _route_audio_message(self, message, *, from_early_buffer=False):
         if (
-            (self.vad is None or self.asr is None or not self.components_initialized.is_set())
+            (self.asr is None or not self.components_initialized.is_set())
             and not from_early_buffer
         ):
             self._enqueue_early_audio(message)
@@ -1608,7 +1610,7 @@ Return ONLY the JSON array, no other explanation."""
             )
 
     def _flush_early_audio(self):
-        if self.vad is None or self.asr is None or not self.components_initialized.is_set():
+        if self.asr is None or not self.components_initialized.is_set():
             return
         flushed = 0
         while True:
@@ -1728,8 +1730,6 @@ Return ONLY the JSON array, no other explanation."""
                     "快速初始化组件: prompt渲染完成"
                 )
 
-            if self.vad is None:
-                self._acquire_vad_provider()
             if self.asr is None:
                 self.asr = self._initialize_asr()
 
@@ -1759,31 +1759,75 @@ Return ONLY the JSON array, no other explanation."""
             self.loop.call_soon_threadsafe(self.components_initialized.set)
             self.loop.call_soon_threadsafe(self._flush_early_audio)
 
-    def _acquire_vad_provider(self):
+    def _vad_pool_config(self) -> Dict[str, Any]:
+        concurrency = self.config.get("concurrency", {}) or {}
+        return concurrency.get("vad_pool", {}) or {}
+
+    def _vad_active_acquire_timeout(self) -> float:
+        raw = self._vad_pool_config().get("active_acquire_timeout", 0.05)
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            return 0.05
+
+    def _vad_idle_release_ms(self) -> int:
+        raw = self._vad_pool_config().get("idle_release_ms", 1200)
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return 1200
+
+    def _acquire_vad_provider(self, timeout: Optional[float] = None) -> bool:
         if self.vad is not None:
-            return
+            return True
 
-        if self._vad_pool is not None:
-            self.vad = self._vad_pool.acquire()
-            self._leased_vad_pool = self._vad_pool
-            self.logger.bind(tag=TAG).debug(
-                f"Checked out VAD provider from pool for {self.device_id}"
-            )
-            return
+        with self._vad_lease_lock:
+            if self.vad is not None:
+                return True
 
-        self.vad = self._vad
+            if self._vad_pool is not None:
+                wait_timeout = (
+                    self._vad_active_acquire_timeout()
+                    if timeout is None
+                    else timeout
+                )
+                self.vad = self._vad_pool.acquire(timeout=wait_timeout)
+                self._leased_vad_pool = self._vad_pool
+                self._vad_lease_started_ms = int(time.time() * 1000)
+                self.logger.bind(tag=TAG).debug(
+                    f"Checked out VAD provider from pool for {self.device_id}"
+                )
+                return True
 
-    def _release_vad_provider(self, *, return_to_pool: bool = True):
+            if self._vad is None:
+                return False
+
+            self.vad = self._vad
+            self._vad_lease_started_ms = int(time.time() * 1000)
+            return True
+
+    def _release_vad_provider(
+        self,
+        *,
+        return_to_pool: bool = True,
+        reset_connection_state: bool = True,
+    ):
         if self._leased_vad_pool is None or self.vad is None:
             return
 
-        provider = self.vad
-        pool = self._leased_vad_pool
-        self.vad = None
-        self._leased_vad_pool = None
-        self.reset_vad_states()
-        if hasattr(self, "_vad_opus_decoder"):
-            delattr(self, "_vad_opus_decoder")
+        with self._vad_lease_lock:
+            if self._leased_vad_pool is None or self.vad is None:
+                return
+
+            provider = self.vad
+            pool = self._leased_vad_pool
+            self.vad = None
+            self._leased_vad_pool = None
+            self._vad_lease_started_ms = 0
+            if reset_connection_state:
+                self.reset_vad_states()
+            if hasattr(self, "_vad_opus_decoder"):
+                delattr(self, "_vad_opus_decoder")
 
         if return_to_pool:
             pool.release(provider)
@@ -1794,6 +1838,22 @@ Return ONLY the JSON array, no other explanation."""
             self.logger.bind(tag=TAG).warning(
                 "Keeping VAD provider out of pool because audio worker did not stop"
             )
+
+    def release_vad_lease(self, *, reset_connection_state: bool = True):
+        self._release_vad_provider(
+            return_to_pool=True,
+            reset_connection_state=reset_connection_state,
+        )
+
+    def release_inactive_vad_lease(self):
+        if self._leased_vad_pool is None or self.client_have_voice:
+            return
+        started_ms = self._vad_lease_started_ms
+        if not started_ms:
+            return
+        if int(time.time() * 1000) - started_ms < self._vad_idle_release_ms():
+            return
+        self._release_vad_provider()
 
     def _begin_vad_call(self) -> bool:
         with self._vad_inflight_lock:
@@ -1813,10 +1873,18 @@ Return ONLY the JSON array, no other explanation."""
         if not self._begin_vad_call():
             return False
         try:
+            if self.vad is None and not self._acquire_vad_provider():
+                return False
+
             provider = self.vad
             if provider is None:
                 return False
             return provider.is_vad(self, audio)
+        except TimeoutError:
+            self.logger.bind(tag=TAG).debug(
+                f"VAD provider unavailable for {self.device_id}; treating frame as silence"
+            )
+            return False
         finally:
             self._end_vad_call()
 

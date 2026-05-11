@@ -130,12 +130,18 @@ class ASRProviderBase(ABC):
         conn.asr_audio.append(audio)
         if not have_voice and not conn.client_have_voice:
             conn.asr_audio = conn.asr_audio[-10:]
+            release_inactive = getattr(conn, "release_inactive_vad_lease", None)
+            if callable(release_inactive):
+                release_inactive()
             return
 
         if conn.client_voice_stop:
             asr_audio_task = conn.asr_audio.copy()
             conn.asr_audio.clear()
             conn.reset_vad_states()
+            release_vad = getattr(conn, "release_vad_lease", None)
+            if callable(release_vad):
+                release_vad(reset_connection_state=False)
 
             # Opus packets are handled as ~60 ms frames here, so >3 packets
             # allows forwarding utterances of roughly 0.2 seconds or longer.

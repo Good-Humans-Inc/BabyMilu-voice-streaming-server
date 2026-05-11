@@ -249,6 +249,9 @@ class ASRProvider(ASRProviderBase):
                         if text:
                             self.text = text
                             conn.reset_vad_states()
+                            release_vad = getattr(conn, "release_vad_lease", None)
+                            if callable(release_vad):
+                                release_vad(reset_connection_state=False)
                             # 传递缓存的音频数据
                             audio_data = getattr(conn, 'asr_audio_for_voiceprint', [])
                             await self.handle_voice_stop(conn, audio_data)

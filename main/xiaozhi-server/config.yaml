@@ -51,6 +51,8 @@ concurrency:
     # Each leased VAD provider owns one mutable Silero model instance.
     size: 8
     lease_timeout: 10.0
+    active_acquire_timeout: 0.05
+    idle_release_ms: 1200
   executors:
     audio:
       # Shared worker pool for audio-side blocking work, including VAD calls.
