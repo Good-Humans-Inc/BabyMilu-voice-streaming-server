@@ -11,7 +11,9 @@ GET_WEATHER_FUNCTION_DESC = {
     "function": {
         "name": "get_weather",
         "description": (
-            "Get the weather for a location. The user should provide a location, for example if the user says 'weather in San Francisco', the parameter should be 'San Francisco'. "
+            "Get the weather for a location. Pass only the city name in the location parameter. "
+            "Do not include state, province, country, abbreviations, or comma-separated address parts. "
+            "For example, if the user says 'weather in San Francisco', the parameter should be 'San Francisco'; use 'San Francisco', not 'San Francisco, CA', 'San Francisco, CA, USA', or 'SF'. "
             "If the user mentions a state/province, use the capital city by default. If the user mentions a place name that is not a province or city, use the capital city of the province where that place is located by default. "
             "If the user does not specify a location, saying things like 'how's the weather' or 'what's the weather like today', the location parameter should be empty."
         ),
@@ -20,7 +22,7 @@ GET_WEATHER_FUNCTION_DESC = {
             "properties": {
                 "location": {
                     "type": "string",
-                    "description": "Location name, e.g., San Francisco. Optional parameter, if not provided, do not pass it",
+                    "description": "City name only, e.g., San Francisco. Do not pass San Francisco, CA, San Francisco, CA, USA, or SF. Optional parameter; if not provided, do not pass it",
                 },
                 "lang": {
                     "type": "string",
