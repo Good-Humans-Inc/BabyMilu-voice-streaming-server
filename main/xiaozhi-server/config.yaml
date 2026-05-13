@@ -261,6 +261,7 @@ Intent:
     # 下面是加载查天气、角色切换、加载查新闻的插件示例
     functions:
       - change_role
+      - get_current_time
       - get_weather
       - play_music
       - set_alarm

@@ -65,7 +65,7 @@ class _AlarmReadClient:
         self._device_docs = device_docs
 
     def collection_group(self, name):
-        assert name == "alarms"
+        assert name == "reminders"
         return _Query(self._alarm_docs)
 
     def collection(self, name):
@@ -155,8 +155,9 @@ def test_daily_scheduled_conversation_hydrates_plushie_session(monkeypatch):
 def test_legacy_alarm_without_targets_uses_device_fallback(monkeypatch):
     now = datetime.now(timezone.utc)
     alarm_doc = _Doc(
-        "users/user-1/alarms/alarm-1",
+        "users/user-1/reminders/alarm-1",
         {
+            "typeHint": "alarm",
             "status": "on",
             "nextOccurrenceUTC": now.isoformat(),
             "schedule": {"repeat": "once", "timeLocal": "07:00", "days": []},

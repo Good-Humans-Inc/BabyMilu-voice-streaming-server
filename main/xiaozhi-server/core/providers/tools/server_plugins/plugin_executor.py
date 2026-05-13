@@ -59,7 +59,7 @@ class ServerPluginExecutor(ToolExecutor):
         tools = {}
 
         # 获取必要的函数
-        necessary_functions = ["handle_exit_intent", "get_lunar"]
+        necessary_functions = ["handle_exit_intent", "get_lunar", "get_current_time"]
 
         # function-call tools are configured under LLM.function_call.functions.
         llm_functions = (
