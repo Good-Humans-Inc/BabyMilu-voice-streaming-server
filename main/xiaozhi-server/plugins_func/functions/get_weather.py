@@ -82,7 +82,7 @@ def fetch_city_info(location):
     params = {"name": location, "count": 1, "language": "en"}
     
     try:
-        response = requests.get(url, params=params, headers=HEADERS)
+        response = requests.get(url, params=params, headers=HEADERS, timeout=5)
         response.raise_for_status()
         data = response.json()
         results = data.get("results", [])
@@ -122,7 +122,7 @@ def fetch_weather_forecast(latitude, longitude, timezone="auto", forecast_days=7
     }
     
     try:
-        response = requests.get(url, params=params, headers=HEADERS)
+        response = requests.get(url, params=params, headers=HEADERS, timeout=5)
         response.raise_for_status()
         return response.json()
     except requests.RequestException as e:
@@ -179,6 +179,45 @@ def parse_weather_info(weather_data, city_info):
     }
 
 
+def format_weather_report(parsed_info, city_info):
+    city_name = parsed_info["city_name"]
+    if city_info.get("admin1"):
+        city_name += f", {city_info['admin1']}"
+    if city_info.get("country"):
+        city_name += f", {city_info['country']}"
+
+    weather_report = f"Location queried: {city_name}\n\n"
+    weather_report += f"Current weather: {parsed_info['current_weather']}\n"
+    weather_report += f"Current temperature: {parsed_info['current_temp']}\u00b0C\n"
+    weather_report += f"Humidity: {parsed_info['current_humidity']}%\n"
+    weather_report += f"Wind speed: {parsed_info['current_wind']} km/h\n"
+
+    weather_report += "\n7-day forecast:\n"
+    for date, weather, high, low in parsed_info["temps_list"]:
+        weather_report += f"{date}: {weather}, temperature {low}\u00b0C~{high}\u00b0C\n"
+
+    weather_report += "\n(If you need specific weather for a particular day, please tell me the date)"
+    return weather_report
+
+
+def build_weather_report(location, forecast_days=7):
+    city_info = fetch_city_info(location)
+    if not city_info:
+        return None, f"City not found: {location}, please verify the location is correct"
+
+    weather_data = fetch_weather_forecast(
+        city_info["latitude"],
+        city_info["longitude"],
+        city_info.get("timezone", "auto"),
+        forecast_days=forecast_days,
+    )
+    if not weather_data:
+        return None, "Failed to get weather data"
+
+    parsed_info = parse_weather_info(weather_data, city_info)
+    return format_weather_report(parsed_info, city_info), None
+
+
 @register_function("get_weather", GET_WEATHER_FUNCTION_DESC, ToolType.SYSTEM_CTL)
 def get_weather(conn, location: str = None, lang: str = "en_US"):
     from core.utils.cache.manager import cache_manager, CacheType
@@ -204,48 +243,11 @@ def get_weather(conn, location: str = None, lang: str = "en_US"):
     if cached_weather_report:
         return ActionResponse(Action.REQLLM, cached_weather_report, None)
 
-    # Cache miss, get real-time weather data
-    # Step 1: Get city coordinates using Open-Meteo Geocoding API
-    city_info = fetch_city_info(location)
-    if not city_info:
-        return ActionResponse(
-            Action.REQLLM, f"City not found: {location}, please verify the location is correct", None
-        )
-    
-    # Step 2: Get weather forecast using Open-Meteo Forecast API
-    weather_data = fetch_weather_forecast(
-        city_info["latitude"],
-        city_info["longitude"],
-        city_info.get("timezone", "auto"),
-        forecast_days=7
-    )
-    
-    if not weather_data:
-        return ActionResponse(Action.REQLLM, None, "Failed to get weather data")
-    
-    # Step 3: Parse weather data
-    parsed_info = parse_weather_info(weather_data, city_info)
-    
-    # Step 4: Format weather report
-    city_name = parsed_info["city_name"]
-    if city_info.get("admin1"):
-        city_name += f", {city_info['admin1']}"
-    if city_info.get("country"):
-        city_name += f", {city_info['country']}"
-    
-    weather_report = f"Location queried: {city_name}\n\n"
-    weather_report += f"Current weather: {parsed_info['current_weather']}\n"
-    weather_report += f"Current temperature: {parsed_info['current_temp']}°C\n"
-    weather_report += f"Humidity: {parsed_info['current_humidity']}%\n"
-    weather_report += f"Wind speed: {parsed_info['current_wind']} km/h\n"
-
-    # Add 7-day forecast
-    weather_report += "\n7-day forecast:\n"
-    for date, weather, high, low in parsed_info["temps_list"]:
-        weather_report += f"{date}: {weather}, temperature {low}°C~{high}°C\n"
-
-    # Hint message
-    weather_report += "\n(If you need specific weather for a particular day, please tell me the date)"
+    weather_report, error = build_weather_report(location)
+    if error:
+        if error.startswith("City not found"):
+            return ActionResponse(Action.REQLLM, error, None)
+        return ActionResponse(Action.REQLLM, None, error)
 
     # Cache the full weather report
     cache_manager.set(CacheType.WEATHER, weather_cache_key, weather_report)
