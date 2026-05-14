@@ -15,7 +15,9 @@ GET_WEATHER_FUNCTION_DESC = {
             "Do not include state, province, country, abbreviations, or comma-separated address parts. "
             "For example, if the user says 'weather in San Francisco', the parameter should be 'San Francisco'; use 'San Francisco', not 'San Francisco, CA', 'San Francisco, CA, USA', or 'SF'. "
             "If the user mentions a state/province, use the capital city by default. If the user mentions a place name that is not a province or city, use the capital city of the province where that place is located by default. "
-            "If the user does not specify a location, saying things like 'how's the weather' or 'what's the weather like today', the location parameter should be empty."
+            "If the user does not specify a location and their city is available in context, pass that city name only. "
+            "For example, if context says the user's city is 'Boston, MA, USA', pass 'Boston'. "
+            "If no user city is known, the location parameter should be empty."
         ),
         "parameters": {
             "type": "object",
@@ -122,14 +124,31 @@ def fetch_weather_forecast(latitude, longitude, timezone="auto", forecast_days=7
         "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,wind_speed_10m_max",
         "hourly": "temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m",
     }
-    
-    try:
-        response = requests.get(url, params=params, headers=HEADERS, timeout=5)
-        response.raise_for_status()
-        return response.json()
-    except requests.RequestException as e:
-        logger.bind(tag=TAG).error(f"Failed to get weather data: {str(e)}")
-        return None
+
+    last_error = None
+    for attempt in range(3):
+        try:
+            response = requests.get(url, params=params, headers=HEADERS, timeout=5)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            last_error = e
+            if attempt < 2:
+                logger.bind(tag=TAG).warning(
+                    f"Weather data request failed, retrying ({attempt + 1}/2): {str(e)}"
+                )
+                continue
+
+    logger.bind(tag=TAG).error(f"Failed to get weather data: {str(last_error)}")
+    return None
+
+
+def build_weather_unavailable_fallback(location):
+    return (
+        f"Live weather lookup for {location} did not return data right now. "
+        "Tell the user that current weather is temporarily unavailable and offer to try again shortly. "
+        "Do not invent weather conditions or mention provider error details."
+    )
 
 
 def parse_weather_info(weather_data, city_info):
@@ -249,7 +268,11 @@ def get_weather(conn, location: str = None, lang: str = "en_US"):
     if error:
         if error.startswith("City not found"):
             return ActionResponse(Action.REQLLM, error, None)
-        return ActionResponse(Action.REQLLM, None, error)
+        return ActionResponse(
+            Action.REQLLM,
+            build_weather_unavailable_fallback(location),
+            None,
+        )
 
     # Cache the full weather report
     cache_manager.set(CacheType.WEATHER, weather_cache_key, weather_report)
