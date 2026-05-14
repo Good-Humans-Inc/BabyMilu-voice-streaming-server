@@ -183,3 +183,55 @@ def test_prompt_weather_info_matches_get_weather_forecast_format(monkeypatch):
         ("city", "San Francisco, CA"),
         ("forecast", 37.7749, -122.4194, "America/Los_Angeles", 7),
     ]
+
+
+def test_fetch_weather_forecast_retries_two_failures(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"current": {"temperature_2m": 11.1}}
+
+    def fake_get(*_args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) < 3:
+            raise weather_tool.requests.Timeout("read timed out")
+        return FakeResponse()
+
+    monkeypatch.setattr(weather_tool.requests, "get", fake_get)
+
+    data = weather_tool.fetch_weather_forecast(
+        42.35843,
+        -71.05977,
+        "America/New_York",
+    )
+
+    assert data == {"current": {"temperature_2m": 11.1}}
+    assert len(calls) == 3
+    assert all(call["timeout"] == 5 for call in calls)
+
+
+def test_get_weather_failure_returns_llm_fallback_without_timeout(monkeypatch):
+    _reset_prompt_weather_caches()
+
+    class Conn:
+        client_ip = "203.0.113.10"
+        config = {"plugins": {"get_weather": {"default_location": "Boston"}}}
+
+    monkeypatch.setattr(
+        weather_tool,
+        "build_weather_report",
+        lambda location: (None, "Failed to get weather data: read timed out"),
+    )
+
+    result = weather_tool.get_weather(Conn(), location="Boston", lang="en_US")
+
+    assert result.action == weather_tool.Action.REQLLM
+    assert result.response is None
+    assert "Boston" in result.result
+    assert "temporarily unavailable" in result.result
+    assert "timeout" not in result.result.lower()
+    assert "timed out" not in result.result.lower()
