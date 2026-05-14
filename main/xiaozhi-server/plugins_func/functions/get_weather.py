@@ -15,7 +15,9 @@ GET_WEATHER_FUNCTION_DESC = {
             "Do not include state, province, country, abbreviations, or comma-separated address parts. "
             "For example, if the user says 'weather in San Francisco', the parameter should be 'San Francisco'; use 'San Francisco', not 'San Francisco, CA', 'San Francisco, CA, USA', or 'SF'. "
             "If the user mentions a state/province, use the capital city by default. If the user mentions a place name that is not a province or city, use the capital city of the province where that place is located by default. "
-            "If the user does not specify a location, saying things like 'how's the weather' or 'what's the weather like today', the location parameter should be empty."
+            "If the user does not specify a location and their city is available in context, pass that city name only. "
+            "For example, if context says the user's city is 'Boston, MA, USA', pass 'Boston'. "
+            "If no user city is known, the location parameter should be empty."
         ),
         "parameters": {
             "type": "object",
