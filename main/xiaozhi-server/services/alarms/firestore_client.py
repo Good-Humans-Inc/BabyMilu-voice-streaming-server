@@ -27,6 +27,8 @@ _REPEAT_ALIASES = {
     "no_repeat": models.AlarmRepeat.NONE,
 }
 
+_REMINDER_TARGET_MODES = frozenset({"reminder", "scheduled_conversation"})
+
 
 def _build_client() -> firestore.Client:
     creds_path = get_gcp_credentials_path()
@@ -48,6 +50,10 @@ def _build_client() -> firestore.Client:
 
 def _collection_group(client: firestore.Client):
     return client.collection_group("reminders")
+
+
+def _user_reminders_collection(client: firestore.Client, uid: str):
+    return client.collection("users").document(uid).collection("reminders")
 
 
 def fetch_due_alarms(
@@ -364,6 +370,70 @@ def _build_alarm_targets(
     ]
 
 
+def _is_user_reminder_payload(data: Dict[str, Any]) -> bool:
+    """Return True for reminder docs managed by app/plushie reminder tools."""
+    if str(data.get("typeHint") or "").strip().lower() == "alarm":
+        return False
+
+    targets_payload = data.get("targets")
+    if not isinstance(targets_payload, list) or not targets_payload:
+        return True
+
+    saw_mode = False
+    for target in targets_payload:
+        if not isinstance(target, dict):
+            continue
+        mode = str(target.get("mode") or "").strip().lower()
+        if not mode:
+            continue
+        saw_mode = True
+        if mode in _REMINDER_TARGET_MODES:
+            return True
+    return not saw_mode
+
+
+def _build_reminder_schedule_for_listing(
+    schedule_payload: Any,
+) -> models.AlarmSchedule:
+    if not isinstance(schedule_payload, dict):
+        schedule_payload = {}
+    try:
+        return _build_schedule(schedule_payload)
+    except (KeyError, ValueError, TypeError):
+        repeat = _REPEAT_ALIASES.get(
+            str(schedule_payload.get("repeat", "none")).strip().lower(),
+            models.AlarmRepeat.NONE,
+        )
+        return models.AlarmSchedule(
+            repeat=repeat,
+            time_local=str(schedule_payload.get("timeLocal") or ""),
+            days=schedule_payload.get("days") or [],
+        )
+
+
+def _build_reminder_targets_for_listing(targets_payload: Any) -> List[models.AlarmTarget]:
+    targets: List[models.AlarmTarget] = []
+    if not isinstance(targets_payload, list):
+        return targets
+    for target in targets_payload:
+        if not isinstance(target, dict):
+            continue
+        raw_device_id = target.get("deviceId")
+        if not isinstance(raw_device_id, str) or not raw_device_id.strip():
+            continue
+        try:
+            device_id = _normalize_device_id(raw_device_id)
+        except ValueError:
+            device_id = raw_device_id
+        targets.append(
+            models.AlarmTarget(
+                device_id=device_id,
+                mode=str(target.get("mode") or "reminder"),
+            )
+        )
+    return targets
+
+
 def _get_user_device_ids(
     user_id: str,
     *,
@@ -578,51 +648,42 @@ def create_scheduled_conversation(
     return alarm_id
 
 
+def fetch_active_reminders_for_user(
+    uid: str,
+    client: Optional[firestore.Client] = None,
+) -> List[models.AlarmDoc]:
+    """Fetch all active user reminder docs for a specific user.
+
+    Queries /users/{uid}/reminders where status=on, then excludes alarm docs.
+    Includes voice-created scheduled conversations and app-created reminders.
+    """
+    client = client or _build_client()
+    docs: List[models.AlarmDoc] = []
+    query = _user_reminders_collection(client, uid).where(
+        filter=FieldFilter("status", "==", "on")
+    )
+    for doc in query.stream():
+        data = doc.to_dict() or {}
+        if str(data.get("status") or "").strip().lower() != models.AlarmStatus.ON.value:
+            continue
+        if not _is_user_reminder_payload(data):
+            continue
+        schedule = _build_reminder_schedule_for_listing(data.get("schedule") or {})
+        targets = _build_reminder_targets_for_listing(data.get("targets") or [])
+        alarm = _build_alarm_doc(doc, data, schedule, targets)
+        docs.append(alarm)
+    logger.bind(tag=TAG).info(
+        f"Fetched {len(docs)} active reminders for user {uid}"
+    )
+    return docs
+
+
 def fetch_active_alarms_for_user(
     uid: str,
     client: Optional[firestore.Client] = None,
 ) -> List[models.AlarmDoc]:
-    """Fetch all active scheduled_conversation reminders for a specific user.
-
-    Queries /users/{uid}/reminders where status=on, then filters to
-    scheduled_conversation mode only.
-    """
-    client = client or _build_client()
-    docs: List[models.AlarmDoc] = []
-    query = (
-        client.collection("users")
-        .document(uid)
-        .collection("reminders")
-        .where(filter=FieldFilter("status", "==", "on"))
-    )
-    for doc in query.stream():
-        data = doc.to_dict() or {}
-        schedule_payload = data.get("schedule") or {}
-        try:
-            repeat = _parse_repeat(schedule_payload.get("repeat", "none"))
-            schedule = models.AlarmSchedule(
-                repeat=repeat,
-                time_local=schedule_payload.get("timeLocal", ""),
-                days=schedule_payload.get("days") or [],
-            )
-            targets_payload = data.get("targets") or []
-            targets = [
-                models.AlarmTarget(
-                    device_id=_normalize_device_id(t["deviceId"]),
-                    mode=t.get("mode", "morning_alarm"),
-                )
-                for t in targets_payload
-                if "deviceId" in t
-            ]
-        except (KeyError, ValueError):
-            continue
-        alarm = _build_alarm_doc(doc, data, schedule, targets)
-        if any(t.mode == "scheduled_conversation" for t in alarm.targets):
-            docs.append(alarm)
-    logger.bind(tag=TAG).info(
-        f"Fetched {len(docs)} active scheduled_conversation reminders for user {uid}"
-    )
-    return docs
+    """Backward-compatible alias for active user reminders."""
+    return fetch_active_reminders_for_user(uid, client=client)
 
 
 def modify_scheduled_conversation(
@@ -763,6 +824,43 @@ def write_alarm_outcome(
     )
 
 
+def cancel_active_reminders_for_user(
+    uid: str,
+    client: Optional[firestore.Client] = None,
+) -> List[str]:
+    """Cancel all active user reminders and return the reminder ids updated."""
+    client = client or _build_client()
+    reminders = fetch_active_reminders_for_user(uid, client=client)
+    if not reminders:
+        return []
+
+    now = datetime.now(timezone.utc)
+    update_doc = {
+        "status": models.AlarmStatus.OFF.value,
+        "updatedAt": _format_datetime(now),
+    }
+    cancelled_ids: List[str] = []
+    batch = client.batch()
+    pending = 0
+    for reminder in reminders:
+        if not reminder.doc_path:
+            continue
+        batch.set(client.document(reminder.doc_path), update_doc, merge=True)
+        cancelled_ids.append(reminder.alarm_id)
+        pending += 1
+        if pending == 500:
+            batch.commit()
+            batch = client.batch()
+            pending = 0
+    if pending:
+        batch.commit()
+
+    logger.bind(tag=TAG).info(
+        f"Cancelled {len(cancelled_ids)} active reminders for user {uid}"
+    )
+    return cancelled_ids
+
+
 def cancel_scheduled_conversation(
     uid: str,
     alarm_id: str,
@@ -778,9 +876,7 @@ def cancel_scheduled_conversation(
     client = client or _build_client()
     now = datetime.now(timezone.utc)
     (
-        client.collection("users")
-        .document(uid)
-        .collection("reminders")
+        _user_reminders_collection(client, uid)
         .document(alarm_id)
         .set(
             {

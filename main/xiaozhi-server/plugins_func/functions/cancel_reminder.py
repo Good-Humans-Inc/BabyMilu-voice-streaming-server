@@ -1,7 +1,8 @@
 from plugins_func.register import register_function, ToolType, ActionResponse, Action
 from core.utils.firestore_client import get_owner_phone_for_device
 from services.alarms.firestore_client import (
-    fetch_active_alarms_for_user,
+    fetch_active_reminders_for_user,
+    cancel_active_reminders_for_user,
     cancel_scheduled_conversation,
 )
 from config.logger import setup_logging
@@ -14,7 +15,7 @@ LIST_REMINDERS_FUNCTION_DESC = {
     "function": {
         "name": "list_reminders",
         "description": (
-            "List all of the user's active scheduled reminders. "
+            "List all of the user's active reminders. "
             "Call this before cancel_reminder when you don't already have the reminder_id."
         ),
         "parameters": {"type": "object", "properties": {}, "required": []},
@@ -31,7 +32,7 @@ def list_reminders(conn) -> ActionResponse:
             response="I couldn't look up your reminders right now.",
         )
     try:
-        alarms = fetch_active_alarms_for_user(uid)
+        alarms = fetch_active_reminders_for_user(uid)
     except Exception as e:
         logger.bind(tag=TAG).error(f"Failed to fetch reminders for user {uid}: {e}")
         return ActionResponse(
@@ -91,6 +92,13 @@ def cancel_reminder(conn, alarm_id: str) -> ActionResponse:
             response="I couldn't cancel that reminder right now.",
         )
     try:
+        active_reminders = fetch_active_reminders_for_user(uid)
+        active_ids = {reminder.alarm_id for reminder in active_reminders}
+        if alarm_id not in active_ids:
+            return ActionResponse(
+                action=Action.REQLLM,
+                result=f"No active reminder found with reminder_id={alarm_id}.",
+            )
         cancel_scheduled_conversation(uid, alarm_id)
     except Exception as e:
         logger.bind(tag=TAG).error(
@@ -104,4 +112,56 @@ def cancel_reminder(conn, alarm_id: str) -> ActionResponse:
     return ActionResponse(
         action=Action.REQLLM,
         result=f"Reminder {alarm_id} cancelled successfully.",
+    )
+
+
+CANCEL_ALL_REMINDERS_FUNCTION_DESC = {
+    "type": "function",
+    "function": {
+        "name": "cancel_all_reminders",
+        "description": (
+            "Cancel (turn off) all of the user's active reminders. "
+            "Use this when the user asks to cancel, delete, clear, or turn off all reminders."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+}
+
+
+@register_function(
+    "cancel_all_reminders",
+    CANCEL_ALL_REMINDERS_FUNCTION_DESC,
+    ToolType.SYSTEM_CTL,
+)
+def cancel_all_reminders(conn) -> ActionResponse:
+    uid = get_owner_phone_for_device(conn.device_id)
+    if not uid:
+        return ActionResponse(
+            action=Action.RESPONSE,
+            response="I couldn't cancel your reminders right now.",
+        )
+    try:
+        cancelled_ids = cancel_active_reminders_for_user(uid)
+    except Exception as e:
+        logger.bind(tag=TAG).error(f"Failed to cancel all reminders for user {uid}: {e}")
+        return ActionResponse(
+            action=Action.RESPONSE,
+            response="Something went wrong cancelling your reminders. Want to try again?",
+        )
+
+    if not cancelled_ids:
+        return ActionResponse(
+            action=Action.REQLLM,
+            result="No active reminders found.",
+        )
+
+    shown_ids = ", ".join(cancelled_ids[:10])
+    suffix = (
+        ""
+        if len(cancelled_ids) <= 10
+        else f", and {len(cancelled_ids) - 10} more"
+    )
+    return ActionResponse(
+        action=Action.REQLLM,
+        result=f"Cancelled {len(cancelled_ids)} active reminders: {shown_ids}{suffix}.",
     )

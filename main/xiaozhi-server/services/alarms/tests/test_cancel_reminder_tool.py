@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from plugins_func.functions.cancel_reminder import cancel_reminder, list_reminders
+from plugins_func.functions.cancel_reminder import (
+    cancel_all_reminders,
+    cancel_reminder,
+    list_reminders,
+)
 from plugins_func.register import Action
 from services.alarms import models
 
@@ -56,7 +60,7 @@ def test_list_reminders_returns_formatted_list(monkeypatch):
         lambda device_id: "user-1",
     )
     monkeypatch.setattr(
-        "plugins_func.functions.cancel_reminder.fetch_active_alarms_for_user",
+        "plugins_func.functions.cancel_reminder.fetch_active_reminders_for_user",
         lambda uid: alarms,
     )
 
@@ -75,7 +79,7 @@ def test_list_reminders_returns_empty_message_when_none(monkeypatch):
         lambda device_id: "user-1",
     )
     monkeypatch.setattr(
-        "plugins_func.functions.cancel_reminder.fetch_active_alarms_for_user",
+        "plugins_func.functions.cancel_reminder.fetch_active_reminders_for_user",
         lambda uid: [],
     )
 
@@ -91,7 +95,7 @@ def test_list_reminders_fetch_error_returns_response(monkeypatch):
         lambda device_id: "user-1",
     )
     monkeypatch.setattr(
-        "plugins_func.functions.cancel_reminder.fetch_active_alarms_for_user",
+        "plugins_func.functions.cancel_reminder.fetch_active_reminders_for_user",
         lambda uid: (_ for _ in ()).throw(RuntimeError("Firestore unavailable")),
     )
 
@@ -128,6 +132,10 @@ def test_cancel_reminder_calls_cancel_scheduled_conversation(monkeypatch):
         "plugins_func.functions.cancel_reminder.cancel_scheduled_conversation",
         lambda uid, alarm_id: calls.append((uid, alarm_id)),
     )
+    monkeypatch.setattr(
+        "plugins_func.functions.cancel_reminder.fetch_active_reminders_for_user",
+        lambda uid: [_make_alarm("alarm-42")],
+    )
 
     response = cancel_reminder(_make_conn(), alarm_id="alarm-42")
 
@@ -145,8 +153,97 @@ def test_cancel_reminder_firestore_error_returns_response(monkeypatch):
         "plugins_func.functions.cancel_reminder.cancel_scheduled_conversation",
         lambda uid, alarm_id: (_ for _ in ()).throw(RuntimeError("Firestore unavailable")),
     )
+    monkeypatch.setattr(
+        "plugins_func.functions.cancel_reminder.fetch_active_reminders_for_user",
+        lambda uid: [_make_alarm("alarm-42")],
+    )
 
     response = cancel_reminder(_make_conn(), alarm_id="alarm-42")
+
+    assert response.action == Action.RESPONSE
+    assert response.response is not None
+
+
+def test_cancel_reminder_rejects_non_active_id(monkeypatch):
+    monkeypatch.setattr(
+        "plugins_func.functions.cancel_reminder.get_owner_phone_for_device",
+        lambda device_id: "user-1",
+    )
+    monkeypatch.setattr(
+        "plugins_func.functions.cancel_reminder.fetch_active_reminders_for_user",
+        lambda uid: [_make_alarm("alarm-42")],
+    )
+
+    response = cancel_reminder(_make_conn(), alarm_id="all")
+
+    assert response.action == Action.REQLLM
+    assert "No active reminder" in response.result
+
+
+# ---------------------------------------------------------------------------
+# cancel_all_reminders tests
+# ---------------------------------------------------------------------------
+
+def test_cancel_all_reminders_calls_bulk_cancel(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        "plugins_func.functions.cancel_reminder.get_owner_phone_for_device",
+        lambda device_id: "user-1",
+    )
+    monkeypatch.setattr(
+        "plugins_func.functions.cancel_reminder.cancel_active_reminders_for_user",
+        lambda uid: calls.append(uid) or ["alarm-1", "mobile-1"],
+    )
+
+    response = cancel_all_reminders(_make_conn())
+
+    assert response.action == Action.REQLLM
+    assert "Cancelled 2 active reminders" in response.result
+    assert "alarm-1" in response.result
+    assert "mobile-1" in response.result
+    assert calls == ["user-1"]
+
+
+def test_cancel_all_reminders_returns_empty_message_when_none(monkeypatch):
+    monkeypatch.setattr(
+        "plugins_func.functions.cancel_reminder.get_owner_phone_for_device",
+        lambda device_id: "user-1",
+    )
+    monkeypatch.setattr(
+        "plugins_func.functions.cancel_reminder.cancel_active_reminders_for_user",
+        lambda uid: [],
+    )
+
+    response = cancel_all_reminders(_make_conn())
+
+    assert response.action == Action.REQLLM
+    assert "No active reminders" in response.result
+
+
+def test_cancel_all_reminders_firestore_error_returns_response(monkeypatch):
+    monkeypatch.setattr(
+        "plugins_func.functions.cancel_reminder.get_owner_phone_for_device",
+        lambda device_id: "user-1",
+    )
+    monkeypatch.setattr(
+        "plugins_func.functions.cancel_reminder.cancel_active_reminders_for_user",
+        lambda uid: (_ for _ in ()).throw(RuntimeError("Firestore unavailable")),
+    )
+
+    response = cancel_all_reminders(_make_conn())
+
+    assert response.action == Action.RESPONSE
+    assert response.response is not None
+
+
+def test_cancel_all_reminders_missing_uid_returns_response(monkeypatch):
+    monkeypatch.setattr(
+        "plugins_func.functions.cancel_reminder.get_owner_phone_for_device",
+        lambda device_id: None,
+    )
+
+    response = cancel_all_reminders(_make_conn())
 
     assert response.action == Action.RESPONSE
     assert response.response is not None

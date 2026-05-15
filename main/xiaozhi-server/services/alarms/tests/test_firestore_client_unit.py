@@ -110,6 +110,37 @@ class _FakeUserScopedClient:
         return self._docs
 
 
+class _FakeDocRef:
+    def __init__(self, path):
+        self.path = path
+
+
+class _FakeBatch:
+    def __init__(self, client):
+        self._client = client
+
+    def set(self, ref, doc, **kwargs):
+        self._client.batch_sets.append((ref.path, doc, kwargs))
+
+    def commit(self):
+        self._client.batch_commits += 1
+
+
+class _FakeBatchUserScopedClient(_FakeUserScopedClient):
+    def __init__(self, docs):
+        super().__init__(docs)
+        self.batch_sets = []
+        self.batch_commits = 0
+
+    def document(self, *args, **kwargs):
+        if args and isinstance(args[0], str) and "/" in args[0]:
+            return _FakeDocRef(args[0])
+        return self
+
+    def batch(self):
+        return _FakeBatch(self)
+
+
 def test_create_scheduled_conversation_writes_correct_mode_and_fields():
     now = datetime(2026, 3, 24, 9, 0, tzinfo=timezone.utc)
     fake_client = _FakeWriteClient()
@@ -388,49 +419,87 @@ def test_fetch_due_alarms_supports_daily_repeat(monkeypatch):
     assert results[0].schedule.repeat == firestore_client.models.AlarmRepeat.DAILY
 
 
-def test_fetch_active_alarms_for_user_returns_on_alarms(monkeypatch):
-    """Returns scheduled_conversation alarms when stream has a valid doc."""
+def test_fetch_active_reminders_for_user_returns_voice_and_mobile_reminders(monkeypatch):
+    """Returns active voice and app reminders from the user's reminders collection."""
     now = datetime.now(timezone.utc)
-    data = {
+    base = {
         "status": "on",
         "nextOccurrenceUTC": now.isoformat(),
-        "schedule": {"repeat": "once", "timeLocal": "09:00", "days": ["2026-03-29"]},
-        "targets": [{"deviceId": "aa:bb:cc:dd:ee:ff", "mode": "scheduled_conversation"}],
-        "content": "take vitamins",
-        "label": "take vitamins",
+        "schedule": {"repeat": "once", "timeLocal": "09:00", "dateLocal": "2026-03-29"},
     }
-    docs = [_FakeDoc("users/user-1/reminders/alarm-42", data)]
+    docs = [
+        _FakeDoc("users/user-1/reminders/voice-1", {
+            **base,
+            "targets": [{"deviceId": "aa:bb:cc:dd:ee:ff", "mode": "scheduled_conversation"}],
+            "content": "take vitamins",
+            "label": "take vitamins",
+        }),
+        _FakeDoc("users/user-1/reminders/mobile-1", {
+            **base,
+            "targets": [{"deviceId": "device_123", "mode": "reminder"}],
+            "label": "drink water",
+        }),
+    ]
     client = _FakeUserScopedClient(docs)
 
     monkeypatch.setattr(
         firestore_client, "FieldFilter", lambda field_path, op, value: (field_path, op, value)
     )
 
-    results = firestore_client.fetch_active_alarms_for_user("user-1", client=client)
+    results = firestore_client.fetch_active_reminders_for_user("user-1", client=client)
 
-    assert len(results) == 1
-    assert results[0].alarm_id == "alarm-42"
+    assert [result.alarm_id for result in results] == ["voice-1", "mobile-1"]
     assert results[0].content == "take vitamins"
+    assert results[1].label == "drink water"
+    assert results[1].targets[0].device_id == "device_123"
 
 
-def test_fetch_active_alarms_for_user_skips_morning_alarm_mode(monkeypatch):
-    """Python-level filter excludes morning_alarm docs; only scheduled_conversation returned."""
+def test_fetch_active_reminders_for_user_skips_alarms_and_inactive(monkeypatch):
+    """Python-level filter excludes alarms and inactive docs even when fake where ignores filters."""
     now = datetime.now(timezone.utc)
     base = {
         "status": "on",
         "nextOccurrenceUTC": now.isoformat(),
-        "schedule": {"repeat": "once", "timeLocal": "09:00", "days": ["2026-03-29"]},
+        "schedule": {"repeat": "once", "timeLocal": "09:00", "dateLocal": "2026-03-29"},
     }
     docs = [
-        _FakeDoc("users/user-1/reminders/alarm-sc", {
+        _FakeDoc("users/user-1/reminders/reminder-1", {
             **base,
-            "targets": [{"deviceId": "aa:bb:cc:dd:ee:ff", "mode": "scheduled_conversation"}],
+            "targets": [{"deviceId": "aa:bb:cc:dd:ee:ff", "mode": "reminder"}],
             "content": "gym",
         }),
         _FakeDoc("users/user-1/reminders/alarm-ma", {
             **base,
+            "typeHint": "alarm",
             "targets": [{"deviceId": "aa:bb:cc:dd:ee:ff", "mode": "morning_alarm"}],
         }),
+        _FakeDoc("users/user-1/reminders/off-1", {
+            **base,
+            "status": "off",
+            "targets": [{"deviceId": "aa:bb:cc:dd:ee:ff", "mode": "reminder"}],
+        }),
+    ]
+    client = _FakeUserScopedClient(docs)
+
+    monkeypatch.setattr(
+        firestore_client, "FieldFilter", lambda field_path, op, value: (field_path, op, value)
+    )
+
+    results = firestore_client.fetch_active_reminders_for_user("user-1", client=client)
+
+    assert len(results) == 1
+    assert results[0].alarm_id == "reminder-1"
+
+
+def test_fetch_active_alarms_for_user_alias_uses_active_reminder_helper(monkeypatch):
+    now = datetime.now(timezone.utc)
+    docs = [
+        _FakeDoc("users/user-1/reminders/mobile-1", {
+            "status": "on",
+            "nextOccurrenceUTC": now.isoformat(),
+            "schedule": {"repeat": "once", "timeLocal": "09:00"},
+            "targets": [{"deviceId": "aa:bb:cc:dd:ee:ff", "mode": "reminder"}],
+        })
     ]
     client = _FakeUserScopedClient(docs)
 
@@ -441,7 +510,7 @@ def test_fetch_active_alarms_for_user_skips_morning_alarm_mode(monkeypatch):
     results = firestore_client.fetch_active_alarms_for_user("user-1", client=client)
 
     assert len(results) == 1
-    assert results[0].alarm_id == "alarm-sc"
+    assert results[0].alarm_id == "mobile-1"
 
 
 def test_cancel_scheduled_conversation_writes_status_off():
@@ -460,6 +529,56 @@ def test_cancel_scheduled_conversation_writes_status_off():
     assert "updatedAt" in doc
     assert "lastProcessedUTC" not in doc
     assert fake_client.merge is True
+
+
+def test_cancel_active_reminders_for_user_updates_only_active_reminders(monkeypatch):
+    now = datetime.now(timezone.utc)
+    base = {
+        "status": "on",
+        "nextOccurrenceUTC": now.isoformat(),
+        "schedule": {"repeat": "once", "timeLocal": "09:00"},
+    }
+    docs = [
+        _FakeDoc("users/user-1/reminders/voice-1", {
+            **base,
+            "targets": [{"deviceId": "aa:bb:cc:dd:ee:ff", "mode": "scheduled_conversation"}],
+        }),
+        _FakeDoc("users/user-1/reminders/mobile-1", {
+            **base,
+            "targets": [{"deviceId": "device_123", "mode": "reminder"}],
+        }),
+        _FakeDoc("users/user-1/reminders/alarm-1", {
+            **base,
+            "typeHint": "alarm",
+            "targets": [{"deviceId": "aa:bb:cc:dd:ee:ff", "mode": "morning_alarm"}],
+        }),
+        _FakeDoc("users/user-1/reminders/off-1", {
+            **base,
+            "status": "off",
+            "targets": [{"deviceId": "aa:bb:cc:dd:ee:ff", "mode": "reminder"}],
+        }),
+    ]
+    client = _FakeBatchUserScopedClient(docs)
+
+    monkeypatch.setattr(
+        firestore_client, "FieldFilter", lambda field_path, op, value: (field_path, op, value)
+    )
+
+    cancelled_ids = firestore_client.cancel_active_reminders_for_user(
+        "user-1",
+        client=client,
+    )
+
+    assert cancelled_ids == ["voice-1", "mobile-1"]
+    assert client.batch_commits == 1
+    assert [path for path, _, _ in client.batch_sets] == [
+        "users/user-1/reminders/voice-1",
+        "users/user-1/reminders/mobile-1",
+    ]
+    for _, doc, kwargs in client.batch_sets:
+        assert doc["status"] == "off"
+        assert "updatedAt" in doc
+        assert kwargs["merge"] is True
 
 
 def test_modify_scheduled_conversation_updates_top_level_fields():

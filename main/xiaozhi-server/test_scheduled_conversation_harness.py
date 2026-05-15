@@ -7,6 +7,7 @@ PHASE 1 — INTAKE / MANAGEMENT
     • schedule_conversation  — schedule a new reminder
     • list_reminders         — list active reminders
     • cancel_reminder        — cancel a reminder by id
+    • cancel_all_reminders    — cancel every active reminder
     • modify_reminder        — change time/content/priority of a reminder
 
   No Firestore writes happen.  All mutations are captured in memory and
@@ -148,6 +149,17 @@ def _fake_cancel_scheduled_conversation(uid: str, alarm_id: str) -> None:
         _print_cancel_box(alarm_id, None)
 
 
+def _fake_cancel_active_reminders_for_user(uid: str) -> list[str]:
+    cancelled = []
+    for alarm_id, doc in _reminders.items():
+        if doc.get("status") != "on":
+            continue
+        doc["status"] = "off"
+        cancelled.append(alarm_id)
+        _print_cancel_box(alarm_id, doc)
+    return cancelled
+
+
 def _fake_modify_scheduled_conversation(uid: str, alarm_id: str, **kwargs) -> None:
     if alarm_id not in _reminders:
         print(f"\n  ⚠️  modify_reminder: alarm_id {alarm_id!r} not found in harness store\n")
@@ -182,8 +194,9 @@ _sc.create_scheduled_conversation = _fake_create_scheduled_conversation
 
 import plugins_func.functions.cancel_reminder as _cr
 _cr.get_owner_phone_for_device  = _fake_get_owner_phone
-_cr.fetch_active_alarms_for_user = _fake_fetch_active_alarms
+_cr.fetch_active_reminders_for_user = _fake_fetch_active_alarms
 _cr.cancel_scheduled_conversation = _fake_cancel_scheduled_conversation
+_cr.cancel_active_reminders_for_user = _fake_cancel_active_reminders_for_user
 
 import plugins_func.functions.modify_reminder as _mr
 _mr.get_timezone_for_device    = _fake_get_timezone
@@ -197,8 +210,10 @@ from plugins_func.functions.schedule_conversation import (  # noqa: E402
 from plugins_func.functions.cancel_reminder import (  # noqa: E402
     LIST_REMINDERS_FUNCTION_DESC,
     CANCEL_REMINDER_FUNCTION_DESC,
+    CANCEL_ALL_REMINDERS_FUNCTION_DESC,
     list_reminders as run_list_tool,
     cancel_reminder as run_cancel_tool,
+    cancel_all_reminders as run_cancel_all_tool,
 )
 from plugins_func.functions.modify_reminder import (  # noqa: E402
     MODIFY_REMINDER_FUNCTION_DESC,
@@ -216,6 +231,7 @@ TOOL_DISPATCH = {
     "schedule_conversation": run_sc_tool,
     "list_reminders":        run_list_tool,
     "cancel_reminder":       run_cancel_tool,
+    "cancel_all_reminders":   run_cancel_all_tool,
     "modify_reminder":       run_modify_tool,
 }
 
@@ -617,7 +633,7 @@ def run_phase1(client: openai.OpenAI, model: str) -> dict | None:
     _section("PHASE 1 — INTAKE & MANAGEMENT")
     print("  Schedule, list, modify, or cancel reminders.")
     print("  Tools available: schedule_conversation | list_reminders |")
-    print("                   cancel_reminder | modify_reminder")
+    print("                   cancel_reminder | cancel_all_reminders | modify_reminder")
     print("  Empty line after scheduling → pick a reminder to simulate delivery.")
     print("  Ctrl-C to quit.\n")
 
