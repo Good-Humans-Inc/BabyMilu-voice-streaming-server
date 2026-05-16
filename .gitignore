@@ -210,5 +210,9 @@ _build_alarms/
 /tools/smoke/artifacts/
 /tools/smoke/environments/*.local.json
 
+# Journal lab local artifacts
+/journal_lab_artifacts/
+/main/xiaozhi-server/journal_lab_artifacts/
+
 # Local mock device credentials
 mock_device/sa.json
