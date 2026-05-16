@@ -48,8 +48,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     sessions = client.get_sessions_for_user(args.user_id, limit=args.session_limit)
     session_ids = [str(row.get("session_id")) for row in sessions if row.get("session_id")]
     turn_inventory = client.get_turn_inventory_for_sessions(session_ids)
-    memory_events = client.get_memory_events_for_user(args.user_id, limit=args.memory_event_limit)
-    read_model = client.get_read_model_for_user(args.user_id)
+    memory_events, memory_events_error = _optional_read(
+        lambda: client.get_memory_events_for_user(args.user_id, limit=args.memory_event_limit),
+        default=[],
+    )
+    read_model, read_model_error = _optional_read(
+        lambda: client.get_read_model_for_user(args.user_id),
+        default=None,
+    )
     firestore_info = _firestore_inventory(args.user_id, args.character_id)
 
     result = {
@@ -66,8 +72,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             "tables": client.table_names(),
             "sessions": _session_inventory(sessions),
             "turns": _turn_inventory(session_ids, turn_inventory),
-            "memoryEvents": _memory_event_inventory(memory_events),
-            "memoryReadModel": _read_model_inventory(read_model),
+            "memoryEvents": _memory_event_inventory(memory_events, memory_events_error),
+            "memoryReadModel": _read_model_inventory(read_model, read_model_error),
         },
         "configuredFirestore": firestore_info,
         "replayReadiness": _replay_readiness(
@@ -121,17 +127,21 @@ def _turn_inventory(session_ids: list[str], turns: list[dict[str, Any]]) -> dict
     }
 
 
-def _memory_event_inventory(memory_events: list[dict[str, Any]]) -> dict[str, Any]:
+def _memory_event_inventory(
+    memory_events: list[dict[str, Any]],
+    error: Optional[str],
+) -> dict[str, Any]:
     event_types = Counter(str(row.get("event_type") or row.get("eventType") or "missing") for row in memory_events)
     start, end = _iso_min_max([row.get("created_at") for row in memory_events])
     return {
         "count": len(memory_events),
         "dateRange": {"start": start, "end": end},
         "eventTypeBreakdown": dict(sorted(event_types.items())),
+        "readError": error,
     }
 
 
-def _read_model_inventory(read_model: Optional[dict[str, Any]]) -> dict[str, Any]:
+def _read_model_inventory(read_model: Optional[dict[str, Any]], error: Optional[str]) -> dict[str, Any]:
     prompt_pack = read_model.get("prompt_pack") if isinstance(read_model, dict) else None
     if not isinstance(prompt_pack, dict):
         prompt_pack = {}
@@ -139,6 +149,7 @@ def _read_model_inventory(read_model: Optional[dict[str, Any]]) -> dict[str, Any
         "exists": bool(read_model),
         "hasPromptPack": bool(prompt_pack),
         "hasSystemMemoryBlock": bool(prompt_pack.get("systemMemoryBlock")),
+        "readError": error,
     }
 
 
@@ -205,6 +216,13 @@ def _print_human_summary(result: dict[str, Any]) -> None:
     print(f"Can replay: {readiness['canReplay']}")
     for note in readiness["notes"]:
         print(f"- {note}")
+
+
+def _optional_read(callable_obj, *, default):
+    try:
+        return callable_obj(), None
+    except Exception as exc:
+        return default, str(exc)
 
 
 def _parse_dt(value: Any) -> Optional[datetime]:
