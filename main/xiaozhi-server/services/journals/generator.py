@@ -627,17 +627,41 @@ def _contains_required_detail(normalized_text: str, required_details: List[str])
     details = [_normalize_text(item) for item in required_details if str(item).strip()]
     if not details:
         return False
-    text_words = set(normalized_text.split())
+    text_words = _expanded_word_set(normalized_text.split())
     for detail in details:
         if detail and detail in normalized_text:
             return True
-        words = [word for word in detail.split() if word not in STOPWORDS]
+        words = [word for word in _expanded_word_set(detail.split()) if word not in STOPWORDS]
         if len(words) >= 2 and len(set(words) & text_words) >= 2:
             return True
         distinctive = [word for word in words if len(word) >= 5]
         if distinctive and any(word in text_words for word in distinctive):
             return True
     return False
+
+
+def _expanded_word_set(words: List[str]) -> set[str]:
+    expanded: set[str] = set()
+    for word in words:
+        expanded.update(_word_variants(word))
+    return expanded
+
+
+def _word_variants(word: str) -> set[str]:
+    value = word.strip().lower()
+    variants = {value} if value else set()
+    if value.endswith("'s") and len(value) > 2:
+        variants.add(value[:-2])
+    if value.endswith("s") and len(value) > 3:
+        variants.add(value[:-1])
+    if value.endswith("ed") and len(value) > 4:
+        stem = value[:-2]
+        variants.add(stem)
+        if len(stem) >= 2 and stem[-1] == stem[-2]:
+            variants.add(stem[:-1])
+    if value.endswith("ing") and len(value) > 5:
+        variants.add(value[:-3])
+    return {item for item in variants if item}
 
 
 def _starts_with_banned_time(text: str) -> bool:
