@@ -47,3 +47,41 @@ def write_generated_journals(path: Path, journals: list[dict[str, Any]]) -> None
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def write_conversation_timeline(path: Path, decisions: list[dict[str, Any]]) -> None:
+    lines = ["# Conversation Timeline", ""]
+    if not decisions:
+        lines.append("No sessions were replayed.")
+    for index, row in enumerate(decisions, start=1):
+        label = "generated journal" if row.get("journalEntryId") else "no journal"
+        lines.extend(
+            [
+                f"## {index}. {row.get('localDate') or 'unknown date'} - {label}",
+                "",
+                f"- Session ID: `{row.get('sessionId')}`",
+                f"- Started at: {row.get('startedAt')}",
+                f"- Memory status: {row.get('memoryStatus')}",
+                f"- User turns: {row.get('userTurnCount')}",
+                f"- Decision: {row.get('decision')}",
+                f"- Reason: {row.get('reason')}",
+                f"- Turns before/after: {row.get('turnsSinceLastJournalBefore')} -> {row.get('turnsSinceLastJournalAfter')}",
+            ]
+        )
+        if row.get("classificationReason"):
+            lines.append(f"- Classifier reason: {row.get('classificationReason')}")
+        if row.get("dedupClear") not in {"", None}:
+            lines.append(f"- Dedup clear: {row.get('dedupClear')}")
+        if row.get("journalEntryId"):
+            lines.extend(
+                [
+                    f"- Journal entry: `{row.get('journalEntryId')}`",
+                    f"- Journal type: {row.get('journalType')}",
+                    f"- Thread reference: {row.get('threadReference')}",
+                ]
+            )
+        if row.get("topicSummary"):
+            lines.append(f"- Topic summary: {row.get('topicSummary')}")
+        lines.append("")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")

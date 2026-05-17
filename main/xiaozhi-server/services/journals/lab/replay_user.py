@@ -27,6 +27,7 @@ from zoneinfo import ZoneInfo
 
 from services.journals import generator
 from services.journals.lab import artifacts
+from services.journals.lab.profile_firestore import load_lab_profile
 from services.journals.lab.source_supabase import JournalLabSourceSupabase
 
 
@@ -38,6 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--user-name", default="the user")
     parser.add_argument("--character-name", default="Milu")
     parser.add_argument("--timezone", default="America/Los_Angeles")
+    parser.add_argument(
+        "--profile-firestore-database",
+        default="(default)",
+        help="Firestore database for read-only profile lookup. Empty/(default) reads default Firestore.",
+    )
     parser.add_argument("--artifact-root", default="journal_lab_artifacts")
     parser.add_argument("--allow-beta-read", action="store_true")
     parser.add_argument("--session-limit", type=int, default=20000)
@@ -54,6 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="Safety cap for generated journals. 0 means no cap.",
     )
+    parser.add_argument(
+        "--disable-simulated-memory-events",
+        action="store_true",
+        help="Do not pass simulated journal_written events into later classification prompts.",
+    )
     return parser
 
 
@@ -66,16 +77,33 @@ def main(argv: Optional[list[str]] = None) -> int:
     sessions = source.get_sessions_for_user(args.user_id, limit=args.session_limit)
     turns_by_session = _load_turns_by_session(source, sessions)
     artifact_dir = artifacts.make_artifact_dir(args.artifact_root, args.alias)
+    profile = load_lab_profile(
+        user_id=args.user_id,
+        character_id=args.character_id,
+        database_id=args.profile_firestore_database,
+    )
+    user_data = profile["userData"] if isinstance(profile.get("userData"), dict) else {}
+    character_data = profile["characterData"] if isinstance(profile.get("characterData"), dict) else {}
+    profile_name = _profile_name(character_data)
+    user_name = _first_string(user_data, ("name", "displayName", "firstName")) or args.user_name
+    character_name = profile_name or args.character_name
+    timezone_name = _first_string(user_data, ("timezone", "timeZone", "timezoneId", "userTimezone")) or args.timezone
 
     state = ReplayState(
         user_id=args.user_id,
         character_id=args.character_id,
-        user_name=args.user_name,
-        character_name=args.character_name,
-        timezone_name=args.timezone,
+        user_data={**user_data, "name": user_name},
+        character_data={
+            **character_data,
+            "id": args.character_id,
+            "name": character_name,
+            "profile": {**(character_data.get("profile") if isinstance(character_data.get("profile"), dict) else {}), "name": character_name},
+        },
+        timezone_name=timezone_name,
         turn_threshold=args.turn_threshold,
         min_user_turns=args.min_user_turns,
         max_generated_journals=args.max_generated_journals,
+        simulated_memory_events_enabled=not args.disable_simulated_memory_events,
     )
 
     decisions: list[dict[str, Any]] = []
@@ -99,18 +127,30 @@ def main(argv: Optional[list[str]] = None) -> int:
             "userId": args.user_id,
             "characterId": args.character_id,
             "timezone": args.timezone,
+            "resolvedTimezone": timezone_name,
             "sessionLimit": args.session_limit,
             "turnThreshold": args.turn_threshold,
             "minUserTurns": args.min_user_turns,
             "includePendingMemory": args.include_pending_memory,
             "maxGeneratedJournals": args.max_generated_journals,
+            "simulatedMemoryEventsEnabled": not args.disable_simulated_memory_events,
+        },
+        "profile": {
+            "firestoreDatabase": profile["database"],
+            "userExists": profile["userExists"],
+            "characterExists": profile["characterExists"],
+            "resolvedUserName": user_name,
+            "resolvedCharacterName": character_name,
         },
         "counts": {
             "sessionsRead": len(sessions),
             "sessionsWithTurns": sum(1 for turns in turns_by_session.values() if turns),
             "decisions": dict(Counter(row["decision"] for row in decisions)),
+            "reasons": dict(Counter(row["reason"] for row in decisions)),
             "journalsGenerated": len(state.journals),
             "simulatedMemoryEvents": len(state.memory_events),
+            "threadReferences": sum(1 for journal in state.journals if journal.get("threadReference")),
+            "dedupBlockedSessions": sum(1 for row in decisions if row.get("reason") == "dedup_blocked_by_prior_journal"),
         },
         "artifactDir": str(artifact_dir),
     }
@@ -131,11 +171,18 @@ def main(argv: Optional[list[str]] = None) -> int:
             "turnsSinceLastJournalAfter",
             "decision",
             "reason",
+            "classificationShouldJournal",
+            "dedupClear",
+            "classificationReason",
+            "topicSummary",
             "queueDate",
             "journalEntryId",
+            "journalType",
+            "threadReference",
         ],
     )
     artifacts.write_generated_journals(artifact_dir / "generated-journals.md", state.journals)
+    artifacts.write_conversation_timeline(artifact_dir / "conversation-timeline.md", decisions)
 
     print(f"Replay complete for {args.alias}")
     print(f"Sessions read: {len(sessions)}")
@@ -150,21 +197,23 @@ class ReplayState:
         *,
         user_id: str,
         character_id: str,
-        user_name: str,
-        character_name: str,
+        user_data: dict[str, Any],
+        character_data: dict[str, Any],
         timezone_name: str,
         turn_threshold: int,
         min_user_turns: int,
         max_generated_journals: int,
+        simulated_memory_events_enabled: bool,
     ) -> None:
         self.user_id = user_id
         self.character_id = character_id
-        self.user_name = user_name
-        self.character_name = character_name
+        self.user_data = user_data
+        self.character_data = character_data
         self.timezone_name = timezone_name
         self.turn_threshold = turn_threshold
         self.min_user_turns = min_user_turns
         self.max_generated_journals = max_generated_journals
+        self.simulated_memory_events_enabled = simulated_memory_events_enabled
         self.turns_since_last_journal = 0
         self.current_queue_date: Optional[str] = None
         self.queue: list[dict[str, Any]] = []
@@ -202,8 +251,14 @@ def _process_session(
         "turnsSinceLastJournalAfter": before,
         "decision": "skipped",
         "reason": "",
+        "classificationShouldJournal": "",
+        "dedupClear": "",
+        "classificationReason": "",
+        "topicSummary": "",
         "queueDate": "",
         "journalEntryId": "",
+        "journalType": "",
+        "threadReference": "",
     }
 
     if memory_status == "skipped":
@@ -231,15 +286,24 @@ def _process_session(
             "topicSummary": ["first journal"],
             "reason": "First journal after threshold.",
         }
+        _copy_classification_fields(decision, classification)
     else:
+        journal_events = [event for event in reversed(state.memory_events) if event.get("eventType") == "journal_written"][:3]
+        if not state.simulated_memory_events_enabled:
+            journal_events = []
         classification = generator.classify_session(
             turns=turns,
-            recent_memory_events=state.memory_events[-5:],
-            journal_memory_events=[event for event in reversed(state.memory_events) if event.get("eventType") == "journal_written"][:3],
+            recent_memory_events=state.memory_events[-5:] if state.simulated_memory_events_enabled else [],
+            journal_memory_events=journal_events,
             trigger_memory_events=[],
             session_start_time=str(session.get("start_time") or session.get("created_at") or ""),
         )
-        if not classification.get("should_journal") or classification.get("dedup_clear") is False:
+        _copy_classification_fields(decision, classification)
+        if classification.get("dedup_clear") is False:
+            decision["reason"] = "dedup_blocked_by_prior_journal"
+            decision["decision"] = "skipped"
+            return decision
+        if not classification.get("should_journal"):
             decision["reason"] = "classification_false"
             decision["decision"] = "skipped"
             return decision
@@ -251,6 +315,7 @@ def _process_session(
         "sessionEndTime": session.get("end_time") or session.get("last_active_at") or session.get("created_at"),
         "turns": turns,
         "sourceMemoryEventIds": [],
+        "_decision": decision,
     }
     if state.current_queue_date and local_date != state.current_queue_date:
         _generate_for_current_queue(state)
@@ -261,6 +326,7 @@ def _process_session(
     decision["decision"] = "queued"
     decision["reason"] = "queued_for_generation"
     decision["queueDate"] = local_date
+    decision["journalType"] = journal_type
     return decision
 
 
@@ -271,12 +337,16 @@ def _generate_for_current_queue(state: ReplayState) -> None:
         return
 
     journal_type = "first" if not state.journals else "regular"
+    sessions_for_prompt = [
+        {key: value for key, value in session.items() if key != "_decision"}
+        for session in state.queue
+    ]
     generated = generator.generate_journal_text(
         journal_type=journal_type,
-        character_data={"id": state.character_id, "name": state.character_name, "profile": {"name": state.character_name}},
-        user_data={"id": state.user_id, "name": state.user_name},
+        character_data=state.character_data,
+        user_data=state.user_data,
         system_memory_block="",
-        sessions=state.queue,
+        sessions=sessions_for_prompt,
         prior_journal_entries=state.journals[-10:],
         thread_reference=_thread_reference_needed(state.memory_events),
     )
@@ -293,6 +363,15 @@ def _generate_for_current_queue(state: ReplayState) -> None:
         "sourceSessionIds": source_session_ids,
     }
     state.journals.append(journal)
+    for queued_session in state.queue:
+        if isinstance(queued_session, dict):
+            queued_session["journalEntryId"] = entry_id
+            decision = queued_session.get("_decision")
+            if isinstance(decision, dict):
+                decision["journalEntryId"] = entry_id
+                decision["journalType"] = journal_type
+                decision["threadReference"] = bool(generated["thread_reference"])
+                decision["topicSummary"] = "; ".join(topic_summary)
     state.memory_events.append(
         {
             "eventType": "journal_written",
@@ -380,6 +459,30 @@ def _topic_summary_from_queue(queue: list[dict[str, Any]]) -> list[str]:
             if text and text not in topics:
                 topics.append(text)
     return topics
+
+
+def _copy_classification_fields(decision: dict[str, Any], classification: dict[str, Any]) -> None:
+    decision["classificationShouldJournal"] = classification.get("should_journal")
+    decision["dedupClear"] = classification.get("dedup_clear")
+    decision["classificationReason"] = str(classification.get("reason") or "")
+    topics = classification.get("topicSummary") or classification.get("topic_summary") or []
+    if isinstance(topics, list):
+        decision["topicSummary"] = "; ".join(str(item) for item in topics)
+    else:
+        decision["topicSummary"] = str(topics)
+
+
+def _profile_name(character_data: dict[str, Any]) -> Optional[str]:
+    profile = character_data.get("profile") if isinstance(character_data.get("profile"), dict) else {}
+    return _first_string(profile, ("name", "displayName")) or _first_string(character_data, ("name", "displayName"))
+
+
+def _first_string(data: dict[str, Any], keys: tuple[str, ...]) -> Optional[str]:
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 def _thread_reference_needed(memory_events: list[dict[str, Any]]) -> bool:
