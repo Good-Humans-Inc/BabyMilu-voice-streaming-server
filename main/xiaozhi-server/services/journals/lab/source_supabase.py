@@ -71,13 +71,13 @@ class JournalLabSourceSupabase:
         return rows
 
     def get_turns_for_session(self, session_id: str) -> List[Dict[str, Any]]:
-        return self._request(
+        return self._request_with_first_working_query(
             self.turns_table,
-            (
-                f"?session_id=eq.{_q(session_id)}"
-                f"&select=*"
-                f"&order=turn_index.asc,created_at.asc"
-            ),
+            [
+                f"?session_id=eq.{_q(session_id)}&select=*&order=turn_index.asc,created_at.asc",
+                f"?session_id=eq.{_q(session_id)}&select=*&order=created_at.asc",
+                f"?session_id=eq.{_q(session_id)}&select=*&order=timestamp.asc",
+            ],
         )
 
     def get_memory_events_for_user(self, user_id: str, *, limit: int = 20000) -> List[Dict[str, Any]]:
