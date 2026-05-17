@@ -385,18 +385,29 @@ def _generate_for_current_queue(state: ReplayState) -> None:
 
     journal_type = "first" if not state.journals else "regular"
     context = _generation_context_for_queue(state)
-    generated = generator.generate_journal_text(
-        journal_type=journal_type,
-        character_data=state.character_data,
-        user_data=state.user_data,
-        system_memory_block="",
-        sessions=context["sessions"],
-        prior_journal_entries=state.journals[-10:],
-        thread_reference=_thread_reference_needed(state.memory_events),
-        coverage_window=context["coverageWindow"],
-        avoid_repeating=_avoid_repeating_from_journals(state.journals[-10:]),
-        allow_time_specific_opening=context["singleSameDayMoment"],
-    )
+    try:
+        generated = generator.generate_journal_text(
+            journal_type=journal_type,
+            character_data=state.character_data,
+            user_data=state.user_data,
+            system_memory_block="",
+            sessions=context["sessions"],
+            prior_journal_entries=state.journals[-10:],
+            thread_reference=_thread_reference_needed(state.memory_events),
+            coverage_window=context["coverageWindow"],
+            avoid_repeating=_avoid_repeating_from_journals(state.journals[-10:]),
+            allow_time_specific_opening=context["singleSameDayMoment"],
+        )
+    except Exception as exc:
+        for queued_session in state.queue:
+            decision = queued_session.get("_decision") if isinstance(queued_session, dict) else None
+            if isinstance(decision, dict):
+                decision["decision"] = "generation_error"
+                decision["reason"] = "generation_error"
+                decision["classificationReason"] = str(exc)
+        state.queue = []
+        state.current_queue_date = None
+        return
     entry_id = f"lab-{uuid.uuid4()}"
     source_session_ids = [str(item.get("sessionId")) for item in context["sessions"]]
     topic_summary = generated.get("topicSummary") or _topic_summary_from_queue(state.queue)

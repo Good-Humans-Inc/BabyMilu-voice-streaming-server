@@ -627,11 +627,15 @@ def _contains_required_detail(normalized_text: str, required_details: List[str])
     details = [_normalize_text(item) for item in required_details if str(item).strip()]
     if not details:
         return False
+    text_words = set(normalized_text.split())
     for detail in details:
         if detail and detail in normalized_text:
             return True
         words = [word for word in detail.split() if word not in STOPWORDS]
-        if len(words) >= 2 and all(word in normalized_text.split() for word in words[:4]):
+        if len(words) >= 2 and len(set(words) & text_words) >= 2:
+            return True
+        distinctive = [word for word in words if len(word) >= 5]
+        if distinctive and any(word in text_words for word in distinctive):
             return True
     return False
 

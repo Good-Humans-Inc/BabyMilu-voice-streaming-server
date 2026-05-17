@@ -127,3 +127,10 @@ def test_phrase_filter_rejects_common_stopword_phrases():
 
     assert "the way she was there" not in hard
     assert "the way she was there" not in soft
+
+
+def test_required_detail_check_allows_content_word_overlap():
+    assert generator._contains_required_detail(
+        "cookie hopped around the room while serena laughed",
+        ["Cookie's playful hops"],
+    )
