@@ -245,6 +245,7 @@ def create_journal_entry(
     status: str = "ready",
     entry_id: Optional[str] = None,
     created_at: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
     entry_id = entry_id or str(uuid.uuid4())
     created_at = created_at or iso_now()
@@ -253,8 +254,7 @@ def create_journal_entry(
         .collection("journal_entries")
         .document(entry_id)
     )
-    ref.set(
-        {
+    payload = {
             "text": text,
             "journal_type": journal_type,
             "status": status,
@@ -267,7 +267,11 @@ def create_journal_entry(
             "source_session_ids": source_session_ids,
             "source_memory_event_ids": source_memory_event_ids,
             "updated_at": created_at,
-        },
+        }
+    if metadata:
+        payload.update(metadata)
+    ref.set(
+        payload,
         merge=True,
     )
     return entry_id

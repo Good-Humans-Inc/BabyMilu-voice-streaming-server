@@ -21,7 +21,7 @@ or production data.
 import argparse
 import uuid
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -49,6 +49,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session-limit", type=int, default=20000)
     parser.add_argument("--turn-threshold", type=int, default=20)
     parser.add_argument("--min-user-turns", type=int, default=3)
+    parser.add_argument("--context-max-days", type=int, default=7)
+    parser.add_argument("--context-max-sessions", type=int, default=20)
+    parser.add_argument("--context-max-user-turns", type=int, default=80)
+    parser.add_argument("--context-max-total-turns", type=int, default=160)
+    parser.add_argument("--context-max-chars", type=int, default=20000)
     parser.add_argument(
         "--include-pending-memory",
         action="store_true",
@@ -102,6 +107,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         timezone_name=timezone_name,
         turn_threshold=args.turn_threshold,
         min_user_turns=args.min_user_turns,
+        context_max_days=args.context_max_days,
+        context_max_sessions=args.context_max_sessions,
+        context_max_user_turns=args.context_max_user_turns,
+        context_max_total_turns=args.context_max_total_turns,
+        context_max_chars=args.context_max_chars,
         max_generated_journals=args.max_generated_journals,
         simulated_memory_events_enabled=not args.disable_simulated_memory_events,
     )
@@ -131,6 +141,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             "sessionLimit": args.session_limit,
             "turnThreshold": args.turn_threshold,
             "minUserTurns": args.min_user_turns,
+            "contextMaxDays": args.context_max_days,
+            "contextMaxSessions": args.context_max_sessions,
+            "contextMaxUserTurns": args.context_max_user_turns,
+            "contextMaxTotalTurns": args.context_max_total_turns,
+            "contextMaxChars": args.context_max_chars,
             "includePendingMemory": args.include_pending_memory,
             "maxGeneratedJournals": args.max_generated_journals,
             "simulatedMemoryEventsEnabled": not args.disable_simulated_memory_events,
@@ -172,6 +187,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             "decision",
             "reason",
             "classificationShouldJournal",
+            "journalValueType",
+            "journalReasonType",
             "dedupClear",
             "classificationReason",
             "topicSummary",
@@ -202,6 +219,11 @@ class ReplayState:
         timezone_name: str,
         turn_threshold: int,
         min_user_turns: int,
+        context_max_days: int,
+        context_max_sessions: int,
+        context_max_user_turns: int,
+        context_max_total_turns: int,
+        context_max_chars: int,
         max_generated_journals: int,
         simulated_memory_events_enabled: bool,
     ) -> None:
@@ -212,6 +234,11 @@ class ReplayState:
         self.timezone_name = timezone_name
         self.turn_threshold = turn_threshold
         self.min_user_turns = min_user_turns
+        self.context_max_days = context_max_days
+        self.context_max_sessions = context_max_sessions
+        self.context_max_user_turns = context_max_user_turns
+        self.context_max_total_turns = context_max_total_turns
+        self.context_max_chars = context_max_chars
         self.max_generated_journals = max_generated_journals
         self.simulated_memory_events_enabled = simulated_memory_events_enabled
         self.turns_since_last_journal = 0
@@ -219,6 +246,7 @@ class ReplayState:
         self.queue: list[dict[str, Any]] = []
         self.journals: list[dict[str, Any]] = []
         self.memory_events: list[dict[str, Any]] = []
+        self.eligible_context_sessions: list[dict[str, Any]] = []
 
     @property
     def generation_capped(self) -> bool:
@@ -252,6 +280,8 @@ def _process_session(
         "decision": "skipped",
         "reason": "",
         "classificationShouldJournal": "",
+        "journalValueType": "",
+        "journalReasonType": "",
         "dedupClear": "",
         "classificationReason": "",
         "topicSummary": "",
@@ -271,6 +301,18 @@ def _process_session(
         decision["reason"] = "too_few_turns"
         return decision
 
+    state.eligible_context_sessions.append(
+        {
+            "sessionId": session_id,
+            "sessionStartTime": session.get("start_time") or session.get("created_at"),
+            "sessionEndTime": session.get("end_time") or session.get("last_active_at") or session.get("created_at"),
+            "memoryStatus": memory_status,
+            "isTriggerSession": False,
+            "userTurnCount": user_turn_count,
+            "turns": turns,
+        }
+    )
+
     state.turns_since_last_journal += user_turn_count
     decision["turnsSinceLastJournalAfter"] = state.turns_since_last_journal
     if state.turns_since_last_journal < state.turn_threshold:
@@ -283,6 +325,8 @@ def _process_session(
         classification = {
             "should_journal": True,
             "dedup_clear": True,
+            "journal_value_type": "strong",
+            "journal_reason_type": "milestone",
             "topicSummary": ["first journal"],
             "reason": "First journal after threshold.",
         }
@@ -303,7 +347,7 @@ def _process_session(
             decision["reason"] = "dedup_blocked_by_prior_journal"
             decision["decision"] = "skipped"
             return decision
-        if not classification.get("should_journal"):
+        if not _classification_passes(classification):
             decision["reason"] = "classification_false"
             decision["decision"] = "skipped"
             return decision
@@ -321,6 +365,9 @@ def _process_session(
         _generate_for_current_queue(state)
     state.current_queue_date = local_date
     state.queue.append(queued)
+    for context_session in state.eligible_context_sessions:
+        if context_session.get("sessionId") == session_id:
+            context_session["isTriggerSession"] = True
     state.turns_since_last_journal = 0
     decision["turnsSinceLastJournalAfter"] = 0
     decision["decision"] = "queued"
@@ -337,21 +384,21 @@ def _generate_for_current_queue(state: ReplayState) -> None:
         return
 
     journal_type = "first" if not state.journals else "regular"
-    sessions_for_prompt = [
-        {key: value for key, value in session.items() if key != "_decision"}
-        for session in state.queue
-    ]
+    context = _generation_context_for_queue(state)
     generated = generator.generate_journal_text(
         journal_type=journal_type,
         character_data=state.character_data,
         user_data=state.user_data,
         system_memory_block="",
-        sessions=sessions_for_prompt,
+        sessions=context["sessions"],
         prior_journal_entries=state.journals[-10:],
         thread_reference=_thread_reference_needed(state.memory_events),
+        coverage_window=context["coverageWindow"],
+        avoid_repeating=_avoid_repeating_from_journals(state.journals[-10:]),
+        allow_time_specific_opening=context["singleSameDayMoment"],
     )
     entry_id = f"lab-{uuid.uuid4()}"
-    source_session_ids = [str(item.get("sessionId")) for item in state.queue]
+    source_session_ids = [str(item.get("sessionId")) for item in context["sessions"]]
     topic_summary = generated.get("topicSummary") or _topic_summary_from_queue(state.queue)
     journal = {
         "entryId": entry_id,
@@ -360,6 +407,13 @@ def _generate_for_current_queue(state: ReplayState) -> None:
         "text": generated["text"],
         "threadReference": bool(generated["thread_reference"]),
         "topicSummary": topic_summary,
+        "coverageSummary": generated.get("coverageSummary") or [],
+        "concreteAnchors": generated.get("concreteAnchors") or [],
+        "emotionalThemes": generated.get("emotionalThemes") or [],
+        "avoidRepeating": generated.get("avoidRepeating") or [],
+        "coverageWindow": context["coverageWindow"],
+        "threadReferenceReason": generated.get("thread_reference_reason") or "",
+        "threadReferenceTargets": generated.get("thread_reference_targets") or [],
         "sourceSessionIds": source_session_ids,
     }
     state.journals.append(journal)
@@ -381,7 +435,13 @@ def _generate_for_current_queue(state: ReplayState) -> None:
                 "journalEntryId": entry_id,
                 "journalType": journal_type,
                 "topicSummary": topic_summary,
+                "coverageSummary": generated.get("coverageSummary") or [],
+                "concreteAnchors": generated.get("concreteAnchors") or [],
+                "emotionalThemes": generated.get("emotionalThemes") or [],
+                "avoidRepeating": generated.get("avoidRepeating") or [],
                 "thread_reference": bool(generated["thread_reference"]),
+                "thread_reference_reason": generated.get("thread_reference_reason") or "",
+                "thread_reference_targets": generated.get("thread_reference_targets") or [],
             },
             "time": {
                 "occurredAt": str(state.queue[-1].get("sessionEndTime") or ""),
@@ -400,6 +460,125 @@ def _generate_for_current_queue(state: ReplayState) -> None:
 def _flush_all_queues(state: ReplayState) -> None:
     if state.queue:
         _generate_for_current_queue(state)
+
+
+def _generation_context_for_queue(state: ReplayState) -> dict[str, Any]:
+    queue_date = state.current_queue_date or _local_date(datetime.now(timezone.utc), state.timezone_name)
+    start_at, end_at = _coverage_bounds_for_lab(state, queue_date)
+    trigger_ids = {str(item.get("sessionId")) for item in state.queue}
+    selected: list[dict[str, Any]] = []
+    for session in state.eligible_context_sessions:
+        started = _parse_dt(session.get("sessionStartTime"))
+        is_trigger = str(session.get("sessionId")) in trigger_ids
+        if started and not _within_bounds(started, start_at, end_at) and not is_trigger:
+            continue
+        selected.append({**session, "isTriggerSession": is_trigger or bool(session.get("isTriggerSession"))})
+    for queued in state.queue:
+        session_id = str(queued.get("sessionId"))
+        if session_id and not any(item.get("sessionId") == session_id for item in selected):
+            selected.append({key: value for key, value in queued.items() if key != "_decision"})
+    selected = sorted(selected, key=lambda item: str(item.get("sessionStartTime") or ""))
+    capped = _cap_lab_context_sessions(state, selected, trigger_ids)
+    dates = {str(item.get("sessionStartTime") or "")[:10] for item in capped if item.get("sessionStartTime")}
+    return {
+        "sessions": capped,
+        "coverageWindow": {
+            "start": start_at.isoformat(),
+            "end": end_at.isoformat(),
+            "maxDays": state.context_max_days,
+        },
+        "singleSameDayMoment": len(capped) == 1 and len(dates) <= 1,
+    }
+
+
+def _coverage_bounds_for_lab(state: ReplayState, queue_date: str) -> tuple[datetime, datetime]:
+    tz = _zone(state.timezone_name)
+    try:
+        local_day = datetime.fromisoformat(queue_date).date()
+    except ValueError:
+        local_day = datetime.now(tz).date()
+    end_at = datetime.combine(local_day, time(23, 59, 59), tzinfo=tz).astimezone(timezone.utc)
+    start_at = datetime.combine(
+        local_day - timedelta(days=max(state.context_max_days - 1, 0)),
+        time.min,
+        tzinfo=tz,
+    ).astimezone(timezone.utc)
+    prior_dates = [_parse_dt((journal.get("coverageWindow") or {}).get("end")) for journal in state.journals]
+    prior_dates = [value for value in prior_dates if value]
+    if prior_dates:
+        latest = max(prior_dates)
+        if latest > start_at:
+            start_at = latest
+    return start_at, end_at
+
+
+def _within_bounds(value: datetime, start_at: datetime, end_at: datetime) -> bool:
+    value = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    return start_at <= value.astimezone(timezone.utc) <= end_at
+
+
+def _cap_lab_context_sessions(
+    state: ReplayState,
+    sessions: list[dict[str, Any]],
+    trigger_ids: set[str],
+) -> list[dict[str, Any]]:
+    selected = list(sessions)
+    while len(selected) > state.context_max_sessions:
+        idx = _oldest_non_trigger_index(selected, trigger_ids)
+        if idx is None:
+            break
+        selected.pop(idx)
+    while True:
+        user_turns, total_turns, chars = _context_size(selected)
+        if (
+            user_turns <= state.context_max_user_turns
+            and total_turns <= state.context_max_total_turns
+            and chars <= state.context_max_chars
+        ):
+            return selected
+        idx = _oldest_non_trigger_index(selected, trigger_ids)
+        if idx is None:
+            return selected
+        selected.pop(idx)
+
+
+def _oldest_non_trigger_index(sessions: list[dict[str, Any]], trigger_ids: set[str]) -> Optional[int]:
+    for idx, session in enumerate(sessions):
+        if str(session.get("sessionId")) not in trigger_ids:
+            return idx
+    return None
+
+
+def _context_size(sessions: list[dict[str, Any]]) -> tuple[int, int, int]:
+    user_turns = 0
+    total_turns = 0
+    chars = 0
+    for session in sessions:
+        turns = session.get("turns") if isinstance(session.get("turns"), list) else []
+        total_turns += len(turns)
+        for turn in turns:
+            if str(turn.get("speaker") or "").lower() == "user":
+                user_turns += 1
+            chars += len(str(turn.get("text") or turn.get("content") or turn.get("transcript") or ""))
+    return user_turns, total_turns, chars
+
+
+def _avoid_repeating_from_journals(journals: list[dict[str, Any]]) -> list[str]:
+    values: list[str] = []
+    for journal in journals:
+        raw = journal.get("avoidRepeating") or journal.get("avoid_repeating")
+        if isinstance(raw, list):
+            values.extend(str(item) for item in raw if item)
+    return values
+
+
+def _classification_passes(classification: dict[str, Any]) -> bool:
+    if classification.get("dedup_clear") is False:
+        return False
+    value = str(classification.get("journal_value_type") or "").strip().lower()
+    if value and value not in {"strong", "medium"}:
+        return False
+    return bool(classification.get("should_journal"))
 
 
 def _load_turns_by_session(
@@ -443,11 +622,14 @@ def _parse_dt(value: Any) -> Optional[datetime]:
 
 def _local_date(value: Optional[datetime], timezone_name: str) -> str:
     value = value or datetime.now(timezone.utc)
+    return value.astimezone(_zone(timezone_name)).date().isoformat()
+
+
+def _zone(timezone_name: str) -> ZoneInfo:
     try:
-        tz = ZoneInfo(timezone_name)
+        return ZoneInfo(timezone_name)
     except Exception:
-        tz = ZoneInfo("UTC")
-    return value.astimezone(tz).date().isoformat()
+        return ZoneInfo("UTC")
 
 
 def _topic_summary_from_queue(queue: list[dict[str, Any]]) -> list[str]:
@@ -463,6 +645,8 @@ def _topic_summary_from_queue(queue: list[dict[str, Any]]) -> list[str]:
 
 def _copy_classification_fields(decision: dict[str, Any], classification: dict[str, Any]) -> None:
     decision["classificationShouldJournal"] = classification.get("should_journal")
+    decision["journalValueType"] = classification.get("journal_value_type")
+    decision["journalReasonType"] = classification.get("journal_reason_type")
     decision["dedupClear"] = classification.get("dedup_clear")
     decision["classificationReason"] = str(classification.get("reason") or "")
     topics = classification.get("topicSummary") or classification.get("topic_summary") or []

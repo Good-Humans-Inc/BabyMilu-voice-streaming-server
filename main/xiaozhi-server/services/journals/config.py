@@ -44,3 +44,23 @@ def max_generation_queues() -> int:
 
 def max_publish_entries() -> int:
     return int(os.environ.get("JOURNAL_PUBLISH_LIMIT", "50"))
+
+
+def context_max_days() -> int:
+    return int(os.environ.get("JOURNAL_CONTEXT_MAX_DAYS", "7"))
+
+
+def context_max_sessions() -> int:
+    return int(os.environ.get("JOURNAL_CONTEXT_MAX_SESSIONS", "20"))
+
+
+def context_max_user_turns() -> int:
+    return int(os.environ.get("JOURNAL_CONTEXT_MAX_USER_TURNS", "80"))
+
+
+def context_max_total_turns() -> int:
+    return int(os.environ.get("JOURNAL_CONTEXT_MAX_TOTAL_TURNS", "160"))
+
+
+def context_max_chars() -> int:
+    return int(os.environ.get("JOURNAL_CONTEXT_MAX_CHARS", "20000"))

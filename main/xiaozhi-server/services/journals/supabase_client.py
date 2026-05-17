@@ -83,6 +83,30 @@ class JournalSupabaseClient:
         )
         return rows[0] if isinstance(rows, list) and rows else None
 
+    def get_sessions_for_context(
+        self,
+        *,
+        user_id: str,
+        character_id: str,
+        start_at: str,
+        end_at: str,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        rows = self._request(
+            "GET",
+            self.sessions_table,
+            (
+                f"?user_id=eq.{quote(user_id, safe='')}"
+                f"&character_id=eq.{quote(character_id, safe='')}"
+                f"&start_time=gte.{quote(start_at, safe=':-+.TZ')}"
+                f"&start_time=lte.{quote(end_at, safe=':-+.TZ')}"
+                f"&select=*"
+                f"&order=start_time.asc.nullsfirst,created_at.asc"
+                f"&limit={int(limit)}"
+            ),
+        )
+        return rows if isinstance(rows, list) else []
+
     def get_recent_memory_events(self, user_id: str, limit: int = 5) -> List[Dict[str, Any]]:
         return self._select_memory_events(
             user_id=user_id,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -15,6 +15,8 @@ from services.logging import setup_logging
 
 TAG = __name__
 logger = setup_logging()
+
+PASSING_JOURNAL_VALUES = {"strong", "medium"}
 
 
 def _now(now: Optional[datetime]) -> datetime:
@@ -70,6 +72,220 @@ def _topic_summary(classification: Dict[str, Any]) -> List[str]:
         return [str(item) for item in value if str(item).strip()]
     trigger = classification.get("primary_trigger")
     return [str(trigger)] if trigger else []
+
+
+def _classification_passes(classification: Dict[str, Any]) -> bool:
+    if classification.get("dedup_clear") is False:
+        return False
+    value = str(classification.get("journal_value_type") or "").strip().lower()
+    if value and value not in PASSING_JOURNAL_VALUES:
+        return False
+    return bool(classification.get("should_journal"))
+
+
+def _avoid_repeating_from_entries(entries: List[Dict[str, Any]]) -> List[str]:
+    values: List[str] = []
+    for entry in entries:
+        for key in ("avoid_repeating", "avoidRepeating"):
+            raw = entry.get(key)
+            if isinstance(raw, list):
+                values.extend(str(item) for item in raw if item)
+    return values
+
+
+def _build_generation_context(
+    *,
+    sb: JournalSupabaseClient,
+    user_id: str,
+    character_id: str,
+    queue: Dict[str, Any],
+    prior_entries: List[Dict[str, Any]],
+    timezone_name: str,
+    now: datetime,
+) -> Dict[str, Any]:
+    queued = queue.get("sessions") if isinstance(queue.get("sessions"), list) else []
+    queue_date = str(queue.get("date") or store.local_date_for_timezone(now, timezone_name))
+    start_at, end_at = _coverage_bounds(queue_date, prior_entries, timezone_name)
+    trigger_ids = {str(item.get("sessionId")) for item in queued if isinstance(item, dict) and item.get("sessionId")}
+    sessions = _context_sessions_from_supabase(
+        sb=sb,
+        user_id=user_id,
+        character_id=character_id,
+        start_at=start_at,
+        end_at=end_at,
+    )
+    by_id = {str(item.get("session_id") or item.get("sessionId")): item for item in sessions}
+    for item in queued:
+        if not isinstance(item, dict):
+            continue
+        session_id = str(item.get("sessionId") or "")
+        if session_id and session_id not in by_id:
+            by_id[session_id] = {
+                "session_id": session_id,
+                "start_time": item.get("sessionStartTime"),
+                "end_time": item.get("sessionEndTime"),
+                "memory_status": "done",
+                "_queued": True,
+            }
+
+    selected: List[Dict[str, Any]] = []
+    for session in sorted(by_id.values(), key=_session_sort_key):
+        session_id = str(session.get("session_id") or session.get("sessionId") or "")
+        if not session_id:
+            continue
+        is_trigger = session_id in trigger_ids
+        if str(session.get("memory_status") or "").lower() == "skipped" and not is_trigger:
+            continue
+        turns = sb.get_turns(session_id)
+        user_turn_count = _user_turn_count(turns)
+        if user_turn_count < 3 and not is_trigger:
+            continue
+        selected.append(
+            {
+                "sessionId": session_id,
+                "sessionStartTime": session.get("start_time") or session.get("created_at"),
+                "sessionEndTime": session.get("end_time") or session.get("last_active_at") or session.get("created_at"),
+                "memoryStatus": session.get("memory_status"),
+                "isTriggerSession": is_trigger,
+                "userTurnCount": user_turn_count,
+                "turns": turns,
+            }
+        )
+
+    capped = _cap_context_sessions(selected, trigger_ids)
+    dates = {str(item.get("sessionStartTime") or "")[:10] for item in capped if item.get("sessionStartTime")}
+    return {
+        "sessions": capped,
+        "coverageWindow": {
+            "start": start_at,
+            "end": end_at,
+            "maxDays": config.context_max_days(),
+        },
+        "singleSameDayMoment": len(capped) == 1 and len(dates) <= 1,
+    }
+
+
+def _context_sessions_from_supabase(
+    *,
+    sb: JournalSupabaseClient,
+    user_id: str,
+    character_id: str,
+    start_at: str,
+    end_at: str,
+) -> List[Dict[str, Any]]:
+    if not hasattr(sb, "get_sessions_for_context"):
+        return []
+    try:
+        return sb.get_sessions_for_context(
+            user_id=user_id,
+            character_id=character_id,
+            start_at=start_at,
+            end_at=end_at,
+            limit=max(config.context_max_sessions() * 3, 50),
+        )
+    except Exception as exc:
+        logger.bind(tag=TAG).warning(f"Journal context session read failed: {exc}")
+        return []
+
+
+def _coverage_bounds(queue_date: str, prior_entries: List[Dict[str, Any]], timezone_name: str) -> Tuple[str, str]:
+    tz = _zone(timezone_name)
+    try:
+        local_day = datetime.fromisoformat(queue_date).date()
+    except ValueError:
+        local_day = datetime.now(tz).date()
+    end_local = datetime.combine(local_day, time(23, 59, 59), tzinfo=tz)
+    start_local = datetime.combine(
+        local_day - timedelta(days=max(config.context_max_days() - 1, 0)),
+        time.min,
+        tzinfo=tz,
+    )
+    latest_prior = _latest_prior_created_at(prior_entries)
+    if latest_prior:
+        latest_local = latest_prior.astimezone(tz)
+        if latest_local > start_local:
+            start_local = latest_local
+    return start_local.astimezone(timezone.utc).isoformat(), end_local.astimezone(timezone.utc).isoformat()
+
+
+def _latest_prior_created_at(entries: List[Dict[str, Any]]) -> Optional[datetime]:
+    parsed = [_parse_dt(entry.get("created_at")) for entry in entries]
+    parsed = [item for item in parsed if item]
+    return max(parsed) if parsed else None
+
+
+def _parse_dt(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _zone(timezone_name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(timezone_name)
+    except Exception:
+        return ZoneInfo("UTC")
+
+
+def _session_sort_key(session: Dict[str, Any]) -> str:
+    return str(session.get("start_time") or session.get("sessionStartTime") or session.get("created_at") or session.get("end_time") or "")
+
+
+def _user_turn_count(turns: List[Dict[str, Any]]) -> int:
+    return sum(1 for turn in turns if str(turn.get("speaker") or "").lower() == "user")
+
+
+def _turn_text(turn: Dict[str, Any]) -> str:
+    return str(turn.get("text") or turn.get("content") or turn.get("transcript") or "").strip()
+
+
+def _context_size(sessions: List[Dict[str, Any]]) -> Tuple[int, int, int]:
+    user_turns = 0
+    total_turns = 0
+    chars = 0
+    for session in sessions:
+        turns = session.get("turns") if isinstance(session.get("turns"), list) else []
+        total_turns += len(turns)
+        for turn in turns:
+            if str(turn.get("speaker") or "").lower() == "user":
+                user_turns += 1
+            chars += len(_turn_text(turn))
+    return user_turns, total_turns, chars
+
+
+def _cap_context_sessions(sessions: List[Dict[str, Any]], trigger_ids: set[str]) -> List[Dict[str, Any]]:
+    selected = list(sessions)
+    while len(selected) > config.context_max_sessions():
+        idx = _oldest_non_trigger_index(selected, trigger_ids)
+        if idx is None:
+            break
+        selected.pop(idx)
+    while True:
+        user_turns, total_turns, chars = _context_size(selected)
+        if (
+            user_turns <= config.context_max_user_turns()
+            and total_turns <= config.context_max_total_turns()
+            and chars <= config.context_max_chars()
+        ):
+            return selected
+        idx = _oldest_non_trigger_index(selected, trigger_ids)
+        if idx is None:
+            return selected
+        selected.pop(idx)
+
+
+def _oldest_non_trigger_index(sessions: List[Dict[str, Any]], trigger_ids: set[str]) -> Optional[int]:
+    for idx, session in enumerate(sessions):
+        if str(session.get("sessionId")) not in trigger_ids:
+            return idx
+    return None
 
 
 def process_journal_ready_sessions(
@@ -166,7 +382,7 @@ def process_journal_ready_sessions(
                 )
                 journal_type = "regular"
 
-            if not classification.get("should_journal") or classification.get("dedup_clear") is False:
+            if not _classification_passes(classification):
                 if execute:
                     store.update_marker(marker.reference, {"status": "skipped", "reason": "classification_false", "classification": classification})
                 results.append({"sessionId": session_id, "status": "skipped", "reason": "classification_false"})
@@ -241,16 +457,29 @@ def run_journal_generation_job(
             user_data = store.get_user_data(db, user_id)
             character_data = store.get_character_data(db, user_id, character_id)
             journal_events = sb.get_journal_memory_events(user_id, limit=3)
+            prior_entries = store.list_journal_entries(db, user_id, character_id, limit=10)
+            selected_context = _build_generation_context(
+                sb=sb,
+                user_id=user_id,
+                character_id=character_id,
+                queue=queue,
+                prior_entries=prior_entries,
+                timezone_name=store.get_user_timezone(db, user_id),
+                now=now,
+            )
             generated = generator.generate_journal_text(
                 journal_type=journal_type,
                 character_data=character_data,
                 user_data=user_data,
                 system_memory_block=sb.get_system_memory_block(user_id),
-                sessions=sessions,
-                prior_journal_entries=store.list_journal_entries(db, user_id, character_id, limit=10),
+                sessions=selected_context["sessions"],
+                prior_journal_entries=prior_entries,
                 thread_reference=_thread_reference_needed(journal_events),
+                coverage_window=selected_context["coverageWindow"],
+                avoid_repeating=_avoid_repeating_from_entries(prior_entries),
+                allow_time_specific_opening=selected_context["singleSameDayMoment"],
             )
-            source_session_ids = [str(item.get("sessionId")) for item in sessions if isinstance(item, dict)]
+            source_session_ids = [str(item.get("sessionId")) for item in selected_context["sessions"] if isinstance(item, dict)]
             source_memory_event_ids = []
             topic_summary = generated.get("topicSummary") or []
             for item in sessions:
@@ -272,6 +501,15 @@ def run_journal_generation_job(
                     thread_reference=bool(generated["thread_reference"]),
                     source_session_ids=source_session_ids,
                     source_memory_event_ids=source_memory_event_ids,
+                    metadata={
+                        "coverage_summary": generated.get("coverageSummary") or [],
+                        "concrete_anchors": generated.get("concreteAnchors") or [],
+                        "emotional_themes": generated.get("emotionalThemes") or [],
+                        "avoid_repeating": generated.get("avoidRepeating") or [],
+                        "coverage_window": selected_context["coverageWindow"],
+                        "thread_reference_reason": generated.get("thread_reference_reason") or "",
+                        "thread_reference_targets": generated.get("thread_reference_targets") or [],
+                    },
                 )
                 occurred_at = sessions[-1].get("sessionEndTime") if sessions else now.isoformat()
                 written = sb.write_journal_memory_event(
@@ -283,7 +521,13 @@ def run_journal_generation_job(
                         "journalEntryId": entry_id,
                         "journalType": journal_type,
                         "topicSummary": topic_summary,
+                        "coverageSummary": generated.get("coverageSummary") or [],
+                        "concreteAnchors": generated.get("concreteAnchors") or [],
+                        "emotionalThemes": generated.get("emotionalThemes") or [],
+                        "avoidRepeating": generated.get("avoidRepeating") or [],
                         "thread_reference": bool(generated["thread_reference"]),
+                        "thread_reference_reason": generated.get("thread_reference_reason") or "",
+                        "thread_reference_targets": generated.get("thread_reference_targets") or [],
                     },
                     occurred_at=str(occurred_at or now.isoformat()),
                 )
@@ -350,6 +594,9 @@ def _run_lure_back_generation(
                     sessions=[],
                     prior_journal_entries=list(reversed(prior)),
                     thread_reference=True,
+                    coverage_window={"start": None, "end": local_date, "maxDays": config.context_max_days()},
+                    avoid_repeating=_avoid_repeating_from_entries(prior),
+                    allow_time_specific_opening=False,
                 )
                 entry_id = ""
                 if execute:
@@ -363,6 +610,15 @@ def _run_lure_back_generation(
                         thread_reference=bool(generated["thread_reference"]),
                         source_session_ids=[],
                         source_memory_event_ids=[],
+                        metadata={
+                            "coverage_summary": generated.get("coverageSummary") or [],
+                            "concrete_anchors": generated.get("concreteAnchors") or [],
+                            "emotional_themes": generated.get("emotionalThemes") or [],
+                            "avoid_repeating": generated.get("avoidRepeating") or [],
+                            "coverage_window": {"start": None, "end": local_date, "maxDays": config.context_max_days()},
+                            "thread_reference_reason": generated.get("thread_reference_reason") or "",
+                            "thread_reference_targets": generated.get("thread_reference_targets") or [],
+                        },
                     )
                     sb.write_journal_memory_event(
                         user_id=user_id,
@@ -373,7 +629,13 @@ def _run_lure_back_generation(
                             "journalEntryId": entry_id,
                             "journalType": "lure_back",
                             "topicSummary": generated.get("topicSummary") or ["lure back"],
+                            "coverageSummary": generated.get("coverageSummary") or [],
+                            "concreteAnchors": generated.get("concreteAnchors") or [],
+                            "emotionalThemes": generated.get("emotionalThemes") or [],
+                            "avoidRepeating": generated.get("avoidRepeating") or [],
                             "thread_reference": bool(generated["thread_reference"]),
+                            "thread_reference_reason": generated.get("thread_reference_reason") or "",
+                            "thread_reference_targets": generated.get("thread_reference_targets") or [],
                         },
                         occurred_at=now.isoformat(),
                     )

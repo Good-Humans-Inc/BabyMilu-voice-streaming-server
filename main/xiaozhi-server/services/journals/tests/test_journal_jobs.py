@@ -49,6 +49,9 @@ class FakeSupabase:
     def get_recent_memory_events(self, user_id, limit=5):
         return []
 
+    def get_sessions_for_context(self, **kwargs):
+        return []
+
 
 def _enable_processing(monkeypatch):
     monkeypatch.setattr(jobs.config, "processing_enabled", lambda: True)
@@ -148,6 +151,10 @@ def test_generation_writes_memory_event_payload(monkeypatch):
         "text": "The way she laughed at the end stayed with me.",
         "thread_reference": True,
         "topicSummary": ["work stress"],
+        "coverageSummary": ["User laughed after describing work stress."],
+        "concreteAnchors": ["work stress", "laugh"],
+        "emotionalThemes": ["stress"],
+        "avoidRepeating": ["Do not repeat the same work-stress laugh moment without a new detail."],
     }
 
     class FakeQueue:
@@ -194,3 +201,53 @@ def test_generation_writes_memory_event_payload(monkeypatch):
     assert result["results"][0]["entryId"] == "entry-1"
     assert written["content"]["journalEntryId"] == "entry-1"
     assert written["content"]["thread_reference"] is True
+    assert written["content"]["coverageSummary"] == ["User laughed after describing work stress."]
+    assert written["content"]["concreteAnchors"] == ["work stress", "laugh"]
+
+
+def test_classification_gate_blocks_weak_and_allows_medium():
+    assert jobs._classification_passes({"should_journal": True, "journal_value_type": "medium", "dedup_clear": True})
+    assert not jobs._classification_passes({"should_journal": True, "journal_value_type": "weak", "dedup_clear": True})
+    assert not jobs._classification_passes({"should_journal": True, "journal_value_type": "strong", "dedup_clear": False})
+
+
+def test_context_selection_keeps_trigger_and_caps(monkeypatch):
+    monkeypatch.setattr(jobs.config, "context_max_days", lambda: 7)
+    monkeypatch.setattr(jobs.config, "context_max_sessions", lambda: 2)
+    monkeypatch.setattr(jobs.config, "context_max_user_turns", lambda: 4)
+    monkeypatch.setattr(jobs.config, "context_max_total_turns", lambda: 8)
+    monkeypatch.setattr(jobs.config, "context_max_chars", lambda: 1000)
+
+    class ContextSupabase(FakeSupabase):
+        def get_sessions_for_context(self, **kwargs):
+            return [
+                {"session_id": "old", "start_time": "2026-05-05T12:00:00+00:00", "memory_status": "done"},
+                {"session_id": "short", "start_time": "2026-05-10T12:00:00+00:00", "memory_status": "done"},
+                {"session_id": "trigger", "start_time": "2026-05-11T12:00:00+00:00", "memory_status": "done"},
+            ]
+
+        def get_turns(self, session_id):
+            if session_id == "short":
+                return [{"speaker": "user", "text": "one"}]
+            return [
+                {"speaker": "user", "text": "a"},
+                {"speaker": "assistant", "text": "b"},
+                {"speaker": "user", "text": "c"},
+                {"speaker": "user", "text": "d"},
+            ]
+
+    context = jobs._build_generation_context(
+        sb=ContextSupabase(),
+        user_id="u1",
+        character_id="c1",
+        queue={
+            "date": "2026-05-11",
+            "sessions": [{"sessionId": "trigger", "sessionStartTime": "2026-05-11T12:00:00+00:00"}],
+        },
+        prior_entries=[],
+        timezone_name="UTC",
+        now=datetime(2026, 5, 11, tzinfo=timezone.utc),
+    )
+
+    assert [session["sessionId"] for session in context["sessions"]] == ["trigger"]
+    assert context["singleSameDayMoment"] is True
