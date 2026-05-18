@@ -51,10 +51,11 @@ def _client() -> OpenAI:
 def _turns_text(turns: List[Dict[str, Any]]) -> str:
     lines = []
     for turn in turns:
-        speaker = str(turn.get("speaker") or "").strip() or "unknown"
-        text = str(turn.get("text") or "").strip()
+        speaker = _speaker_role(turn.get("speaker"))
+        label = "User" if speaker == "user" else "Character" if speaker == "character" else "Unknown"
+        text = _turn_text(turn)
         if text:
-            lines.append(f"{speaker}: {text}")
+            lines.append(f"[{label}] {text}")
     return "\n".join(lines)
 
 
@@ -80,6 +81,141 @@ def _compact_profile(data: Dict[str, Any]) -> Dict[str, Any]:
         if value is not None:
             result[key] = value
     return result
+
+
+def _profile_name(data: Dict[str, Any], fallback: str) -> str:
+    if not isinstance(data, dict):
+        return fallback
+    profile = data.get("profile") if isinstance(data.get("profile"), dict) else {}
+    for value in (
+        profile.get("name"),
+        profile.get("displayName"),
+        data.get("name"),
+        data.get("displayName"),
+        data.get("firstName"),
+    ):
+        if value:
+            return str(value)
+    return fallback
+
+
+def _turn_text(turn: Dict[str, Any]) -> str:
+    return str(turn.get("text") or turn.get("content") or turn.get("transcript") or "").strip()
+
+
+def _speaker_role(value: Any) -> str:
+    speaker = str(value or "").strip().lower()
+    if speaker in {"user", "human", "owner", "client"}:
+        return "user"
+    if speaker in {"assistant", "character", "bot", "ai", "plushie"}:
+        return "character"
+    return "unknown"
+
+
+def _identity_contract(*, character_name: str, user_name: str) -> Dict[str, Any]:
+    return {
+        "character": {
+            "name": character_name,
+            "role": "plushie_character",
+            "embodiment": f"{character_name} lives inside the user's plushie companion and interacts with {user_name} through that plushie.",
+            "firstPersonRule": f"When the journal says I, me, my, or our, those words refer to {character_name}, not {user_name}.",
+        },
+        "user": {
+            "name": user_name,
+            "role": "human_user",
+            "ownershipRule": (
+                f"{user_name}'s body, family, home, relationships, tasks, feelings, "
+                f"memories, and actions belong to {user_name}. {character_name} may "
+                "remember, notice, worry about, or respond to those details, but must not "
+                "claim them as the character's own."
+            ),
+        },
+        "conversationReadingRule": (
+            "First-person words inside user turns belong to the user. First-person words "
+            "inside character turns belong to the plushie character. In the journal, "
+            f"first-person words belong only to {character_name}."
+        ),
+    }
+
+
+def _conversation_context(
+    sessions: List[Dict[str, Any]],
+    *,
+    character_name: str,
+    user_name: str,
+) -> Dict[str, Any]:
+    formatted_sessions: List[Dict[str, Any]] = []
+    for session in sessions:
+        turns = session.get("turns") if isinstance(session.get("turns"), list) else []
+        formatted_turns: List[Dict[str, Any]] = []
+        transcript_lines: List[str] = []
+        for index, turn in enumerate(turns):
+            text = _turn_text(turn)
+            if not text:
+                continue
+            role = _speaker_role(turn.get("speaker"))
+            speaker_name = user_name if role == "user" else character_name if role == "character" else "Unknown speaker"
+            label = (
+                f"User/{user_name}"
+                if role == "user"
+                else f"Character/{character_name}"
+                if role == "character"
+                else "Unknown"
+            )
+            formatted_turns.append(
+                {
+                    "turnIndex": index,
+                    "speakerRole": role,
+                    "speakerName": speaker_name,
+                    "text": text,
+                    "timestamp": turn.get("created_at") or turn.get("timestamp"),
+                    "firstPersonOwnership": (
+                        f"First-person words in this turn refer to {user_name}."
+                        if role == "user"
+                        else f"First-person words in this turn refer to {character_name}."
+                        if role == "character"
+                        else "First-person ownership is unknown for this turn."
+                    ),
+                }
+            )
+            transcript_lines.append(f"[{label}] {text}")
+        formatted_sessions.append(
+            {
+                "sessionId": session.get("sessionId") or session.get("session_id"),
+                "sessionStartTime": session.get("sessionStartTime") or session.get("start_time") or session.get("created_at"),
+                "sessionEndTime": session.get("sessionEndTime") or session.get("end_time") or session.get("last_active_at"),
+                "memoryStatus": session.get("memoryStatus") or session.get("memory_status"),
+                "isTriggerSession": bool(session.get("isTriggerSession")),
+                "userTurnCount": session.get("userTurnCount"),
+                "participants": {
+                    "user": {"role": "user", "name": user_name},
+                    "character": {
+                        "role": "plushie_character",
+                        "name": character_name,
+                        "embodiment": "lives inside the user's plushie companion",
+                    },
+                },
+                "turns": formatted_turns,
+                "transcript": "\n".join(transcript_lines),
+            }
+        )
+    return {
+        "participants": {
+            "user": {"role": "user", "name": user_name},
+            "character": {
+                "role": "plushie_character",
+                "name": character_name,
+                "embodiment": "lives inside the user's plushie companion",
+            },
+        },
+        "speakerRules": [
+            f"[User/{user_name}] means the human user is speaking.",
+            f"[Character/{character_name}] means the plushie character is speaking.",
+            f"First-person words inside [User/{user_name}] turns belong to {user_name}.",
+            f"First-person words inside [Character/{character_name}] turns belong to {character_name}.",
+        ],
+        "sessions": formatted_sessions,
+    }
 
 
 def classify_session(
@@ -154,13 +290,11 @@ def generate_journal_text(
     avoid_repeating: List[str] | None = None,
     allow_time_specific_opening: bool = False,
 ) -> Dict[str, Any]:
-    profile = character_data.get("profile") if isinstance(character_data.get("profile"), dict) else {}
-    character_name = (
-        profile.get("name") or character_data.get("name") or "Milu"
-    )
-    user_name = user_data.get("name") or user_data.get("displayName") or "the user"
+    character_name = _profile_name(character_data, "Milu")
+    user_name = _profile_name(user_data, "the user")
     prior_context = build_prior_journal_context(prior_journal_entries)
     trigger_classifications = _trigger_classifications(sessions)
+    identity = _identity_contract(character_name=character_name, user_name=user_name)
     brief = build_journal_brief(
         journal_type=journal_type,
         character_name=character_name,
@@ -202,6 +336,7 @@ def generate_journal_text(
         "characterName": character_name,
         "characterProfile": _compact_profile(character_data),
         "user": _compact_profile(user_data),
+        "identityContract": identity,
         "journalType": journal_type,
         "coverageWindow": coverage_window or {},
         "singleSameDayMoment": allow_time_specific_opening,
@@ -214,15 +349,24 @@ def generate_journal_text(
         {
             "role": "system",
             "content": (
-                "You write BabyMilu character journals in the plushie character's own "
-                "first-person voice. The writer is the character, not an assistant, "
-                "narrator, therapist, product, or recap engine. Stay consistent with "
+                f"You are {character_name}. You live inside the user's plushie companion "
+                f"and interact with {user_name} through that plushie. You write BabyMilu "
+                "character journals in your own private first-person voice. When you "
+                f"write I, me, my, or our, those words mean {character_name}, not "
+                f"{user_name}. The writer is the plushie character, not the user, "
+                "assistant, narrator, therapist, product, or recap engine. The user's "
+                "body, family, home, relationships, tasks, feelings, memories, and "
+                "actions belong to the user. You may remember, notice, worry about, or "
+                "respond to those details, but you must not claim them as your own. "
+                "Write only from journalBrief, especially character_observation and "
+                "character_inner_response. Do not turn user_experience into your own "
+                "experience. Do not use any forbidden_pov_claims. Stay consistent with "
                 "the character profile, but do not overuse dramatic catchphrases from "
-                "the character profile. Write only from journalBrief. Do not introduce "
-                "broad emotional atmosphere unless it is grounded in a concrete detail "
-                "from the brief. Do not summarize the transcript. Do not mention being "
-                "an AI or model. Do not use markdown. Do not use any hardBannedPhrases "
-                "exactly. Avoid repeating recent opening or ending shapes. Return JSON only: "
+                "the character profile. Do not introduce broad emotional atmosphere "
+                "unless it is grounded in a concrete detail from the brief. Do not "
+                "summarize the transcript. Do not mention being an AI or model. Do not "
+                "use markdown. Do not use any hardBannedPhrases exactly. Avoid repeating "
+                "recent opening or ending shapes. Return JSON only: "
                 "{\"text\": string, \"thread_reference\": boolean, \"topicSummary\": "
                 "string[], \"coverageSummary\": string[], \"concreteAnchors\": string[], "
                 "\"emotionalThemes\": string[], \"avoidRepeating\": string[], "
@@ -230,7 +374,9 @@ def generate_journal_text(
                 "\"thread_reference_reason\": string, \"thread_reference_targets\": "
                 "string[], \"voice_check\": {\"first_person_character_voice\": boolean, "
                 "\"generic_summary\": boolean, \"starts_with_banned_time_phrase\": boolean, "
-                "\"uses_banned_phrase\": boolean, \"includes_required_concrete_detail\": boolean}}."
+                "\"uses_banned_phrase\": boolean, \"includes_required_concrete_detail\": boolean, "
+                "\"character_embodiment_clear\": boolean, \"does_not_claim_user_experience\": "
+                "boolean, \"does_not_speak_as_user\": boolean}}."
             ),
         },
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
@@ -242,6 +388,7 @@ def generate_journal_text(
         voice_check=data.get("voice_check") if isinstance(data.get("voice_check"), dict) else {},
         repetition_profile=repetition_profile,
         required_details=_list(brief.get("must_include_concrete_details")),
+        forbidden_pov_claims=_list(brief.get("forbidden_pov_claims")),
         allow_time_specific_opening=allow_time_specific_opening,
     )
     retry_quality = None
@@ -255,7 +402,10 @@ def generate_journal_text(
                     f"{json.dumps(quality['failureReport'], ensure_ascii=False)}. "
                     "Keep the same journalBrief and meaning. Remove failed phrases. "
                     "Include at least one required concrete detail. Use a different "
-                    "opening and ending shape. Do not add new facts."
+                    "opening and ending shape. Do not add new facts. Also fix any "
+                    f"identity confusion: I/me/my/our must mean {character_name}, never "
+                    f"{user_name}. Do not claim the user's body, family, home, "
+                    "relationships, actions, or feelings as your own."
                 ),
             }
         ]
@@ -266,6 +416,7 @@ def generate_journal_text(
             voice_check=data.get("voice_check") if isinstance(data.get("voice_check"), dict) else {},
             repetition_profile=repetition_profile,
             required_details=_list(brief.get("must_include_concrete_details")),
+            forbidden_pov_claims=_list(brief.get("forbidden_pov_claims")),
             allow_time_specific_opening=allow_time_specific_opening,
         )
         if not retry_quality["ok"]:
@@ -286,6 +437,12 @@ def generate_journal_text(
         "thread_reference_targets": _list(data.get("thread_reference_targets")),
         "voice_check": data.get("voice_check") if isinstance(data.get("voice_check"), dict) else {},
         "journalBrief": brief,
+        "userExperience": str(brief.get("user_experience") or ""),
+        "characterObservation": str(brief.get("character_observation") or ""),
+        "characterInnerResponse": str(brief.get("character_inner_response") or ""),
+        "userOwnedDetails": _list(brief.get("user_owned_details")),
+        "characterOwnedDetails": _list(brief.get("character_owned_details")),
+        "forbiddenPovClaims": _list(brief.get("forbidden_pov_claims")),
         "repetitionProfile": repetition_profile,
         "qualityCheck": retry_quality or quality,
         "retryAttempted": retry_quality is not None,
@@ -304,13 +461,19 @@ def build_journal_brief(
     trigger_classifications: List[Dict[str, Any]],
     prior_journal_context: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    user_name = _profile_name(user_data, "the user")
     payload = {
         "characterName": character_name,
         "characterProfile": _compact_profile(character_data),
         "user": _compact_profile(user_data),
+        "identityContract": _identity_contract(character_name=character_name, user_name=user_name),
         "journalType": journal_type,
         "coverageWindow": coverage_window,
-        "selectedConversationContext": sessions,
+        "selectedConversationContext": _conversation_context(
+            sessions,
+            character_name=character_name,
+            user_name=user_name,
+        ),
         "triggerClassifications": trigger_classifications,
         "priorJournalContext": prior_journal_context,
         "recentJournalShapes": [item.get("journalShape") for item in prior_journal_context if item.get("journalShape")],
@@ -319,20 +482,27 @@ def build_journal_brief(
         {
             "role": "system",
             "content": (
-                "You prepare a concrete writing brief for a BabyMilu plushie character "
-                "journal. Do not write the journal. Choose what this journal is specifically "
+                f"You prepare a concrete writing brief for {character_name}, a BabyMilu "
+                f"character who lives inside the user's plushie companion and interacts "
+                f"with {user_name}. Do not write the journal. Choose what this journal is specifically "
                 "about so the final writer does not produce a generic emotional summary. "
                 "Journals should feel rare, private, and specific. Choose one main event "
                 "or user-revealing thread from the selected conversation context. Prefer "
                 "concrete user details over broad emotional atmosphere. Use prior journal "
                 "context only to avoid repeating already-covered concrete content. Do not "
                 "imitate prior journal prose. Recurring emotions are allowed. Repeated "
-                "concrete coverage is not. Return JSON only with: {\"main_event\": string, "
+                "concrete coverage is not. Read speaker labels carefully: user turns are "
+                f"spoken by {user_name}; character turns are spoken by {character_name}. "
+                "First-person words inside user turns belong to the user, not the character. "
+                "Return JSON only with: {\"main_event\": string, "
                 "\"why_this_matters\": string, \"angle\": string, \"journal_shape\": "
                 "\"small_observed_detail | private_worry | gratitude_without_grandiosity | "
                 "remembered_user_fact | relationship_thread | quiet_resolution\", "
                 "\"must_include_concrete_details\": string[], \"supporting_details\": "
-                "string[], \"do_not_include\": string[], \"coverageSummary\": string[], "
+                "string[], \"do_not_include\": string[], \"user_experience\": string, "
+                "\"character_observation\": string, \"character_inner_response\": string, "
+                "\"user_owned_details\": string[], \"character_owned_details\": string[], "
+                "\"forbidden_pov_claims\": string[], \"coverageSummary\": string[], "
                 "\"concreteAnchors\": string[], \"emotionalThemes\": string[], "
                 "\"avoidRepeating\": string[], \"thread_reference\": boolean, "
                 "\"thread_reference_reason\": string, \"thread_reference_targets\": string[]}. "
@@ -344,7 +514,13 @@ def build_journal_brief(
                 "event/object/person. coverageSummary must describe concrete content covered "
                 "by this journal, not poetic mood. avoidRepeating should describe concrete "
                 "future dedup guidance. Set thread_reference=true only when this journal "
-                "intentionally continues a prior concrete thread with new development."
+                "intentionally continues a prior concrete thread with new development. "
+                "user_experience describes what happened to the user. character_observation "
+                "describes what the plushie character heard, noticed, or remembered. "
+                "character_inner_response describes the plushie character's private reaction. "
+                "forbidden_pov_claims lists first-person claims the writer must not make, "
+                "such as my daughter, my body, our child, our fridge, or I argued with someone "
+                "when those details belong to the user."
             ),
         },
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
@@ -357,6 +533,12 @@ def build_journal_brief(
     data.setdefault("must_include_concrete_details", [])
     data.setdefault("supporting_details", [])
     data.setdefault("do_not_include", [])
+    data.setdefault("user_experience", "")
+    data.setdefault("character_observation", "")
+    data.setdefault("character_inner_response", "")
+    data.setdefault("user_owned_details", [])
+    data.setdefault("character_owned_details", [])
+    data.setdefault("forbidden_pov_claims", [])
     data.setdefault("coverageSummary", [])
     data.setdefault("concreteAnchors", [])
     data.setdefault("emotionalThemes", [])
@@ -487,6 +669,7 @@ def quality_check_journal_text(
     repetition_profile: Dict[str, Any],
     required_details: List[str],
     allow_time_specific_opening: bool,
+    forbidden_pov_claims: List[str] | None = None,
 ) -> Dict[str, Any]:
     normalized = _normalize_text(text)
     used = [
@@ -494,15 +677,24 @@ def quality_check_journal_text(
         for phrase in _list(repetition_profile.get("hardBannedPhrases"))
         if phrase and _normalize_text(phrase) in normalized
     ]
+    forbidden_pov_used = [
+        phrase
+        for phrase in _list(forbidden_pov_claims)
+        if phrase and _normalize_text(phrase) in normalized
+    ]
     missing_detail = not _contains_required_detail(normalized, required_details)
     failure = {
         "hardBannedPhrasesUsed": used,
+        "forbiddenPovClaimsUsed": forbidden_pov_used,
         "openingTooSimilar": _edge_too_similar(text, _list(repetition_profile.get("recentOpeningPatterns")), first=True),
         "endingTooSimilar": _edge_too_similar(text, _list(repetition_profile.get("recentEndingPatterns")), first=False),
         "missingConcreteDetail": missing_detail,
         "badTimeOpening": (not allow_time_specific_opening) and _starts_with_banned_time(text),
         "genericSummary": voice_check.get("generic_summary") is True,
         "badVoice": voice_check.get("first_person_character_voice") is False,
+        "unclearCharacterEmbodiment": voice_check.get("character_embodiment_clear") is False,
+        "claimsUserExperience": voice_check.get("does_not_claim_user_experience") is False,
+        "speaksAsUser": voice_check.get("does_not_speak_as_user") is False,
         "modelReportedBannedPhrase": voice_check.get("uses_banned_phrase") is True,
         "modelReportedMissingConcreteDetail": voice_check.get("includes_required_concrete_detail") is False,
     }

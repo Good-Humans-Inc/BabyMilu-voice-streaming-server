@@ -1,3 +1,5 @@
+import json
+
 from services.journals import generator
 
 
@@ -134,3 +136,73 @@ def test_required_detail_check_allows_content_word_overlap():
         "cookie hopped around the room while serena laughed",
         ["Cookie's playful hops"],
     )
+
+
+def test_brief_payload_labels_user_and_character_turn_ownership(monkeypatch):
+    captured = {}
+
+    def fake_json_response(messages, **kwargs):
+        captured["payload"] = messages[1]["content"]
+        return {
+            "main_event": "Maliyah told Milu about Cookie.",
+            "why_this_matters": "It is a concrete user detail.",
+            "angle": "remember the pet detail",
+            "journal_shape": "remembered_user_fact",
+            "must_include_concrete_details": ["Cookie"],
+        }
+
+    monkeypatch.setattr(generator, "_json_response", fake_json_response)
+
+    generator.build_journal_brief(
+        journal_type="regular",
+        character_name="Milu",
+        character_data={"name": "Milu"},
+        user_data={"name": "Maliyah"},
+        coverage_window={},
+        sessions=[
+            {
+                "sessionId": "s1",
+                "turns": [
+                    {"speaker": "user", "text": "My dog Cookie made me laugh."},
+                    {"speaker": "assistant", "text": "I want to remember Cookie."},
+                ],
+            }
+        ],
+        trigger_classifications=[],
+        prior_journal_context=[],
+    )
+
+    payload = json.loads(captured["payload"])
+    context = payload["selectedConversationContext"]
+    turns = context["sessions"][0]["turns"]
+    assert context["participants"]["user"]["name"] == "Maliyah"
+    assert context["participants"]["character"]["name"] == "Milu"
+    assert turns[0]["speakerRole"] == "user"
+    assert turns[0]["speakerName"] == "Maliyah"
+    assert "refer to Maliyah" in turns[0]["firstPersonOwnership"]
+    assert turns[1]["speakerRole"] == "character"
+    assert turns[1]["speakerName"] == "Milu"
+    assert "refer to Milu" in turns[1]["firstPersonOwnership"]
+
+
+def test_quality_check_rejects_forbidden_pov_claims():
+    result = generator.quality_check_journal_text(
+        text="I keep thinking about my daughter and Cookie.",
+        voice_check={
+            "first_person_character_voice": True,
+            "generic_summary": False,
+            "starts_with_banned_time_phrase": False,
+            "uses_banned_phrase": False,
+            "includes_required_concrete_detail": True,
+            "character_embodiment_clear": True,
+            "does_not_claim_user_experience": True,
+            "does_not_speak_as_user": True,
+        },
+        repetition_profile={"hardBannedPhrases": [], "recentOpeningPatterns": [], "recentEndingPatterns": []},
+        required_details=["Cookie"],
+        allow_time_specific_opening=False,
+        forbidden_pov_claims=["my daughter"],
+    )
+
+    assert result["ok"] is False
+    assert result["failureReport"]["forbiddenPovClaimsUsed"] == ["my daughter"]
