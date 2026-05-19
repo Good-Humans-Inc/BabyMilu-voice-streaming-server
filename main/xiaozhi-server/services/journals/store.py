@@ -161,24 +161,22 @@ def list_journal_entries(
     limit: int = 50,
 ) -> List[Dict[str, Any]]:
     query = (
-        character_ref(client, user_id, character_id)
-        .collection("journal_entries")
-        .order_by("created_at", direction=firestore.Query.DESCENDING)
-        .limit(limit)
+        user_ref(client, user_id)
+        .collection("moments")
+        .limit(max(limit * 3, limit))
     )
     rows: List[Dict[str, Any]] = []
     for snap in query.stream():
         data = snap.to_dict() or {}
-        if not include_deleted and data.get("is_deleted") is True:
+        if data.get("type") != "journal" or data.get("characterId") != character_id:
+            continue
+        if not include_deleted and data.get("status") == "deleted":
             continue
         data["_id"] = snap.id
         data["_ref"] = snap.reference
         rows.append(data)
+    rows.sort(key=lambda item: str(item.get("displayAt") or ""), reverse=True)
     return rows
-
-
-def has_prior_visible_journal(client: firestore.Client, user_id: str, character_id: str) -> bool:
-    return bool(list_journal_entries(client, user_id, character_id, limit=1))
 
 
 def queue_session(
@@ -238,38 +236,25 @@ def create_journal_entry(
     character_id: str,
     text: str,
     journal_type: str,
-    display_date: str,
-    thread_reference: bool,
-    source_session_ids: List[str],
-    source_memory_event_ids: List[str],
+    display_at: str,
     status: str = "ready",
     entry_id: Optional[str] = None,
-    created_at: Optional[str] = None,
-    metadata: Optional[Dict[str, Any]] = None,
+    memory_event_id: Any = None,
 ) -> str:
     entry_id = entry_id or str(uuid.uuid4())
-    created_at = created_at or iso_now()
-    ref = (
-        character_ref(client, user_id, character_id)
-        .collection("journal_entries")
-        .document(entry_id)
-    )
+    ref = user_ref(client, user_id).collection("moments").document(entry_id)
+    app_journal_type = "lure-back" if journal_type == "lure_back" else journal_type
     payload = {
-            "text": text,
-            "journal_type": journal_type,
-            "status": status,
-            "created_at": created_at,
-            "published_at": None,
-            "display_date": display_date,
-            "thread_reference": bool(thread_reference),
-            "is_deleted": False,
-            "deleted_at": None,
-            "source_session_ids": source_session_ids,
-            "source_memory_event_ids": source_memory_event_ids,
-            "updated_at": created_at,
-        }
-    if metadata:
-        payload.update(metadata)
+        "id": entry_id,
+        "type": "journal",
+        "characterId": character_id,
+        "displayAt": display_at,
+        "text": text,
+        "status": status,
+        "journalType": app_journal_type,
+        "memoryEventId": str(memory_event_id) if memory_event_id is not None else None,
+        "deletedAt": None,
+    }
     ref.set(
         payload,
         merge=True,
@@ -284,24 +269,21 @@ def fetch_ready_entries(
 ) -> List[Any]:
     db = _client(client)
     query = (
-        db.collection_group("journal_entries")
+        db.collection_group("moments")
         .where(filter=FieldFilter("status", "==", "ready"))
         .limit(limit)
     )
     return [
         snap
         for snap in query.stream()
-        if (snap.to_dict() or {}).get("is_deleted") is not True
+        if (snap.to_dict() or {}).get("type") == "journal"
     ]
 
 
 def publish_entry(entry_ref: Any, *, published_at: Optional[str] = None) -> None:
-    published_at = published_at or iso_now()
     entry_ref.set(
         {
             "status": "published",
-            "published_at": published_at,
-            "updated_at": published_at,
         },
         merge=True,
     )
@@ -315,20 +297,15 @@ def soft_delete_journal_entry(
     client: Optional[firestore.Client] = None,
 ) -> bool:
     db = _client(client)
-    ref = (
-        character_ref(db, user_id, character_id)
-        .collection("journal_entries")
-        .document(entry_id)
-    )
+    ref = user_ref(db, user_id).collection("moments").document(entry_id)
     snap = ref.get()
     if not snap.exists:
         return False
     now = iso_now()
     ref.set(
         {
-            "is_deleted": True,
-            "deleted_at": now,
-            "updated_at": now,
+            "status": "deleted",
+            "deletedAt": now,
         },
         merge=True,
     )

@@ -389,6 +389,7 @@ def _generate_for_current_queue(state: ReplayState) -> None:
 
     journal_type = "first" if not state.journals else "regular"
     context = _generation_context_for_queue(state)
+    prior_entries = _prior_entries_from_memory_events(state.memory_events) if state.simulated_memory_events_enabled else []
     try:
         generated = generator.generate_journal_text(
             journal_type=journal_type,
@@ -396,10 +397,10 @@ def _generate_for_current_queue(state: ReplayState) -> None:
             user_data=state.user_data,
             system_memory_block="",
             sessions=context["sessions"],
-            prior_journal_entries=state.journals[-10:],
+            prior_journal_entries=prior_entries,
             thread_reference=_thread_reference_needed(state.memory_events),
             coverage_window=context["coverageWindow"],
-            avoid_repeating=_avoid_repeating_from_journals(state.journals[-10:]),
+            avoid_repeating=_avoid_repeating_from_journals(prior_entries),
             allow_time_specific_opening=context["singleSameDayMoment"],
         )
     except Exception as exc:
@@ -455,6 +456,7 @@ def _generate_for_current_queue(state: ReplayState) -> None:
                 decision["journalType"] = journal_type
                 decision["threadReference"] = bool(generated["thread_reference"])
                 decision["topicSummary"] = "; ".join(topic_summary)
+    ingested_at = datetime.now(timezone.utc).isoformat()
     state.memory_events.append(
         {
             "eventType": "journal_written",
@@ -483,12 +485,13 @@ def _generate_for_current_queue(state: ReplayState) -> None:
             },
             "time": {
                 "occurredAt": str(state.queue[-1].get("sessionEndTime") or ""),
-                "ingestedAt": datetime.now(timezone.utc).isoformat(),
+                "ingestedAt": ingested_at,
             },
             "source": {
                 "sessionId": source_session_ids[-1] if source_session_ids else None,
                 "characterId": state.character_id,
             },
+            "created_at": ingested_at,
         }
     )
     state.queue = []
@@ -541,7 +544,11 @@ def _coverage_bounds_for_lab(state: ReplayState, queue_date: str) -> tuple[datet
         time.min,
         tzinfo=tz,
     ).astimezone(timezone.utc)
-    prior_dates = [_parse_dt((journal.get("coverageWindow") or {}).get("end")) for journal in state.journals]
+    prior_dates = [
+        _parse_dt((event.get("time") or {}).get("ingestedAt") or event.get("created_at"))
+        for event in state.memory_events
+        if event.get("eventType") == "journal_written"
+    ]
     prior_dates = [value for value in prior_dates if value]
     if prior_dates:
         latest = max(prior_dates)
@@ -599,6 +606,34 @@ def _context_size(sessions: list[dict[str, Any]]) -> tuple[int, int, int]:
                 user_turns += 1
             chars += len(str(turn.get("text") or turn.get("content") or turn.get("transcript") or ""))
     return user_turns, total_turns, chars
+
+
+def _prior_entries_from_memory_events(memory_events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    journal_events = [event for event in reversed(memory_events) if event.get("eventType") == "journal_written"]
+    for event in journal_events:
+        content = event.get("content") if isinstance(event.get("content"), dict) else {}
+        time_data = event.get("time") if isinstance(event.get("time"), dict) else {}
+        created_at = event.get("created_at") or time_data.get("ingestedAt") or time_data.get("occurredAt")
+        entry_id = content.get("journalEntryId") or event.get("id") or event.get("event_id")
+        entries.append(
+            {
+                "_id": str(entry_id or ""),
+                "entryId": str(entry_id or ""),
+                "text": content.get("text") or "",
+                "created_at": created_at,
+                "displayDate": str(time_data.get("occurredAt") or "")[:10],
+                "journalType": content.get("journalType") or "",
+                "coverageSummary": content.get("coverageSummary") or [],
+                "concreteAnchors": content.get("concreteAnchors") or [],
+                "emotionalThemes": content.get("emotionalThemes") or [],
+                "avoidRepeating": content.get("avoidRepeating") or [],
+                "journalShape": content.get("journal_shape") or content.get("journalShape") or "",
+                "mainEvent": content.get("main_event") or content.get("mainEvent") or "",
+                "threadReferenceReason": content.get("thread_reference_reason") or "",
+            }
+        )
+    return entries
 
 
 def _avoid_repeating_from_journals(journals: list[dict[str, Any]]) -> list[str]:

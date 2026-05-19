@@ -113,9 +113,16 @@ class JournalSupabaseClient:
             query=f"&order=created_at.desc&limit={int(limit)}",
         )
 
-    def get_journal_memory_events(self, user_id: str, limit: int = 3) -> List[Dict[str, Any]]:
+    def get_journal_memory_events(
+        self,
+        user_id: str,
+        *,
+        character_id: Optional[str] = None,
+        limit: int = 3,
+    ) -> List[Dict[str, Any]]:
         return self._select_memory_events(
             user_id=user_id,
+            character_id=character_id,
             event_type="journal_written",
             query=f"&order=created_at.desc&limit={int(limit)}",
         )
@@ -146,10 +153,13 @@ class JournalSupabaseClient:
         self,
         *,
         user_id: str,
+        character_id: Optional[str] = None,
         event_type: Optional[str] = None,
         query: str = "",
     ) -> List[Dict[str, Any]]:
         filters = f"?user_id=eq.{quote(user_id, safe='')}"
+        if character_id:
+            filters += f"&character_id=eq.{quote(character_id, safe='')}"
         if event_type:
             filters += f"&event_type=eq.{quote(event_type, safe='')}"
         filters += f"&select=*{query}"

@@ -126,7 +126,6 @@ def test_first_journal_queues_without_classification(monkeypatch):
     monkeypatch.setattr(jobs.store, "fetch_waiting_session_markers", lambda client=None, limit=50: [marker])
     monkeypatch.setattr(jobs.store, "add_turns_to_counter", lambda client, user_id, character_id, user_turn_count: 20)
     monkeypatch.setattr(jobs.store, "get_user_timezone", lambda client, user_id: "UTC")
-    monkeypatch.setattr(jobs.store, "has_prior_visible_journal", lambda client, user_id, character_id: False)
     monkeypatch.setattr(jobs.store, "queue_session", lambda **kwargs: queued.setdefault("path", "queue/path"))
     monkeypatch.setattr(
         jobs.generator,
@@ -189,6 +188,7 @@ def test_generation_writes_memory_event_payload(monkeypatch):
     monkeypatch.setattr(jobs.store, "list_journal_entries", lambda *args, **kwargs: [])
     monkeypatch.setattr(jobs.generator, "generate_journal_text", lambda **kwargs: generated)
     monkeypatch.setattr(jobs.store, "create_journal_entry", lambda **kwargs: "entry-1")
+    monkeypatch.setattr(jobs.uuid, "uuid4", lambda: "entry-1")
     monkeypatch.setattr(jobs, "_run_lure_back_generation", lambda *args, **kwargs: [])
 
     result = jobs.run_journal_generation_job(
@@ -203,6 +203,47 @@ def test_generation_writes_memory_event_payload(monkeypatch):
     assert written["content"]["thread_reference"] is True
     assert written["content"]["coverageSummary"] == ["User laughed after describing work stress."]
     assert written["content"]["concreteAnchors"] == ["work stress", "laugh"]
+
+
+def test_journal_entries_from_memory_events_preserves_dedup_fields():
+    entries = jobs._journal_entries_from_memory_events(
+        [
+            {
+                "id": "mem-1",
+                "created_at": "2026-05-11T12:00:00+00:00",
+                "time": {"occurredAt": "2026-05-10T12:30:00+00:00"},
+                "content": {
+                    "text": "I remembered the work-stress laugh.",
+                    "journalEntryId": "entry-1",
+                    "journalType": "regular",
+                    "coverageSummary": ["work-stress laugh"],
+                    "concreteAnchors": ["work"],
+                    "emotionalThemes": ["stress"],
+                    "avoidRepeating": ["same work-stress laugh"],
+                    "journal_shape": "small_observed_detail",
+                    "thread_reference_reason": "new detail",
+                },
+            }
+        ]
+    )
+
+    assert entries == [
+        {
+            "_id": "entry-1",
+            "entryId": "entry-1",
+            "text": "I remembered the work-stress laugh.",
+            "created_at": "2026-05-11T12:00:00+00:00",
+            "displayDate": "2026-05-10",
+            "journalType": "regular",
+            "coverageSummary": ["work-stress laugh"],
+            "concreteAnchors": ["work"],
+            "emotionalThemes": ["stress"],
+            "avoidRepeating": ["same work-stress laugh"],
+            "journalShape": "small_observed_detail",
+            "mainEvent": "",
+            "threadReferenceReason": "new detail",
+        }
+    ]
 
 
 def test_classification_gate_blocks_weak_and_allows_medium():

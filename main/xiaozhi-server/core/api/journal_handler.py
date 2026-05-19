@@ -37,9 +37,9 @@ class JournalHandler:
         user_id = str(data.get("userId") or data.get("user_id") or "").strip()
         character_id = str(data.get("characterId") or data.get("character_id") or "").strip()
         entry_id = str(data.get("entryId") or data.get("entry_id") or "").strip()
-        if not user_id or not character_id or not entry_id:
+        if not user_id or not entry_id:
             return self._json(
-                {"ok": False, "error": "userId, characterId, and entryId are required"},
+                {"ok": False, "error": "userId and entryId are required"},
                 status=400,
             )
 
