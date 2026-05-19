@@ -53,6 +53,52 @@ def write_generated_journals(path: Path, journals: list[dict[str, Any]]) -> None
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def journal_briefs(journals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    briefs: list[dict[str, Any]] = []
+    for index, journal in enumerate(journals, start=1):
+        brief = journal.get("journalBrief")
+        if not isinstance(brief, dict):
+            brief = {}
+        briefs.append(
+            {
+                "index": index,
+                "entryId": journal.get("entryId"),
+                "displayDate": journal.get("displayDate"),
+                "journalType": journal.get("journalType"),
+                "sourceSessionIds": journal.get("sourceSessionIds") or [],
+                "threadReference": journal.get("threadReference"),
+                "journalBrief": brief,
+            }
+        )
+    return briefs
+
+
+def write_journal_briefs(path: Path, journals: list[dict[str, Any]]) -> None:
+    lines = ["# Journal Briefs", ""]
+    if not journals:
+        lines.append("No journal briefs were generated.")
+    for item in journal_briefs(journals):
+        brief = item["journalBrief"] if isinstance(item.get("journalBrief"), dict) else {}
+        lines.extend(
+            [
+                f"## {item.get('index')}. {item.get('displayDate')} - {item.get('journalType')}",
+                "",
+                f"- Entry ID: `{item.get('entryId')}`",
+                f"- Source sessions: {', '.join(item.get('sourceSessionIds') or [])}",
+                f"- Thread reference: {item.get('threadReference')}",
+                f"- Main event: {brief.get('main_event') or ''}",
+                f"- Journal shape: {brief.get('journal_shape') or ''}",
+                "",
+                "```json",
+                json.dumps(brief, ensure_ascii=False, indent=2, default=str),
+                "```",
+                "",
+            ]
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def write_conversation_timeline(path: Path, decisions: list[dict[str, Any]]) -> None:
     lines = ["# Conversation Timeline", ""]
     if not decisions:
