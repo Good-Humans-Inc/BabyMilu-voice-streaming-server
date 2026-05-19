@@ -99,6 +99,56 @@ def write_journal_briefs(path: Path, journals: list[dict[str, Any]]) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def writer_payloads(journals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    for index, journal in enumerate(journals, start=1):
+        prompt = journal.get("writerPrompt")
+        if not isinstance(prompt, dict):
+            prompt = {}
+        payloads.append(
+            {
+                "index": index,
+                "entryId": journal.get("entryId"),
+                "displayDate": journal.get("displayDate"),
+                "journalType": journal.get("journalType"),
+                "sourceSessionIds": journal.get("sourceSessionIds") or [],
+                "system": prompt.get("system") or "",
+                "user": prompt.get("user") if isinstance(prompt.get("user"), dict) else {},
+            }
+        )
+    return payloads
+
+
+def write_writer_payloads(path: Path, journals: list[dict[str, Any]]) -> None:
+    lines = ["# Writer Payloads", ""]
+    if not journals:
+        lines.append("No writer payloads were generated.")
+    for item in writer_payloads(journals):
+        lines.extend(
+            [
+                f"## {item.get('index')}. {item.get('displayDate')} - {item.get('journalType')}",
+                "",
+                f"- Entry ID: `{item.get('entryId')}`",
+                f"- Source sessions: {', '.join(item.get('sourceSessionIds') or [])}",
+                "",
+                "### System Message",
+                "",
+                "```text",
+                str(item.get("system") or ""),
+                "```",
+                "",
+                "### User Message",
+                "",
+                "```json",
+                json.dumps(item.get("user") or {}, ensure_ascii=False, indent=2, default=str),
+                "```",
+                "",
+            ]
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def write_conversation_timeline(path: Path, decisions: list[dict[str, Any]]) -> None:
     lines = ["# Conversation Timeline", ""]
     if not decisions:

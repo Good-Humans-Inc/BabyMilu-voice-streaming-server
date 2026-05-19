@@ -138,6 +138,83 @@ def test_required_detail_check_allows_content_word_overlap():
     )
 
 
+def test_character_writing_profile_extracts_conversation_like_fields():
+    profile = generator.build_character_writing_profile(
+        {
+            "name": "Top Name",
+            "unused": "should not leak",
+            "profile": {
+                "name": "Nested Name",
+                "age": "28",
+                "pronouns": "he/him",
+                "characterToUser": "protective companion",
+                "nicknameCharacterCallsUser": "little flame",
+                "personality": "Warm, direct, quietly intense.",
+                "secretRawField": "should not leak",
+            },
+        }
+    )
+
+    assert profile == {
+        "name": "Top Name",
+        "age": "28",
+        "pronouns": "he/him",
+        "relationshipToUser": "protective companion",
+        "callsUser": "little flame",
+        "bio": "Warm, direct, quietly intense.",
+        "journalVoice": (
+            "Private, reflective first-person plushie journal voice. Stay in character, "
+            "but be quieter and less performative than live conversation."
+        ),
+    }
+    assert "unused" not in profile
+    assert "secretRawField" not in profile
+
+
+def test_writer_payload_is_small_and_avoids_reasoning_context():
+    payload = generator.build_writer_payload(
+        journal_type="regular",
+        character_data={
+            "profile": {
+                "name": "Milu",
+                "bio": "Gentle and playful.",
+                "unrelated": "do not include",
+            }
+        },
+        user_data={"name": "Maliyah", "birthday": "do not include"},
+        brief={
+            "main_event": "Maliyah told Milu about Cookie.",
+            "character_observation": "Milu noticed Maliyah smiling about Cookie.",
+            "character_inner_response": "Milu felt trusted.",
+            "must_include_concrete_details": ["Cookie"],
+            "avoidRepeating": ["Do not repeat Cookie without new detail."],
+            "forbidden_pov_claims": ["my dog"],
+            "thread_reference": False,
+        },
+        repetition_profile={
+            "hardBannedPhrases": ["same old opening"],
+            "softAvoidPhrases": ["soft repeated phrase"],
+            "recentOpeningPatterns": ["recent opening"],
+            "recentEndingPatterns": ["recent ending"],
+        },
+        style={"sentenceCount": "2 to 4", "endingRule": "End concretely.", "concretenessRule": "Use Cookie."},
+        allow_time_specific_opening=False,
+    )
+
+    assert set(payload) == {"character", "user", "journalType", "singleSameDayMoment", "brief", "avoid", "style"}
+    assert set(payload["avoid"]) == {"hardBannedPhrases", "softAvoidPhrases"}
+    assert payload["character"]["name"] == "Milu"
+    assert payload["character"]["bio"] == "Gentle and playful."
+    assert payload["user"] == {"name": "Maliyah"}
+    assert "selectedConversationContext" not in payload
+    assert "priorJournalContext" not in payload
+    assert "identityContract" not in payload
+    assert "characterProfile" not in payload
+    assert "coverageWindow" not in payload
+    assert "transcript" not in json.dumps(payload)
+    assert "do not include" not in json.dumps(payload)
+
+
 def test_brief_payload_labels_user_and_character_turn_ownership(monkeypatch):
     captured = {}
 
@@ -173,6 +250,10 @@ def test_brief_payload_labels_user_and_character_turn_ownership(monkeypatch):
     )
 
     payload = json.loads(captured["payload"])
+    assert "characterProfile" not in payload
+    assert "identityContract" not in payload
+    assert payload["character"]["name"] == "Milu"
+    assert payload["user"]["name"] == "Maliyah"
     context = payload["selectedConversationContext"]
     turns = context["sessions"][0]["turns"]
     assert context["participants"]["user"]["name"] == "Maliyah"

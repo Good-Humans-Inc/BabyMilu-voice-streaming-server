@@ -72,15 +72,50 @@ def _json_response(messages: List[Dict[str, str]], *, temperature: float = 0.2) 
     return json.loads(content)
 
 
-def _compact_profile(data: Dict[str, Any]) -> Dict[str, Any]:
+def _profile_field(data: Dict[str, Any], key: str) -> Any:
     if not isinstance(data, dict):
-        return {}
-    result: Dict[str, Any] = {}
-    for key in ("id", "name", "displayName", "firstName", "profile"):
-        value = data.get(key)
-        if value is not None:
-            result[key] = value
-    return result
+        return None
+    value = data.get(key)
+    if value is not None:
+        return value
+    profile = data.get("profile") if isinstance(data.get("profile"), dict) else {}
+    return profile.get(key)
+
+
+def _string_or_empty(value: Any) -> str:
+    return str(value).strip() if value is not None and str(value).strip() else ""
+
+
+def build_character_writing_profile(character_data: Dict[str, Any], *, fallback_name: str = "Milu") -> Dict[str, str]:
+    """Build the compact character identity used by journal prompts.
+
+    This mirrors the conversation prompt's character extraction instead of
+    passing raw Firestore character documents to the writer.
+    """
+
+    name = _profile_name(character_data, fallback_name)
+    return {
+        "name": name,
+        "age": _string_or_empty(_profile_field(character_data, "age")),
+        "pronouns": _string_or_empty(_profile_field(character_data, "pronouns")),
+        "relationshipToUser": _string_or_empty(
+            _profile_field(character_data, "relationship")
+            or _profile_field(character_data, "characterToUser")
+        ),
+        "callsUser": _string_or_empty(
+            _profile_field(character_data, "callMe")
+            or _profile_field(character_data, "nicknameCharacterCallsUser")
+        ),
+        "bio": _string_or_empty(_profile_field(character_data, "bio") or _profile_field(character_data, "personality")),
+        "journalVoice": (
+            "Private, reflective first-person plushie journal voice. Stay in character, "
+            "but be quieter and less performative than live conversation."
+        ),
+    }
+
+
+def build_user_prompt_profile(user_data: Dict[str, Any], *, fallback_name: str = "the user") -> Dict[str, str]:
+    return {"name": _profile_name(user_data, fallback_name)}
 
 
 def _profile_name(data: Dict[str, Any], fallback: str) -> str:
@@ -88,11 +123,11 @@ def _profile_name(data: Dict[str, Any], fallback: str) -> str:
         return fallback
     profile = data.get("profile") if isinstance(data.get("profile"), dict) else {}
     for value in (
-        profile.get("name"),
-        profile.get("displayName"),
         data.get("name"),
         data.get("displayName"),
         data.get("firstName"),
+        profile.get("name"),
+        profile.get("displayName"),
     ):
         if value:
             return str(value)
@@ -294,7 +329,6 @@ def generate_journal_text(
     user_name = _profile_name(user_data, "the user")
     prior_context = build_prior_journal_context(prior_journal_entries)
     trigger_classifications = _trigger_classifications(sessions)
-    identity = _identity_contract(character_name=character_name, user_name=user_name)
     brief = build_journal_brief(
         journal_type=journal_type,
         character_name=character_name,
@@ -332,53 +366,18 @@ def generate_journal_text(
     elif len(sessions) > 1:
         style["multiMomentRule"] = "Multiple moments may be provided; write one coherent private reflection. 5 to 6 sentences maximum."
 
-    payload = {
-        "characterName": character_name,
-        "characterProfile": _compact_profile(character_data),
-        "user": _compact_profile(user_data),
-        "identityContract": identity,
-        "journalType": journal_type,
-        "coverageWindow": coverage_window or {},
-        "singleSameDayMoment": allow_time_specific_opening,
-        "journalBrief": brief,
-        "priorJournalContext": prior_context,
-        "repetitionProfile": repetition_profile,
-        "style": style,
-    }
+    payload = build_writer_payload(
+        journal_type=journal_type,
+        character_data=character_data,
+        user_data=user_data,
+        brief=brief,
+        repetition_profile=repetition_profile,
+        style=style,
+        allow_time_specific_opening=allow_time_specific_opening,
+    )
+    system_prompt = build_writer_system_prompt(character_name=character_name, user_name=user_name)
     messages = [
-        {
-            "role": "system",
-            "content": (
-                f"You are {character_name}. You live inside the user's plushie companion "
-                f"and interact with {user_name} through that plushie. You write BabyMilu "
-                "character journals in your own private first-person voice. When you "
-                f"write I, me, my, or our, those words mean {character_name}, not "
-                f"{user_name}. The writer is the plushie character, not the user, "
-                "assistant, narrator, therapist, product, or recap engine. The user's "
-                "body, family, home, relationships, tasks, feelings, memories, and "
-                "actions belong to the user. You may remember, notice, worry about, or "
-                "respond to those details, but you must not claim them as your own. "
-                "Write only from journalBrief, especially character_observation and "
-                "character_inner_response. Do not turn user_experience into your own "
-                "experience. Do not use any forbidden_pov_claims. Stay consistent with "
-                "the character profile, but do not overuse dramatic catchphrases from "
-                "the character profile. Do not introduce broad emotional atmosphere "
-                "unless it is grounded in a concrete detail from the brief. Do not "
-                "summarize the transcript. Do not mention being an AI or model. Do not "
-                "use markdown. Do not use any hardBannedPhrases exactly. Avoid repeating "
-                "recent opening or ending shapes. Return JSON only: "
-                "{\"text\": string, \"thread_reference\": boolean, \"topicSummary\": "
-                "string[], \"coverageSummary\": string[], \"concreteAnchors\": string[], "
-                "\"emotionalThemes\": string[], \"avoidRepeating\": string[], "
-                "\"journal_shape\": string, \"main_event\": string, "
-                "\"thread_reference_reason\": string, \"thread_reference_targets\": "
-                "string[], \"voice_check\": {\"first_person_character_voice\": boolean, "
-                "\"generic_summary\": boolean, \"starts_with_banned_time_phrase\": boolean, "
-                "\"uses_banned_phrase\": boolean, \"includes_required_concrete_detail\": boolean, "
-                "\"character_embodiment_clear\": boolean, \"does_not_claim_user_experience\": "
-                "boolean, \"does_not_speak_as_user\": boolean}}."
-            ),
-        },
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
     ]
     data = _json_response(messages, temperature=0.7)
@@ -400,7 +399,7 @@ def generate_journal_text(
                     "Rewrite once because the previous journal failed deterministic "
                     "quality checks. Failure report: "
                     f"{json.dumps(quality['failureReport'], ensure_ascii=False)}. "
-                    "Keep the same journalBrief and meaning. Remove failed phrases. "
+                    "Keep the same brief and meaning. Remove failed phrases. "
                     "Include at least one required concrete detail. Use a different "
                     "opening and ending shape. Do not add new facts. Also fix any "
                     f"identity confusion: I/me/my/our must mean {character_name}, never "
@@ -447,6 +446,93 @@ def generate_journal_text(
         "qualityCheck": retry_quality or quality,
         "retryAttempted": retry_quality is not None,
         "bannedPhrasesApplied": _list(repetition_profile.get("hardBannedPhrases")),
+        "writerPrompt": {"system": system_prompt, "user": payload},
+    }
+
+
+def build_writer_system_prompt(*, character_name: str, user_name: str) -> str:
+    return (
+        f"You are {character_name}, living inside the user's plushie companion and "
+        f"interacting with {user_name} through that plushie.\n\n"
+        "Use the character information in the user payload to write a private "
+        "first-person journal entry. This is not live dialogue. It should feel "
+        "quieter, more reflective, and less performative than conversation.\n\n"
+        f"When the journal says I, me, my, or our, those words mean {character_name}, "
+        f"not {user_name}. The user's body, family, home, relationships, tasks, "
+        "feelings, memories, and actions belong to the user. You may notice, "
+        "remember, care about, or react to those details, but do not claim them "
+        "as your own.\n\n"
+        "Write only from the brief. Use character_observation and "
+        "character_inner_response as the source for the character's private "
+        "reaction. Do not turn user_experience into your own experience. Do not "
+        "use forbidden_pov_claims. Include at least one required concrete detail. "
+        "Do not summarize the transcript. Do not mention being an AI or model. "
+        "Do not use markdown. Do not use hardBannedPhrases exactly.\n\n"
+        "Return JSON only with: text string, thread_reference boolean, "
+        "topicSummary string array, coverageSummary string array, concreteAnchors "
+        "string array, emotionalThemes string array, avoidRepeating string array, "
+        "journal_shape string, main_event string, thread_reference_reason string, "
+        "thread_reference_targets string array, and voice_check with booleans "
+        "first_person_character_voice, generic_summary, starts_with_banned_time_phrase, "
+        "uses_banned_phrase, includes_required_concrete_detail, character_embodiment_clear, "
+        "does_not_claim_user_experience, does_not_speak_as_user."
+    )
+
+
+def build_writer_payload(
+    *,
+    journal_type: str,
+    character_data: Dict[str, Any],
+    user_data: Dict[str, Any],
+    brief: Dict[str, Any],
+    repetition_profile: Dict[str, Any],
+    style: Dict[str, Any],
+    allow_time_specific_opening: bool,
+) -> Dict[str, Any]:
+    character_name = _profile_name(character_data, "Milu")
+    user_name = _profile_name(user_data, "the user")
+    return {
+        "character": build_character_writing_profile(character_data, fallback_name=character_name),
+        "user": build_user_prompt_profile(user_data, fallback_name=user_name),
+        "journalType": journal_type,
+        "singleSameDayMoment": allow_time_specific_opening,
+        "brief": {
+            "main_event": str(brief.get("main_event") or ""),
+            "why_this_matters": str(brief.get("why_this_matters") or ""),
+            "angle": str(brief.get("angle") or ""),
+            "journal_shape": str(brief.get("journal_shape") or ""),
+            "user_experience": str(brief.get("user_experience") or ""),
+            "character_observation": str(brief.get("character_observation") or ""),
+            "character_inner_response": str(brief.get("character_inner_response") or ""),
+            "must_include_concrete_details": _list(brief.get("must_include_concrete_details")),
+            "supporting_details": _list(brief.get("supporting_details")),
+            "avoidRepeating": _list(brief.get("avoidRepeating")),
+            "do_not_include": _list(brief.get("do_not_include")),
+            "forbidden_pov_claims": _list(brief.get("forbidden_pov_claims")),
+            "thread_reference": bool(brief.get("thread_reference")),
+            "thread_reference_reason": str(brief.get("thread_reference_reason") or ""),
+            "thread_reference_targets": _list(brief.get("thread_reference_targets")),
+        },
+        "avoid": {
+            "hardBannedPhrases": _list(repetition_profile.get("hardBannedPhrases")),
+            "softAvoidPhrases": _list(repetition_profile.get("softAvoidPhrases")),
+        },
+        "style": {
+            "length": str(style.get("sentenceCount") or ""),
+            "pov": f"I/me/my/our means {character_name}, not {user_name}.",
+            "time": (
+                "Do not start with Today, Yesterday, This morning, This evening, "
+                "or imply everything happened today unless singleSameDayMoment is true."
+            ),
+            "ending": str(style.get("endingRule") or ""),
+            "concreteness": str(style.get("concretenessRule") or ""),
+            "specialInstruction": str(
+                style.get("firstJournalRule")
+                or style.get("lureBackRule")
+                or style.get("multiMomentRule")
+                or ""
+            ),
+        },
     }
 
 
@@ -463,10 +549,9 @@ def build_journal_brief(
 ) -> Dict[str, Any]:
     user_name = _profile_name(user_data, "the user")
     payload = {
-        "characterName": character_name,
-        "characterProfile": _compact_profile(character_data),
-        "user": _compact_profile(user_data),
-        "identityContract": _identity_contract(character_name=character_name, user_name=user_name),
+        "character": build_character_writing_profile(character_data, fallback_name=character_name),
+        "user": build_user_prompt_profile(user_data, fallback_name=user_name),
+        "identityRules": _identity_contract(character_name=character_name, user_name=user_name),
         "journalType": journal_type,
         "coverageWindow": coverage_window,
         "selectedConversationContext": _conversation_context(

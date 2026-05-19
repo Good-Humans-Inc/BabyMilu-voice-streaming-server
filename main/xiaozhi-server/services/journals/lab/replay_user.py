@@ -174,6 +174,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     artifacts.write_json(artifact_dir / "memory-events.json", state.memory_events)
     artifacts.write_json(artifact_dir / "generated-journals.json", state.journals)
     artifacts.write_json(artifact_dir / "journal-briefs.json", artifacts.journal_briefs(state.journals))
+    artifacts.write_json(artifact_dir / "writer-payloads.json", artifacts.writer_payloads(state.journals))
     artifacts.write_csv(
         artifact_dir / "session-decisions.csv",
         decisions,
@@ -201,6 +202,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     artifacts.write_generated_journals(artifact_dir / "generated-journals.md", state.journals)
     artifacts.write_journal_briefs(artifact_dir / "journal-briefs.md", state.journals)
+    artifacts.write_writer_payloads(artifact_dir / "writer-payloads.md", state.journals)
     artifacts.write_conversation_timeline(artifact_dir / "conversation-timeline.md", decisions)
 
     print(f"Replay complete for {args.alias}")
@@ -435,6 +437,7 @@ def _generate_for_current_queue(state: ReplayState) -> None:
         "forbiddenPovClaims": generated.get("forbiddenPovClaims") or [],
         "bannedPhrasesApplied": generated.get("bannedPhrasesApplied") or [],
         "journalBrief": generated.get("journalBrief") or {},
+        "writerPrompt": generated.get("writerPrompt") or {},
         "repetitionProfile": generated.get("repetitionProfile") or {},
         "qualityCheck": generated.get("qualityCheck") or {},
         "retryAttempted": bool(generated.get("retryAttempted")),
