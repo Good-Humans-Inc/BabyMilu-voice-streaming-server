@@ -20,6 +20,7 @@ CHAR_INFO_FILE = Path(__file__).resolve().parent.parent / "data" / "marketing_ch
 DEFAULT_MARKETING_BUCKET = os.environ.get("MARKETING_CHARACTER_BUCKET", "milu-public")
 DEFAULT_MARKETING_PREFIX = os.environ.get("MARKETING_CHARACTER_PREFIX", "marketing-say-tool")
 _STORAGE_CLIENT = None
+FISH_VOICE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 def normalize_folder_name(value: str) -> str:
@@ -61,6 +62,105 @@ def load_character_info() -> dict:
 def save_character_info(info: dict) -> None:
     CHAR_INFO_FILE.parent.mkdir(parents=True, exist_ok=True)
     CHAR_INFO_FILE.write_text(json.dumps(info, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def looks_like_fish_voice_id(value: str) -> bool:
+    return bool(FISH_VOICE_ID_RE.fullmatch(str(value or "").strip()))
+
+
+def get_marketing_fish_config(config: dict) -> dict | None:
+    tts_conf = config.get("TTS", {}) or {}
+    fish_conf = dict(tts_conf.get("FishSpeech") or tts_conf.get("FishSpeechTTS") or {})
+
+    env_key = (
+        os.environ.get("MARKETING_FISH_TTS_API_KEY")
+        or os.environ.get("FISH_TTS_API_KEY")
+        or os.environ.get("FISH_API_KEY")
+        or ""
+    ).strip()
+    env_url = (
+        os.environ.get("MARKETING_FISH_TTS_API_URL")
+        or os.environ.get("FISH_TTS_API_URL")
+        or os.environ.get("FISH_API_URL")
+        or ""
+    ).strip()
+    env_model = (
+        os.environ.get("MARKETING_FISH_TTS_MODEL")
+        or os.environ.get("FISH_TTS_MODEL")
+        or os.environ.get("FISH_MODEL")
+        or ""
+    ).strip()
+
+    if env_key:
+        fish_conf["api_key"] = env_key
+    if env_url:
+        fish_conf["api_url"] = env_url
+    if env_model:
+        fish_conf["model"] = env_model
+
+    if not fish_conf:
+        return None
+
+    fish_conf.setdefault("type", "fishspeech")
+    fish_conf.setdefault("output_dir", "tmp/")
+    fish_conf.setdefault("response_format", "wav")
+    fish_conf.setdefault("normalize", True)
+    fish_conf.setdefault("streaming", False)
+    fish_conf.setdefault("channels", 1)
+    fish_conf.setdefault("rate", 44100)
+    fish_conf.setdefault("api_url", "https://api.fish.audio/v1/tts")
+    fish_conf.setdefault("model", "s2.1-pro")
+
+    api_key = str(fish_conf.get("api_key") or "").strip()
+    if not api_key or api_key == "YOUR_API_KEY" or "你的" in api_key:
+        return None
+
+    return fish_conf
+
+
+def build_marketing_tts_provider(config: dict, requested_voice: str):
+    requested_voice = str(requested_voice or "").strip()
+    selected_tts = config.get("selected_module", {}).get("TTS") or "EdgeTTS"
+    tts_conf = dict(config.get("TTS", {}).get(selected_tts) or {})
+    provider_type = tts_conf.get("type") or "edge"
+
+    fish_conf = get_marketing_fish_config(config)
+    if requested_voice and looks_like_fish_voice_id(requested_voice) and fish_conf:
+        fish_provider_type = fish_conf.get("type") or "fishspeech"
+        return (
+            create_instance(fish_provider_type, fish_conf, delete_audio_file=False),
+            "FishSpeech",
+        )
+
+    return create_instance(provider_type, tts_conf, delete_audio_file=False), selected_tts
+
+
+def resolve_marketing_voice(tts_provider, requested_voice: str, require_explicit: bool = False) -> tuple[str, bool]:
+    requested_voice = str(requested_voice or "").strip()
+
+    if hasattr(tts_provider, "reference_id"):
+        configured_reference = str(getattr(tts_provider, "reference_id", "") or "").strip()
+        if requested_voice:
+            tts_provider.reference_id = requested_voice
+            return requested_voice, False
+        if require_explicit or not configured_reference:
+            raise ValueError(
+                "voiceId is required for marketing TTS. Refusing to fall back to the server default voice."
+            )
+        return configured_reference, True
+
+    default_voice = str(getattr(tts_provider, "default_voice_id", "") or "").strip()
+
+    if requested_voice and hasattr(tts_provider, "default_voice_id"):
+        tts_provider.default_voice_id = requested_voice
+        return requested_voice, False
+
+    if require_explicit and default_voice:
+        raise ValueError(
+            "voiceId is required for marketing TTS. Refusing to fall back to the server default voice."
+        )
+
+    return default_voice, bool(default_voice)
 
 
 def get_storage_client():
@@ -515,6 +615,7 @@ class SimpleHttpServer:
                 "verified": verified,
                 "verifyDetail": verify_detail,
                 "url": download_url,
+                "note": "test.bin only updates animation assets. It does not change the device speaking voice.",
             }
         )
 
@@ -555,14 +656,14 @@ class SimpleHttpServer:
 
         # Build TTS provider from config
         try:
-            selected_tts = self.config.get("selected_module", {}).get("TTS") or "EdgeTTS"
-            tts_conf = self.config.get("TTS", {}).get(selected_tts) or {}
-            provider_type = tts_conf.get("type") or "edge"
-            # Keep file after synthesis so device can download
-            tts_provider = create_instance(provider_type, tts_conf, delete_audio_file=False)
-            # Optional: override default voice_id per request (e.g., ElevenLabs)
-            if voice and hasattr(tts_provider, "default_voice_id"):
-                tts_provider.default_voice_id = voice
+            tts_provider, tts_provider_name = build_marketing_tts_provider(self.config, voice)
+            resolved_voice, used_default_voice = resolve_marketing_voice(
+                tts_provider,
+                voice,
+                require_explicit=hasattr(tts_provider, "default_voice_id") or hasattr(tts_provider, "reference_id"),
+            )
+        except ValueError as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
         except Exception as e:
             return web.json_response({"ok": False, "error": f"tts init failed: {e}"}, status=500)
 
@@ -635,7 +736,16 @@ class SimpleHttpServer:
                 {"type": "play_url", "url": tts_url, "gain": gain},
             )
 
-        return web.json_response({"ok": bool(sent["play_url"]), "ttsUrl": tts_url, "sent": sent})
+        return web.json_response(
+            {
+                "ok": bool(sent["play_url"]),
+                "ttsUrl": tts_url,
+                "sent": sent,
+                "voiceId": resolved_voice,
+                "usedDefaultVoice": used_default_voice,
+                "ttsProvider": tts_provider_name,
+            }
+        )
 
     async def handle_marketing_script(self, request: web.Request) -> web.Response:
         """
@@ -685,15 +795,23 @@ class SimpleHttpServer:
         if not isinstance(steps, list) or len(steps) == 0:
             return web.json_response({"ok": False, "error": "steps must be a non-empty array"}, status=400)
 
+        voiced_steps_present = any(
+            isinstance(step, dict) and not bool(step.get("emotionOnly") or step.get("emotion_only"))
+            for step in steps
+        )
+
         # TTS provider once
         try:
-            selected_tts = self.config.get("selected_module", {}).get("TTS") or "EdgeTTS"
-            tts_conf = self.config.get("TTS", {}).get(selected_tts) or {}
-            provider_type = tts_conf.get("type") or "edge"
-            tts_provider = create_instance(provider_type, tts_conf, delete_audio_file=False)
-            # Optional: override default voice_id for whole script run
-            if voice and hasattr(tts_provider, "default_voice_id"):
-                tts_provider.default_voice_id = voice
+            tts_provider, tts_provider_name = build_marketing_tts_provider(self.config, voice)
+            resolved_voice, used_default_voice = resolve_marketing_voice(
+                tts_provider,
+                voice,
+                require_explicit=voiced_steps_present and (
+                    hasattr(tts_provider, "default_voice_id") or hasattr(tts_provider, "reference_id")
+                ),
+            )
+        except ValueError as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
         except Exception as e:
             return web.json_response({"ok": False, "error": f"tts init failed: {e}"}, status=500)
 
@@ -916,4 +1034,13 @@ class SimpleHttpServer:
                     except Exception:
                         pass
 
-        return web.json_response({"ok": True, "results": results, "combinedUrl": combined_url})
+        return web.json_response(
+            {
+                "ok": True,
+                "results": results,
+                "combinedUrl": combined_url,
+                "voiceId": resolved_voice,
+                "usedDefaultVoice": used_default_voice,
+                "ttsProvider": tts_provider_name,
+            }
+        )

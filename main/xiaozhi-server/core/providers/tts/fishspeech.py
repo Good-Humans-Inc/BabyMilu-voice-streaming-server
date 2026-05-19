@@ -134,6 +134,7 @@ class TTSProvider(TTSProviderBase):
         self.use_memory_cache = config.get("use_memory_cache", "on")
         self.seed = int(config.get("seed")) if config.get("seed") else None
         self.api_url = config.get("api_url", "http://127.0.0.1:8080/v1/tts")
+        self.model = str(config.get("model") or "s2.1-pro").strip() or "s2.1-pro"
 
     async def text_to_speak(self, text, output_file):
         # Prepare reference data
@@ -169,6 +170,7 @@ class TTSProvider(TTSProviderBase):
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/msgpack",
+                "model": self.model,
             },
         )
 

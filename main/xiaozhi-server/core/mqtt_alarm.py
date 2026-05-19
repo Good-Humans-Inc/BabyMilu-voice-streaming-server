@@ -1,7 +1,29 @@
 import os
 import json
+import re
 from typing import Optional
 from paho.mqtt import client as mqtt_client
+
+
+def _normalize_device_id(device_id: str) -> str:
+    """
+    Normalize common MAC input formats for MQTT topics.
+
+    Accepts colon, dash, underscore, or separator-free MAC strings and returns
+    colon-separated lowercase. Non-MAC identifiers are returned lowercased.
+    """
+    if not isinstance(device_id, str):
+        return device_id
+    raw = device_id.strip()
+    if not raw:
+        return raw
+
+    compact = re.sub(r"[^0-9A-Fa-f]", "", raw)
+    if len(compact) == 12 and re.fullmatch(r"[0-9A-Fa-f]{12}", compact):
+        compact = compact.lower()
+        return ":".join(compact[i : i + 2] for i in range(0, 12, 2))
+
+    return raw.lower()
 
 
 def publish_ws_start(
@@ -38,7 +60,8 @@ def publish_ws_start(
     except Exception:
         host, port = "localhost", 1883
 
-    topic = f"xiaozhi/{device_mac}/down"
+    normalized_device_id = _normalize_device_id(device_mac)
+    topic = f"xiaozhi/{normalized_device_id}/down"
     payload = {
         "type": "ws_start",
         "wss": ws_url,
@@ -92,7 +115,8 @@ def publish_down_command(
     except Exception:
         host, port = "localhost", 1883
 
-    topic = f"xiaozhi/{device_mac}/down"
+    normalized_device_id = _normalize_device_id(device_mac)
+    topic = f"xiaozhi/{normalized_device_id}/down"
     client = mqtt_client.Client(mqtt_client.CallbackAPIVersion.VERSION2)
     try:
         client.connect(host, port, keepalive=30)
@@ -110,4 +134,3 @@ def publish_down_command(
         except Exception:
             pass
         return False
-

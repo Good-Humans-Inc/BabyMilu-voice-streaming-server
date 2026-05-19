@@ -330,7 +330,7 @@
       <div class="card-head">
         <div>
           <h2>Device + Character</h2>
-          <div class="muted">Select the UGC character once and reuse it for both voice playback and animation updates.</div>
+          <div class="muted">Select the UGC character once and reuse it for voice playback and animation preview. Animation updates do not change the device speaking voice.</div>
         </div>
         <div class="pill-note">Script-first workflow</div>
       </div>
@@ -347,6 +347,7 @@
         <div class="col-4">
           <label for="resolvedVoice">Resolved ElevenLabs Voice ID</label>
           <input id="resolvedVoice" readonly>
+          <div id="voiceHint" class="field-help"></div>
         </div>
       </div>
 
@@ -429,7 +430,7 @@
       <div class="card-head">
         <div>
           <h2>Animation Device Bin</h2>
-          <div class="muted">Publishes an MQTT `auto_update` command so the device fetches the selected character `test.bin`.</div>
+          <div class="muted">Publishes an MQTT `auto_update` command so the device fetches the selected character `test.bin`. This only changes animation assets and does not change the device speaking voice.</div>
         </div>
         <button id="updateAnimationBtn" type="button">Send test.bin to Device</button>
       </div>
@@ -564,6 +565,10 @@
         return el("customVoiceId").value.trim();
       }
       return character.voiceId || "";
+    }
+
+    function missingVoiceCharacters() {
+      return state.characters.filter(item => !String(item.voiceId || "").trim());
     }
 
     function currentCharacterFolder() {
@@ -713,6 +718,7 @@
     function syncCharacterFields() {
       const character = currentCharacter();
       const isCustom = !!character && character.value === "custom";
+      const voiceId = currentVoiceId();
       el("customVoiceRow").classList.toggle("hidden", !isCustom);
       state.selectedCharacter = character ? character.value : "";
 
@@ -724,7 +730,15 @@
       }
 
       if (isCustom) {
-        el("resolvedVoice").value = currentVoiceId();
+        el("resolvedVoice").value = voiceId;
+      }
+
+      if (!voiceId) {
+        el("voiceHint").textContent = "No voiceId is saved for this character yet. Voiced scripts are blocked until you save a real ElevenLabs voiceId.";
+      } else if (isCustom) {
+        el("voiceHint").textContent = "Custom voiceId will be used only for voiced script playback.";
+      } else {
+        el("voiceHint").textContent = "This voiceId is used for voiced marketing script playback only.";
       }
 
       const folder = currentCharacterFolder();
@@ -913,7 +927,11 @@
         populateCharacterOptions();
         renderRegistryRows();
         syncCharacterFields();
-        showStatus(el("characterStatus"), "ok", `Loaded ${state.characters.length} character folders from bucket.`);
+        const missingCount = missingVoiceCharacters().length;
+        const suffix = missingCount
+          ? ` ${missingCount} character(s) still have no voiceId and cannot run voiced scripts until fixed.`
+          : "";
+        showStatus(el("characterStatus"), "ok", `Loaded ${state.characters.length} character folders from bucket.${suffix}`);
       } catch (error) {
         showStatus(el("characterStatus"), "err", error.message || String(error));
       } finally {
@@ -1003,7 +1021,7 @@
         showStatus(
           el("animationStatus"),
           "ok",
-          `Published: ${result.published}\nVerified: ${result.verified}\nURL: ${result.url}`
+          `Published: ${result.published}\nVerified: ${result.verified}\nURL: ${result.url}\n${result.note || "test.bin only changes animation assets. Speaking voice does not change here."}`
         );
       } catch (error) {
         showStatus(el("animationStatus"), "err", error.message || String(error));
@@ -1028,6 +1046,16 @@
         steps = collectSteps();
       } catch (error) {
         showStatus(el("scriptStatus"), "err", error.message || String(error));
+        return;
+      }
+
+      const voicedStepsPresent = steps.some(step => !step.emotionOnly);
+      if (voicedStepsPresent && !voiceId) {
+        showStatus(
+          el("scriptStatus"),
+          "err",
+          "This character has no saved voiceId yet. Add an ElevenLabs voiceId in Character Registry before running voiced steps."
+        );
         return;
       }
 

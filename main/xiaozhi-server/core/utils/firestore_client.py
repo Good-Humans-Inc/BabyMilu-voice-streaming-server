@@ -15,8 +15,24 @@ logger = setup_logging()
 @functools.lru_cache(maxsize=1)
 def _build_client() -> firestore.Client:
     creds_path = get_gcp_credentials_path()
-    if creds_path:
-        os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", creds_path)
+
+    if not creds_path:
+        env_creds = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        if env_creds and os.path.isdir(env_creds):
+            logger.bind(tag=TAG).warning(
+                f"⚠️ GOOGLE_APPLICATION_CREDENTIALS points to a directory without a usable JSON file: {env_creds}. "
+                "Firestore will fall back to application default credentials."
+            )
+            if "GOOGLE_APPLICATION_CREDENTIALS" in os.environ:
+                del os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
+        else:
+            logger.bind(tag=TAG).warning(
+                f"⚠️ No explicit GCP credentials file found. GOOGLE_APPLICATION_CREDENTIALS={os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', 'not set')}"
+            )
+    else:
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
+        logger.bind(tag=TAG).info(f"✅ Using GCP credentials file: {creds_path}")
+
     return firestore.Client()
 
 
@@ -152,6 +168,61 @@ def get_timezone_for_device(device_id: str, timeout: float = 3.0) -> Optional[st
         return None
     except Exception:
         return None
+
+
+def get_conversation_state_for_device(device_id: str, timeout: float = 3.0) -> Optional[Dict[str, Any]]:
+    """Return devices/{device_id}.conversation if present."""
+    try:
+        client = _build_client()
+        doc = client.collection("devices").document(device_id).get(timeout=timeout)
+        if not doc.exists:
+            logger.bind(tag=TAG).warning(f"Firestore devices/{device_id} not found")
+            return None
+        data = doc.to_dict() or {}
+        conversation = data.get("conversation")
+        if isinstance(conversation, dict) and conversation:
+            return conversation
+        return None
+    except Exception as e:
+        logger.bind(tag=TAG).error(f"Firestore get conversation state error: {e}")
+        return None
+
+
+def update_conversation_state_for_device(
+    device_id: str,
+    *,
+    conversation_id: Optional[str] = None,
+    last_used: Optional[str] = None,
+    last_interaction_summary: Optional[str] = None,
+    timeout: float = 3.0,
+) -> bool:
+    """Upsert or clear devices/{deviceId}.conversation metadata."""
+    try:
+        client = _build_client()
+        if not conversation_id and last_used is None and last_interaction_summary is None:
+            payload = {"conversation": firestore.DELETE_FIELD}
+        else:
+            conversation_payload: Dict[str, Any] = {}
+            if conversation_id:
+                conversation_payload["id"] = conversation_id
+            if last_used is not None:
+                conversation_payload["last_used"] = last_used
+            if last_interaction_summary is not None:
+                conversation_payload["last_interaction_summary"] = last_interaction_summary
+            payload = {
+                "conversation": conversation_payload or firestore.DELETE_FIELD,
+            }
+
+        payload["conversationId"] = firestore.DELETE_FIELD
+        client.collection("devices").document(device_id).set(
+            payload,
+            merge=True,
+            timeout=timeout,
+        )
+        return True
+    except Exception as e:
+        logger.bind(tag=TAG).error(f"Firestore update conversation state error: {e}")
+        return False
 
 
 def get_conversation_id_for_device(device_id: str, timeout: float = 3.0) -> Optional[str]:
