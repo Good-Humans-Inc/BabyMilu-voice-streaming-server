@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
@@ -29,7 +30,7 @@ class JournalSupabaseClient:
         )
         self.memory_event_table = os.environ.get(
             "SUPABASE_CHARACTER_MEMORY_EVENT_TABLE",
-            os.environ.get("SUPABASE_MEMORY_EVENT_TABLE", "character_memory_event"),
+            os.environ.get("SUPABASE_MEMORY_EVENT_TABLE", "character_memory_events"),
         )
         self.headers = {
             "apikey": self.service_role_key,
@@ -65,7 +66,7 @@ class JournalSupabaseClient:
             self.sessions_table,
             f"?session_id=eq.{quote(session_id, safe='')}&select=*",
         )
-        return rows[0] if isinstance(rows, list) and rows else None
+        return _normalize_session(rows[0]) if isinstance(rows, list) and rows else None
 
     def get_turns(self, session_id: str) -> List[Dict[str, Any]]:
         rows = self._request(
@@ -81,7 +82,27 @@ class JournalSupabaseClient:
             self.sessions_table,
             f"?user_id=eq.{quote(user_id, safe='')}&select=*&order=end_time.desc.nullslast,created_at.desc&limit=1",
         )
-        return rows[0] if isinstance(rows, list) and rows else None
+        return _normalize_session(rows[0]) if isinstance(rows, list) and rows else None
+
+    def get_character_ids_for_user(self, user_id: str, limit: int = 100) -> List[str]:
+        rows = self._request(
+            "GET",
+            self.sessions_table,
+            (
+                f"?user_id=eq.{quote(user_id, safe='')}"
+                f"&select=character_id"
+                f"&order=created_at.desc"
+                f"&limit={int(limit)}"
+            ),
+        )
+        seen = set()
+        values: List[str] = []
+        for row in rows if isinstance(rows, list) else []:
+            character_id = str(row.get("character_id") or "").strip()
+            if character_id and character_id not in seen:
+                seen.add(character_id)
+                values.append(character_id)
+        return values
 
     def get_sessions_for_context(
         self,
@@ -105,7 +126,7 @@ class JournalSupabaseClient:
                 f"&limit={int(limit)}"
             ),
         )
-        return rows if isinstance(rows, list) else []
+        return [_normalize_session(row) for row in rows] if isinstance(rows, list) else []
 
     def get_recent_memory_events(self, user_id: str, limit: int = 5) -> List[Dict[str, Any]]:
         return self._select_memory_events(
@@ -157,27 +178,36 @@ class JournalSupabaseClient:
         event_type: Optional[str] = None,
         query: str = "",
     ) -> List[Dict[str, Any]]:
-        filters = f"?user_id=eq.{quote(user_id, safe='')}"
-        if character_id:
-            filters += f"&character_id=eq.{quote(character_id, safe='')}"
-        if event_type:
-            filters += f"&event_type=eq.{quote(event_type, safe='')}"
-        filters += f"&select=*{query}"
-        try:
-            rows = self._request("GET", self.memory_event_table, filters)
-            return rows if isinstance(rows, list) else []
-        except Exception as exc:
-            logger.bind(tag=TAG).warning(
-                f"Failed reading journal memory events from {self.memory_event_table}: {exc}"
+        for table, style in self._memory_event_table_candidates():
+            filters = _memory_event_filters(
+                style=style,
+                user_id=user_id,
+                character_id=character_id,
+                event_type=event_type,
             )
-            return []
+            filters += f"&select=*{query}"
+            try:
+                rows = self._request("GET", table, filters)
+                return [_normalize_memory_event(row) for row in rows] if isinstance(rows, list) else []
+            except Exception as exc:
+                logger.bind(tag=TAG).warning(
+                    f"Failed reading journal memory events from {table}: {exc}"
+                )
+        return []
 
     def get_system_memory_block(self, user_id: str) -> str:
-        rows = self._request(
-            "GET",
-            self.read_model_table,
-            f"?user_id=eq.{quote(user_id, safe='')}&select=*",
-        )
+        try:
+            rows = self._request(
+                "GET",
+                self.read_model_table,
+                f"?user_id=eq.{quote(user_id, safe='')}&select=*",
+            )
+        except Exception:
+            rows = self._request(
+                "GET",
+                "user_memory_model",
+                f"?user_id=eq.{quote(user_id, safe='')}&select=*",
+            )
         row = rows[0] if isinstance(rows, list) and rows else {}
         prompt_pack = row.get("prompt_pack") if isinstance(row.get("prompt_pack"), dict) else {}
         block = prompt_pack.get("systemMemoryBlock")
@@ -192,27 +222,124 @@ class JournalSupabaseClient:
         content: Dict[str, Any],
         occurred_at: str,
     ) -> Optional[Dict[str, Any]]:
-        payload = {
-            "user_id": user_id,
-            "character_id": character_id,
-            "event_type": "journal_written",
-            "modality": "plushie_conversation",
-            "content": content,
-            "time": {
-                "occurredAt": occurred_at,
-                "ingestedAt": _now_iso(),
-            },
-            "source": {
-                "sessionId": session_id,
-                "characterId": character_id,
-            },
-            "created_at": _now_iso(),
-        }
         headers = {**self.headers, "Prefer": "return=representation"}
-        rows = self._request(
-            "POST",
-            self.memory_event_table,
-            headers=headers,
-            json=payload,
+        for table, style in self._memory_event_table_candidates():
+            payload = _journal_memory_event_payload(
+                style=style,
+                user_id=user_id,
+                character_id=character_id,
+                session_id=session_id,
+                content=content,
+                occurred_at=occurred_at,
+            )
+            try:
+                rows = self._request(
+                    "POST",
+                    table,
+                    headers=headers,
+                    json=payload,
+                )
+                return _normalize_memory_event(rows[0]) if isinstance(rows, list) and rows else None
+            except Exception as exc:
+                logger.bind(tag=TAG).warning(
+                    f"Failed writing journal memory event to {table}: {exc}"
+                )
+        raise RuntimeError("Failed writing journal memory event")
+
+    def _memory_event_table_candidates(self) -> List[tuple[str, str]]:
+        table = self.memory_event_table
+        candidates = [(table, _memory_event_style(table))]
+        for fallback in ("character_memory_events", "character_memory_event"):
+            item = (fallback, _memory_event_style(fallback))
+            if item not in candidates:
+                candidates.append(item)
+        return candidates
+
+
+def _normalize_session(row: Dict[str, Any]) -> Dict[str, Any]:
+    data = dict(row)
+    if not data.get("memory_status"):
+        data["memory_status"] = (
+            data.get("memory_status_character")
+            or data.get("memory_status_user")
+            or data.get("analysis_status")
+            or ""
         )
-        return rows[0] if isinstance(rows, list) and rows else None
+    return data
+
+
+def _memory_event_style(table: str) -> str:
+    return "camel" if table.endswith("events") else "snake"
+
+
+def _memory_event_filters(
+    *,
+    style: str,
+    user_id: str,
+    character_id: Optional[str],
+    event_type: Optional[str],
+) -> str:
+    if style == "camel":
+        filters = f"?userId=eq.{quote(user_id, safe='')}"
+        if character_id:
+            filters += f"&characterId=eq.{quote(character_id, safe='')}"
+        if event_type:
+            filters += f"&eventType=eq.{quote(event_type, safe='')}"
+        return filters
+    filters = f"?user_id=eq.{quote(user_id, safe='')}"
+    if character_id:
+        filters += f"&character_id=eq.{quote(character_id, safe='')}"
+    if event_type:
+        filters += f"&event_type=eq.{quote(event_type, safe='')}"
+    return filters
+
+
+def _normalize_memory_event(row: Dict[str, Any]) -> Dict[str, Any]:
+    data = dict(row)
+    if "eventId" in data and "event_id" not in data:
+        data["event_id"] = data.get("eventId")
+    if "eventType" in data and "event_type" not in data:
+        data["event_type"] = data.get("eventType")
+    if "userId" in data and "user_id" not in data:
+        data["user_id"] = data.get("userId")
+    if "characterId" in data and "character_id" not in data:
+        data["character_id"] = data.get("characterId")
+    return data
+
+
+def _journal_memory_event_payload(
+    *,
+    style: str,
+    user_id: str,
+    character_id: str,
+    session_id: Optional[str],
+    content: Dict[str, Any],
+    occurred_at: str,
+) -> Dict[str, Any]:
+    common = {
+        "modality": "plushie_conversation",
+        "content": content,
+        "time": {
+            "occurredAt": occurred_at,
+            "ingestedAt": _now_iso(),
+        },
+        "source": {
+            "sessionId": session_id,
+            "characterId": character_id,
+        },
+        "created_at": _now_iso(),
+    }
+    if style == "camel":
+        return {
+            **common,
+            "eventId": str(uuid.uuid4()),
+            "userId": user_id,
+            "characterId": character_id,
+            "eventType": "journal_written",
+        }
+    return {
+        **common,
+        "user_id": user_id,
+        "character_id": character_id,
+        "event_type": "journal_written",
+    }

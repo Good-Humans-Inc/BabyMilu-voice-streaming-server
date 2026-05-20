@@ -25,10 +25,24 @@ def _now(now: Optional[datetime]) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
-def _parent_ids(snapshot: Any) -> Tuple[str, str]:
-    character = snapshot.reference.parent.parent
-    user = character.parent.parent if character is not None else None
-    return (user.id if user is not None else "", character.id if character is not None else "")
+def _journal_doc_ids(snapshot: Any) -> Tuple[str, str]:
+    data = snapshot.to_dict() or {}
+    character_id = str(data.get("characterId") or "")
+    path = str(getattr(snapshot.reference, "path", "") or "")
+    parts = path.split("/") if path else []
+    user_id = ""
+    if "users" in parts:
+        idx = parts.index("users")
+        if idx + 1 < len(parts):
+            user_id = parts[idx + 1]
+    if not character_id and "characters" in parts:
+        idx = parts.index("characters")
+        if idx + 1 < len(parts):
+            character_id = parts[idx + 1]
+    if not user_id:
+        user = snapshot.reference.parent.parent
+        user_id = user.id if user is not None else ""
+    return user_id, character_id
 
 
 def _moment_ids(snapshot: Any) -> Tuple[str, str]:
@@ -116,7 +130,7 @@ def _thread_reference_needed(journal_events: List[Dict[str, Any]]) -> bool:
 def _source_memory_event_ids(events: List[Dict[str, Any]]) -> List[str]:
     ids = []
     for event in events:
-        value = event.get("id") or event.get("event_id")
+        value = event.get("id") or event.get("event_id") or event.get("eventId")
         if value is not None:
             ids.append(str(value))
     return ids
@@ -362,8 +376,9 @@ def process_journal_ready_sessions(
 
     for marker in waiting:
         marker_data = marker.to_dict() or {}
-        user_id = marker_data.get("userId") or _parent_ids(marker)[0]
-        character_id = marker_data.get("characterId") or _parent_ids(marker)[1]
+        path_user_id, path_character_id = _journal_doc_ids(marker)
+        user_id = marker_data.get("userId") or path_user_id
+        character_id = marker_data.get("characterId") or path_character_id
         session_id = marker_data.get("sessionId") or marker.id
         try:
             session = sb.get_session(session_id)
@@ -491,7 +506,7 @@ def run_journal_generation_job(
     queues = store.fetch_pending_queues(client=db, limit=config.max_generation_queues())
 
     for queue_doc in queues:
-        user_id, character_id = _parent_ids(queue_doc)
+        user_id, character_id = _journal_doc_ids(queue_doc)
         if not user_id or not character_id:
             continue
         if not _local_clock_matches(client=db, user_id=user_id, now=now, hour=6, minute=30):
@@ -576,7 +591,7 @@ def run_journal_generation_job(
                     },
                     occurred_at=str(occurred_at or now.isoformat()),
                 )
-                memory_event_id = (written or {}).get("id")
+                memory_event_id = (written or {}).get("id") or (written or {}).get("event_id") or (written or {}).get("eventId")
                 store.create_journal_entry(
                     client=db,
                     user_id=user_id,
@@ -629,8 +644,7 @@ def _run_lure_back_generation(
                 last_dt = last_dt.replace(tzinfo=timezone.utc)
             if now - last_dt < timedelta(days=14):
                 continue
-            for char_snap in user_snap.reference.collection("characters").limit(20).stream():
-                character_id = char_snap.id
+            for character_id in sb.get_character_ids_for_user(user_id, limit=20):
                 prior_events = _get_journal_memory_events(sb, user_id, character_id=character_id, limit=50)
                 prior = _journal_entries_from_memory_events(prior_events)
                 if not prior:
@@ -693,7 +707,7 @@ def _run_lure_back_generation(
                         journal_type="lure_back",
                         display_at=_journal_display_at(local_date, store.get_user_timezone(db, user_id)),
                         entry_id=entry_id,
-                        memory_event_id=(written or {}).get("id"),
+                        memory_event_id=(written or {}).get("id") or (written or {}).get("event_id") or (written or {}).get("eventId"),
                     )
                 results.append({"userId": user_id, "characterId": character_id, "status": "lure_back_generated", "entryId": entry_id})
         except Exception as exc:

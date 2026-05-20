@@ -41,8 +41,16 @@ def user_ref(client: firestore.Client, user_id: str):
     return client.collection("users").document(user_id)
 
 
-def character_ref(client: firestore.Client, user_id: str, character_id: str):
-    return user_ref(client, user_id).collection("characters").document(character_id)
+def journal_character_state_ref(client: firestore.Client, user_id: str, character_id: str):
+    return user_ref(client, user_id).collection("journal_character_state").document(_safe_doc_id(character_id))
+
+
+def _safe_doc_id(value: str) -> str:
+    return str(value or "").replace("/", "_")
+
+
+def _queue_doc_id(character_id: str, local_date: str) -> str:
+    return f"{_safe_doc_id(character_id)}_{_safe_doc_id(local_date)}"
 
 
 def get_user_data(client: firestore.Client, user_id: str) -> Dict[str, Any]:
@@ -60,9 +68,6 @@ def get_user_timezone(client: firestore.Client, user_id: str) -> str:
 
 
 def get_character_data(client: firestore.Client, user_id: str, character_id: str) -> Dict[str, Any]:
-    snap = character_ref(client, user_id, character_id).get()
-    if snap.exists:
-        return snap.to_dict() or {}
     top_level = client.collection("characters").document(character_id).get()
     return top_level.to_dict() or {} if top_level.exists else {}
 
@@ -81,7 +86,7 @@ def write_session_marker(
     db = _client(client)
     now = iso_now()
     ref = (
-        character_ref(db, user_id, character_id)
+        user_ref(db, user_id)
         .collection("journal_session_state")
         .document(session_id)
     )
@@ -120,7 +125,7 @@ def update_marker(doc_ref: Any, updates: Dict[str, Any]) -> None:
 
 
 def get_turn_counter(client: firestore.Client, user_id: str, character_id: str) -> int:
-    snap = character_ref(client, user_id, character_id).get()
+    snap = journal_character_state_ref(client, user_id, character_id).get()
     data = snap.to_dict() or {} if snap.exists else {}
     try:
         return int(data.get("turns_since_last_journal") or 0)
@@ -134,9 +139,10 @@ def add_turns_to_counter(
     character_id: str,
     user_turn_count: int,
 ) -> int:
-    ref = character_ref(client, user_id, character_id)
+    ref = journal_character_state_ref(client, user_id, character_id)
     ref.set(
         {
+            "characterId": character_id,
             "turns_since_last_journal": firestore.Increment(int(user_turn_count or 0)),
             "updated_at": iso_now(),
         },
@@ -146,8 +152,8 @@ def add_turns_to_counter(
 
 
 def reset_turn_counter(client: firestore.Client, user_id: str, character_id: str) -> None:
-    character_ref(client, user_id, character_id).set(
-        {"turns_since_last_journal": 0, "updated_at": iso_now()},
+    journal_character_state_ref(client, user_id, character_id).set(
+        {"characterId": character_id, "turns_since_last_journal": 0, "updated_at": iso_now()},
         merge=True,
     )
 
@@ -189,9 +195,9 @@ def queue_session(
     journal_type: str,
 ) -> str:
     ref = (
-        character_ref(client, user_id, character_id)
+        user_ref(client, user_id)
         .collection("journal_queue")
-        .document(local_date)
+        .document(_queue_doc_id(character_id, local_date))
     )
     snap = ref.get()
     now = iso_now()
@@ -203,6 +209,7 @@ def queue_session(
     ref.set(
         {
             "date": local_date,
+            "characterId": character_id,
             "status": "pending",
             "journal_type": data.get("journal_type") or journal_type,
             "sessions": sessions,

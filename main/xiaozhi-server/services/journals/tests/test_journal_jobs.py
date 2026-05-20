@@ -4,7 +4,7 @@ from services.journals import jobs
 
 
 class FakeRef:
-    def __init__(self, path="users/u1/characters/c1/journal_session_state/s1"):
+    def __init__(self, path="users/u1/journal_session_state/s1"):
         self.path = path
         self.set_calls = []
         self.parent = None
@@ -40,7 +40,7 @@ class FakeSupabase:
     def get_turns(self, session_id):
         return self.turns
 
-    def get_journal_memory_events(self, user_id, limit=3):
+    def get_journal_memory_events(self, user_id, character_id=None, limit=3):
         return []
 
     def get_memory_events_since(self, *args, **kwargs):
@@ -51,6 +51,9 @@ class FakeSupabase:
 
     def get_sessions_for_context(self, **kwargs):
         return []
+
+    def get_character_ids_for_user(self, user_id, limit=100):
+        return ["c1"]
 
 
 def _enable_processing(monkeypatch):
@@ -160,12 +163,12 @@ def test_generation_writes_memory_event_payload(monkeypatch):
         id = "2026-05-11"
 
         def __init__(self):
-            self.reference = FakeRef("users/u1/characters/c1/journal_queue/2026-05-11")
-            self.reference.parent = type("Parent", (), {"parent": type("Character", (), {"id": "c1", "parent": type("Characters", (), {"parent": type("User", (), {"id": "u1"})()})()})()})()
+            self.reference = FakeRef("users/u1/journal_queue/c1_2026-05-11")
 
         def to_dict(self):
             return {
                 "date": "2026-05-11",
+                "characterId": "c1",
                 "status": "pending",
                 "journal_type": "regular",
                 "sessions": [{"sessionId": "s1", "sessionEndTime": "2026-05-11T12:00:00+00:00"}],

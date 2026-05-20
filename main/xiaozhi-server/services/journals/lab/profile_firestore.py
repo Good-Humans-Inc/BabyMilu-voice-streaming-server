@@ -32,18 +32,13 @@ def load_lab_profile(
     user_snap = user_ref.get()
     user_data = user_snap.to_dict() or {} if user_snap.exists else {}
 
-    character_snap = user_ref.collection("characters").document(character_id).get()
-    character_data = character_snap.to_dict() or {} if character_snap.exists else {}
-
-    if not character_snap.exists:
-        top_level = db.collection("characters").document(character_id).get()
-        if top_level.exists:
-            character_data = top_level.to_dict() or {}
+    top_level = db.collection("characters").document(character_id).get()
+    character_data = top_level.to_dict() or {} if top_level.exists else {}
 
     return {
         "database": normalized_database or "(default)",
         "userExists": bool(user_snap.exists),
-        "characterExists": bool(character_data),
+        "characterExists": bool(top_level.exists),
         "userData": user_data,
         "characterData": character_data,
     }

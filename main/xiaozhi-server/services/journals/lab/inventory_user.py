@@ -159,11 +159,10 @@ def _firestore_inventory(user_id: str, character_id: Optional[str]) -> dict[str,
         user_ref = db.collection("users").document(user_id)
         user_snap = user_ref.get()
         user_data = user_snap.to_dict() or {} if user_snap.exists else {}
-        character_ids = [snap.id for snap in user_ref.collection("characters").limit(20).stream()] if user_snap.exists else []
         char_data = {}
         char_exists = False
         if character_id:
-            char_snap = user_ref.collection("characters").document(character_id).get()
+            char_snap = db.collection("characters").document(character_id).get()
             char_exists = bool(char_snap.exists)
             char_data = char_snap.to_dict() or {} if char_snap.exists else {}
         profile = char_data.get("profile") if isinstance(char_data.get("profile"), dict) else {}
@@ -173,7 +172,6 @@ def _firestore_inventory(user_id: str, character_id: Optional[str]) -> dict[str,
             "userExists": bool(user_snap.exists),
             "timezone": _first_string(user_data, ("timezone", "timeZone", "timezoneId", "userTimezone")),
             "requestedCharacterExists": char_exists,
-            "characterIdsSample": character_ids,
             "requestedCharacterName": char_data.get("name") or profile.get("name"),
         }
     except Exception as exc:
