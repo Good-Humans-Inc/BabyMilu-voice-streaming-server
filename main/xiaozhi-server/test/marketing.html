@@ -485,6 +485,7 @@
     const config = window.MARKETING_CONFIG || { defaultBucket: "milu-public", defaultPrefix: "marketing-say-tool", defaultFilename: "test.bin", emotions: [], characters: [] };
     const state = {
       characters: [],
+      registryRows: [],
       selectedCharacter: "",
     };
     const el = id => document.getElementById(id);
@@ -522,6 +523,13 @@
         throw new Error(result.error || "Failed to load character list");
       }
       state.characters = (result.characters || []).map(item => ({
+        value: item.value || item.label || "",
+        label: item.label || item.value || "",
+        voiceId: item.voiceId || "",
+        animationFolder: item.animationFolder || item.value || "",
+        binUrl: item.binUrl || buildDeviceBinUrl(item.animationFolder || item.value || ""),
+      })).filter(item => item.value);
+      state.registryRows = (result.registry || result.characters || []).map(item => ({
         value: item.value || item.label || "",
         label: item.label || item.value || "",
         voiceId: item.voiceId || "",
@@ -615,7 +623,7 @@
 
     function renderRegistryRows() {
       const tbody = el("characterRegistryRows");
-      tbody.innerHTML = state.characters.map((item, index) => `
+      tbody.innerHTML = state.registryRows.map((item, index) => `
         <tr data-index="${index}">
           <td><input data-field="value" value="${escapeHtml(item.value)}"></td>
           <td><input data-field="voiceId" value="${escapeHtml(item.voiceId || "")}"></td>
@@ -630,11 +638,11 @@
           input.addEventListener("input", (event) => {
             const field = event.target.dataset.field;
             if (!field) return;
-            state.characters[index][field] = event.target.value.trim();
+            state.registryRows[index][field] = event.target.value.trim();
             if (field === "value") {
-              state.characters[index].animationFolder = state.characters[index].value;
-              if (!state.characters[index].binUrl) {
-                state.characters[index].binUrl = buildDeviceBinUrl(state.characters[index].value);
+              state.registryRows[index].animationFolder = state.registryRows[index].value;
+              if (!state.registryRows[index].binUrl) {
+                state.registryRows[index].binUrl = buildDeviceBinUrl(state.registryRows[index].value);
               }
             }
           });
@@ -642,12 +650,11 @@
 
         const removeBtn = row.querySelector(".row-remove");
         removeBtn.addEventListener("click", () => {
-          const removed = state.characters[index];
-          state.characters.splice(index, 1);
+          const removed = state.registryRows[index];
+          state.registryRows.splice(index, 1);
           if (removed && removed.value === state.selectedCharacter) {
             state.selectedCharacter = state.characters[0] ? state.characters[0].value : "";
           }
-          populateCharacterOptions();
           renderRegistryRows();
           syncCharacterFields();
         });
@@ -655,7 +662,7 @@
     }
 
     function collectRegistryRowsForSave() {
-      return state.characters
+      return state.registryRows
         .map(item => ({
           characterFolder: String(item.value || "").trim(),
           voiceId: String(item.voiceId || "").trim(),
@@ -948,12 +955,18 @@
         return;
       }
       const existing = state.characters.find(item => item.value === folder);
+      const existingRegistry = state.registryRows.find(item => item.value === folder);
       if (existing) {
         existing.voiceId = voiceId;
         existing.binUrl = normalizeBinUrl(binUrl, folder);
         existing.animationFolder = folder;
+      }
+      if (existingRegistry) {
+        existingRegistry.voiceId = voiceId;
+        existingRegistry.binUrl = normalizeBinUrl(binUrl, folder);
+        existingRegistry.animationFolder = folder;
       } else {
-        state.characters.push({
+        state.registryRows.push({
           value: folder,
           label: folder,
           voiceId,
@@ -1106,6 +1119,7 @@
           animationFolder: item.animationFolder || item.value || "",
           binUrl: item.binUrl || buildDeviceBinUrl(item.animationFolder || item.value || ""),
         })).filter(item => item.value);
+        state.registryRows = state.characters.map(item => ({ ...item }));
       }
       populateCharacterOptions();
       renderRegistryRows();

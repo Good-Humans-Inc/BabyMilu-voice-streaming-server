@@ -436,6 +436,24 @@ class SimpleHttpServer:
                 "bucket": bucket,
                 "prefix": prefix,
                 "characters": characters,
+                "registry": [
+                    {
+                        "value": folder,
+                        "label": folder,
+                        "voiceId": (mapping.get(folder) or {}).get("voiceId", ""),
+                        "binUrl": (mapping.get(folder) or {}).get("binUrl", "") or build_marketing_device_bin_url(
+                            {
+                                "bucket": bucket,
+                                "prefix": prefix,
+                                "characterFolder": folder,
+                                "filename": "test.bin",
+                            }
+                        ),
+                        "animationFolder": folder,
+                        "bucketFolder": folder,
+                    }
+                    for folder in sorted(mapping.keys())
+                ],
                 "mapping": mapping,
                 "sourceCount": len(characters),
                 "bucketSourceCount": len(folders),
