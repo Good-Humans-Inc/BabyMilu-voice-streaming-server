@@ -28,10 +28,10 @@ class JournalSupabaseClient:
         self.read_model_table = os.environ.get(
             "SUPABASE_MEMORY_READ_MODEL_TABLE", "memory_read_model"
         )
-        self.memory_event_table = os.environ.get(
-            "SUPABASE_CHARACTER_MEMORY_EVENT_TABLE",
-            os.environ.get("SUPABASE_MEMORY_EVENT_TABLE", "character_memory_events"),
-        )
+        explicit_memory_event_table = os.environ.get("SUPABASE_CHARACTER_MEMORY_EVENT_TABLE")
+        self.memory_event_table = explicit_memory_event_table or "character_memory_events"
+        self.legacy_memory_event_table = os.environ.get("SUPABASE_MEMORY_EVENT_TABLE")
+        self._memory_event_table_explicit = bool(explicit_memory_event_table)
         self.headers = {
             "apikey": self.service_role_key,
             "Authorization": f"Bearer {self.service_role_key}",
@@ -247,9 +247,16 @@ class JournalSupabaseClient:
         raise RuntimeError("Failed writing journal memory event")
 
     def _memory_event_table_candidates(self) -> List[tuple[str, str]]:
-        table = self.memory_event_table
-        candidates = [(table, _memory_event_style(table))]
-        for fallback in ("character_memory_events", "character_memory_event"):
+        candidates = []
+        if self._memory_event_table_explicit:
+            candidates.append((self.memory_event_table, _memory_event_style(self.memory_event_table)))
+        for fallback in (
+            "character_memory_events",
+            self.legacy_memory_event_table,
+            "character_memory_event",
+        ):
+            if not fallback:
+                continue
             item = (fallback, _memory_event_style(fallback))
             if item not in candidates:
                 candidates.append(item)
