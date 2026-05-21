@@ -18,6 +18,9 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+LEGACY_MEMORY_EVENT_TABLES = {"character_memory_event"}
+
+
 class JournalSupabaseClient:
     def __init__(self) -> None:
         self.base_url = (os.environ.get("SUPABASE_URL") or "").strip().rstrip("/")
@@ -31,7 +34,10 @@ class JournalSupabaseClient:
         explicit_memory_event_table = os.environ.get("SUPABASE_CHARACTER_MEMORY_EVENT_TABLE")
         self.memory_event_table = explicit_memory_event_table or "character_memory_events"
         self.legacy_memory_event_table = os.environ.get("SUPABASE_MEMORY_EVENT_TABLE")
-        self._memory_event_table_explicit = bool(explicit_memory_event_table)
+        self._memory_event_table_explicit = bool(
+            explicit_memory_event_table
+            and explicit_memory_event_table not in LEGACY_MEMORY_EVENT_TABLES
+        )
         self.headers = {
             "apikey": self.service_role_key,
             "Authorization": f"Bearer {self.service_role_key}",
