@@ -15,6 +15,7 @@ The harness currently ships with staged scenarios for:
 
 - `scheduled.reminder`
 - `scheduled.alarm`
+- `interaction.magic_camera_photo`
 
 Those scenarios already exercise the four core layers:
 
@@ -162,6 +163,17 @@ python3 tools/smoke/run.py run \
   --device-id 90:e5:b1:d6:f8:58 \
   --repeat weekly \
   --label "shared smoke alarm"
+```
+
+### Example: Magic Camera Smoke
+
+```bash
+python3 tools/smoke/run.py run \
+  --config /Users/yan/Desktop/BabyMilu/BabyMilu-voice-streaming-server/tools/smoke/environments/staging.local.json \
+  --scenario interaction.magic_camera_photo \
+  --uid +11551551551 \
+  --device-id 90:e5:b1:d6:fb:0c \
+  --label "shared smoke magic camera"
 ```
 
 ## Codex Workflow

@@ -113,6 +113,66 @@ class DeviceSimulator:
 
         return capture
 
+    async def capture_websocket_session(
+        self,
+        *,
+        device_id: str,
+        timeout_seconds: int,
+        outbound_messages: list[dict[str, Any]] | None = None,
+        wav_name: str | None = None,
+    ) -> DeviceCapture:
+        capture = DeviceCapture(device_id=device_id)
+        client_id = f"codex-smoke-device-{uuid.uuid4().hex[:8]}"
+        async with websockets.connect(
+            f"{self.ws_url}?device-id={device_id}&client-id={client_id}"
+        ) as websocket:
+            await websocket.send(
+                json.dumps(
+                    {
+                        "type": "hello",
+                        "device_id": device_id,
+                        "device_name": "Codex Shared Smoke Device",
+                        "device_mac": device_id,
+                        "token": "codex-smoke-token",
+                        "features": {"mcp": True},
+                    }
+                )
+            )
+            started = time.time()
+            outbound_sent = False
+            while time.time() - started < timeout_seconds:
+                try:
+                    raw = await asyncio.wait_for(websocket.recv(), timeout=5)
+                except asyncio.TimeoutError:
+                    break
+                if isinstance(raw, bytes):
+                    capture.audio_frames.append(raw)
+                    continue
+                try:
+                    message = json.loads(raw)
+                except Exception:
+                    continue
+                message_type = message.get("type")
+                if not outbound_sent and outbound_messages and message_type == "hello":
+                    for outbound in outbound_messages:
+                        await websocket.send(json.dumps(outbound))
+                    outbound_sent = True
+                if message_type == "tts":
+                    capture.tts_events.append(message)
+                elif message_type == "llm":
+                    capture.llm_events.append(message)
+                elif message_type == "goodbye":
+                    capture.goodbye_event = message
+                    break
+
+        wav_bytes = _maybe_decode_wav(capture.audio_frames)
+        if wav_bytes:
+            wav_path = self.artifact_dir / (wav_name or f"{device_id.replace(':', '-')}.wav")
+            wav_path.write_bytes(wav_bytes)
+            capture.wav_path = str(wav_path)
+
+        return capture
+
 
 def _maybe_decode_wav(audio_frames: list[bytes]) -> bytes | None:
     if not audio_frames:

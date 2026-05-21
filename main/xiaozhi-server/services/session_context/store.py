@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, Optional, Any
 
 from google.cloud import firestore
 
 from services.logging import setup_logging
-from core.utils.firestore_factory import build_firestore_client
+from config.settings import get_gcp_credentials_path
 from services.session_context import models
 
 _UNSET = object()
@@ -33,7 +34,10 @@ class SessionContextStore:
 
     def _client(self) -> firestore.Client:
         if self._firestore_client is None:
-            self._firestore_client = build_firestore_client()
+            creds_path = get_gcp_credentials_path()
+            if creds_path:
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
+            self._firestore_client = firestore.Client()
         return self._firestore_client
 
     def _collection(self):

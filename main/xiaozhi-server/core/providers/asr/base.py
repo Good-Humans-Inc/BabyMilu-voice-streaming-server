@@ -130,12 +130,18 @@ class ASRProviderBase(ABC):
         conn.asr_audio.append(audio)
         if not have_voice and not conn.client_have_voice:
             conn.asr_audio = conn.asr_audio[-10:]
+            release_inactive = getattr(conn, "release_inactive_vad_lease", None)
+            if callable(release_inactive):
+                release_inactive()
             return
 
         if conn.client_voice_stop:
             asr_audio_task = conn.asr_audio.copy()
             conn.asr_audio.clear()
             conn.reset_vad_states()
+            release_vad = getattr(conn, "release_vad_lease", None)
+            if callable(release_vad):
+                release_vad(reset_connection_state=False)
 
             # Opus packets are handled as ~60 ms frames here, so >3 packets
             # allows forwarding utterances of roughly 0.2 seconds or longer.
@@ -151,15 +157,37 @@ class ASRProviderBase(ABC):
             # 准备音频数据
             if conn.audio_format == "pcm":
                 pcm_data = asr_audio_task
+            elif hasattr(conn, "run_sync"):
+                pcm_data = await conn.run_sync(
+                    "audio",
+                    self.decode_opus,
+                    asr_audio_task,
+                    timeout=getattr(conn, "executor_timeout", lambda _name: 15.0)(
+                        "audio"
+                    ),
+                )
             else:
-                pcm_data = self.decode_opus(asr_audio_task)
+                pcm_data = await asyncio.to_thread(self.decode_opus, asr_audio_task)
 
             combined_pcm_data = b"".join(pcm_data)
 
             # 预先准备WAV数据
             wav_data = None
             if conn.voiceprint_provider and combined_pcm_data:
-                wav_data = self._pcm_to_wav(combined_pcm_data)
+                if hasattr(conn, "run_sync"):
+                    wav_data = await conn.run_sync(
+                        "audio",
+                        self._pcm_to_wav,
+                        combined_pcm_data,
+                        timeout=getattr(conn, "executor_timeout", lambda _name: 15.0)(
+                            "audio"
+                        ),
+                    )
+                else:
+                    wav_data = await asyncio.to_thread(
+                        self._pcm_to_wav,
+                        combined_pcm_data,
+                    )
 
             # 定义ASR任务
             def run_asr():
@@ -204,20 +232,42 @@ class ASRProviderBase(ABC):
                     return None
 
             # 使用线程池执行器并行运行
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as thread_executor:
+            thread_executor = getattr(getattr(conn, "executors", None), "audio", None)
+            owns_thread_executor = False
+            if thread_executor is None:
+                thread_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+                owns_thread_executor = True
+            asr_future = None
+            voiceprint_future = None
+            try:
                 asr_future = thread_executor.submit(run_asr)
 
                 if conn.voiceprint_provider and wav_data:
                     voiceprint_future = thread_executor.submit(run_voiceprint)
 
                     # 等待两个线程都完成
-                    asr_result = asr_future.result(timeout=15)
-                    voiceprint_result = voiceprint_future.result(timeout=15)
+                    asr_result, voiceprint_result = await asyncio.gather(
+                        asyncio.wait_for(asyncio.wrap_future(asr_future), timeout=15),
+                        asyncio.wait_for(asyncio.wrap_future(voiceprint_future), timeout=15),
+                    )
 
                     results = {"asr": asr_result, "voiceprint": voiceprint_result}
                 else:
-                    asr_result = asr_future.result(timeout=15)
+                    asr_result = await asyncio.wait_for(
+                        asyncio.wrap_future(asr_future),
+                        timeout=15,
+                    )
                     results = {"asr": asr_result, "voiceprint": None}
+            except asyncio.TimeoutError:
+                logger.bind(tag=TAG).error("ASR/voiceprint recognition timed out")
+                if asr_future:
+                    asr_future.cancel()
+                if voiceprint_future:
+                    voiceprint_future.cancel()
+                results = {"asr": ("", None), "voiceprint": None}
+            finally:
+                if owns_thread_executor:
+                    thread_executor.shutdown(wait=False, cancel_futures=True)
 
 
             # 处理结果

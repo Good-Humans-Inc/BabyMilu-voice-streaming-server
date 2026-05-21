@@ -56,6 +56,9 @@ def load_environment(name: str, explicit: str | None = None) -> EnvironmentConfi
             "compose_file": os.environ.get("BABYMILU_SMOKE_COMPOSE_FILE", ""),
             "compose_service": os.environ.get("BABYMILU_SMOKE_COMPOSE_SERVICE", "server"),
             "compose_workdir": os.environ.get("BABYMILU_SMOKE_COMPOSE_WORKDIR", "/opt/xiaozhi-esp32-server"),
+            "server_log_command_template": os.environ.get(
+                "BABYMILU_SMOKE_SERVER_LOG_COMMAND_TEMPLATE", ""
+            ),
             "notes": os.environ.get("BABYMILU_SMOKE_NOTES", ""),
         }
     else:
@@ -69,6 +72,7 @@ def load_environment(name: str, explicit: str | None = None) -> EnvironmentConfi
         payload.setdefault("compose_file", "")
         payload.setdefault("compose_service", "server")
         payload.setdefault("compose_workdir", "/opt/xiaozhi-esp32-server")
+        payload.setdefault("server_log_command_template", "")
         payload.setdefault("notes", "")
 
     artifact_root = payload["artifact_root"]
@@ -91,6 +95,7 @@ def load_environment(name: str, explicit: str | None = None) -> EnvironmentConfi
         compose_file=payload["compose_file"],
         compose_service=payload["compose_service"],
         compose_workdir=payload["compose_workdir"],
+        server_log_command_template=payload["server_log_command_template"],
         notes=payload["notes"],
     )
     setattr(env, "source_path", str(source_path) if source_path else "<env-vars>")

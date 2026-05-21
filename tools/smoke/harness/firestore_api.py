@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from google.cloud import firestore
@@ -49,6 +49,43 @@ class FirestoreDataAdapter:
             index += 2
         snapshot = doc_ref.get()
         return snapshot.to_dict() if snapshot.exists else None
+
+    def get_recent_magic_photo(
+        self,
+        *,
+        uid: str,
+        lookback_hours: int = 24,
+        limit: int = 5,
+    ) -> tuple[str, dict] | None:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, lookback_hours))
+        snaps = (
+            self.client.collection("users")
+            .document(uid)
+            .collection("magicPhotos")
+            .order_by("createdAt", direction=firestore.Query.DESCENDING)
+            .limit(max(1, limit))
+            .stream()
+        )
+        for snap in snaps:
+            if not getattr(snap, "exists", True):
+                continue
+            data = snap.to_dict() or {}
+            if data.get("deletedAt"):
+                continue
+            created_at = data.get("createdAt")
+            if not isinstance(created_at, datetime):
+                continue
+            created_utc = (
+                created_at.replace(tzinfo=timezone.utc)
+                if created_at.tzinfo is None
+                else created_at.astimezone(timezone.utc)
+            )
+            if created_utc < cutoff:
+                continue
+            if not any(str(data.get(key) or "").strip() for key in ("photoUrl", "processedPhotoUrl", "cardUrl")):
+                continue
+            return (f"users/{uid}/magicPhotos/{snap.id}", data)
+        return None
 
     def create_alarm(
         self,

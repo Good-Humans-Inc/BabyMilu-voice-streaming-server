@@ -17,6 +17,12 @@ from harness.preflight import render_preflight, run_preflight, has_failures  # n
 from harness.reporting import ArtifactWriter  # noqa: E402
 
 
+def configure_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run BabyMilu shared smoke scenarios")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -111,12 +117,13 @@ async def handle_run(args: argparse.Namespace) -> int:
         artifact_dir=artifact_dir,
     )
     result = await scenario.run(context)
-    writer.write_json("result.json", result.to_dict())
+    writer.write_json("result.json", result.to_dict(), artifact_dir)
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
     return 0 if result.success else 1
 
 
 def main() -> int:
+    configure_stdio()
     parser = build_parser()
     args = parser.parse_args()
 

@@ -10,6 +10,12 @@ from config.logger import setup_logging
 TAG = __name__
 logger = setup_logging()
 
+
+def _format_local_datetime(value: datetime) -> str:
+    time_text = value.strftime("%I:%M %p").lstrip("0")
+    return f"{value.strftime('%A, %B')} {value.day} at {time_text}"
+
+
 SET_ALARM_FUNCTION_DESC = {
     "type": "function",
     "function": {
@@ -101,6 +107,6 @@ def set_alarm(conn, time_expression: str, reason: str) -> ActionResponse:
 
     return ActionResponse(
         action=Action.REQLLM,
-        result=f"Alarm set: '{reason}' on {resolved.strftime('%A, %B %-d at %-I:%M %p')} ({tz_str}).",
+        result=f"Alarm set: '{reason}' on {_format_local_datetime(resolved)} ({tz_str}).",
         response=None,
     )

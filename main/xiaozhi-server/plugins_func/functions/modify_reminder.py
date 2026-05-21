@@ -14,6 +14,12 @@ logger = setup_logging()
 # Same bare-time regex as schedule_conversation
 _BARE_TIME_RE = re.compile(r'\b(\d{1,2}(?::\d{2})?\s*[ap]m)\b', re.IGNORECASE)
 
+
+def _format_local_datetime(value: datetime) -> str:
+    time_text = value.strftime("%I:%M %p").lstrip("0")
+    return f"{value.strftime('%A, %B')} {value.day} at {time_text}"
+
+
 MODIFY_REMINDER_FUNCTION_DESC = {
     "type": "function",
     "function": {
@@ -188,7 +194,7 @@ def modify_reminder(
 
     changes = []
     if resolved is not None:
-        changes.append(f"time → {resolved.strftime('%A, %B %-d at %-I:%M %p')} ({tz_str})")
+        changes.append(f"time → {_format_local_datetime(resolved)} ({tz_str})")
     if label is not None:
         changes.append(f"label → '{label}'")
     if content is not None:

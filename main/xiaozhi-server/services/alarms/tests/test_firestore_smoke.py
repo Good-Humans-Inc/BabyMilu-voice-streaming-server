@@ -21,7 +21,7 @@ def _ensure_firestore() -> firestore.Client:
 
 
 @pytest.mark.integration
-def test_firestore_prepare_wake_smoke():
+def test_firestore_prepare_wake_smoke(monkeypatch):
     if not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") and not os.environ.get(
         "FIRESTORE_EMULATOR_HOST"
     ):
@@ -33,12 +33,14 @@ def test_firestore_prepare_wake_smoke():
     alarm_id = f"alarm-{uuid.uuid4().hex[:6]}"
     device_id = uuid.uuid4().hex[:12]
     normalized_device_id = normalize_mac(device_id)
+    monkeypatch.setenv("ALARM_USER_ALLOWLIST", user_id)
 
     alarm_ref = (
-        client.collection("users").document(user_id).collection("alarms").document(alarm_id)
+        client.collection("users").document(user_id).collection("reminders").document(alarm_id)
     )
     alarm_payload = {
         "status": "on",
+        "typeHint": "alarm",
         "label": "Smoke Test Alarm",
         "nextOccurrenceUTC": datetime.now(timezone.utc)
         .isoformat(timespec="milliseconds")
@@ -55,8 +57,9 @@ def test_firestore_prepare_wake_smoke():
             }
         ],
     }
+    client.collection("sessionContexts").document(normalized_device_id).delete()
     alarm_ref.set(alarm_payload, merge=True)
-    print(f"[smoke] inserted alarm at users/{user_id}/alarms/{alarm_id} for device {device_id}")
+    print(f"[smoke] inserted alarm at users/{user_id}/reminders/{alarm_id} for device {device_id}")
 
     try:
         now = datetime.now(timezone.utc)
@@ -99,6 +102,7 @@ def test_firestore_prepare_reminder_push_smoke(monkeypatch):
     reminder_id = f"reminder-{uuid.uuid4().hex[:6]}"
     device_id = uuid.uuid4().hex[:12]
     normalized_device_id = normalize_mac(device_id)
+    monkeypatch.setenv("REMINDER_USER_ALLOWLIST", user_id)
 
     user_ref = client.collection("users").document(user_id)
     user_ref.set({"name": "Smoke", "timezone": "America/Los_Angeles"}, merge=True)

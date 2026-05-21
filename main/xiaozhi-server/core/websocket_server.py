@@ -1,7 +1,9 @@
 import asyncio
 import websockets
 from config.logger import setup_logging
+from core.concurrency import ServerExecutors
 from core.connection import ConnectionHandler
+from core.vad_pool import VadProviderPool
 from config.config_loader import get_config_from_api
 from core.utils.modules_initialize import initialize_modules
 from core.utils.util import check_vad_update, check_asr_update
@@ -18,10 +20,11 @@ class WebSocketServer:
         self.active_ws_by_device = {}
         self.ws_lock = asyncio.Lock()
         self.last_disconnect_ms = {}
+        self.executors = ServerExecutors.from_config(config)
         modules = initialize_modules(
             self.logger,
             self.config,
-            "VAD" in self.config["selected_module"],
+            False,
             "ASR" in self.config["selected_module"],
             "LLM" in self.config["selected_module"],
             False,
@@ -29,7 +32,8 @@ class WebSocketServer:
             "Intent" in self.config["selected_module"],
             "Task" in self.config["selected_module"],
         )
-        self._vad = modules["vad"] if "vad" in modules else None
+        self._vad_pool = VadProviderPool.from_config(self.config, self.logger)
+        self._vad = self._vad_pool
         self._asr = modules["asr"] if "asr" in modules else None
         self._llm = modules["llm"] if "llm" in modules else None
         self._intent = modules["intent"] if "intent" in modules else None
@@ -63,6 +67,7 @@ class WebSocketServer:
             self._task,
             self._intent,
             self,  # 传入server实例
+            self.executors,
         )
         self.active_connections.add(handler)
         try:
@@ -96,6 +101,9 @@ class WebSocketServer:
             # 如果是普通 HTTP 请求，返回 "server is running"
             return websocket.respond(200, "Server is running\n")
 
+    def shutdown(self):
+        self.executors.shutdown()
+
     async def update_config(self) -> bool:
         """更新服务器配置并重新初始化组件
 
@@ -105,7 +113,12 @@ class WebSocketServer:
         try:
             async with self.config_lock:
                 # 重新获取配置
-                new_config = get_config_from_api(self.config)
+                new_config = await self.executors.run_sync(
+                    "profile",
+                    get_config_from_api,
+                    self.config,
+                    timeout=self.executors.timeout_for("profile"),
+                )
                 if new_config is None:
                     self.logger.bind(tag=TAG).error("获取新配置失败")
                     return False
@@ -119,21 +132,31 @@ class WebSocketServer:
                 # 更新配置
                 self.config = new_config
                 # 重新初始化组件
-                modules = initialize_modules(
+                modules = await self.executors.run_sync(
+                    "provider",
+                    initialize_modules,
                     self.logger,
                     new_config,
-                    update_vad,
+                    False,
                     update_asr,
                     "LLM" in new_config["selected_module"],
                     False,
                     "Memory" in new_config["selected_module"],
                     "Intent" in new_config["selected_module"],
                     "Task" in new_config["selected_module"],
+                    timeout=self.executors.timeout_for("provider"),
                 )
 
                 # 更新组件实例
-                if "vad" in modules:
-                    self._vad = modules["vad"]
+                if update_vad:
+                    self._vad_pool = await self.executors.run_sync(
+                        "provider",
+                        VadProviderPool.from_config,
+                        new_config,
+                        self.logger,
+                        timeout=self.executors.timeout_for("provider"),
+                    )
+                    self._vad = self._vad_pool
                 if "asr" in modules:
                     self._asr = modules["asr"]
                 if "llm" in modules:

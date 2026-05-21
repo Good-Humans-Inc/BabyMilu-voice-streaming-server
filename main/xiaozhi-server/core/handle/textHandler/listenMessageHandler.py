@@ -16,12 +16,21 @@ from core.utils.util import audio_bytes_to_data, remove_punctuation_and_length
 TAG = __name__
 
 
+def _release_vad_after_listen(conn):
+    release_vad = getattr(conn, "release_vad_lease", None)
+    if callable(release_vad):
+        release_vad(reset_connection_state=False)
+    conn.client_have_voice = False
+
+
 async def _maybe_play_next_starter(conn) -> bool:
     payload = getattr(conn, "next_starter_payload", None) or {}
     character_id = getattr(conn, "active_character_id", None)
     audio_url = payload.get("audioUrl")
     starter_text = payload.get("text") or ""
     if not character_id or (not audio_url and not starter_text):
+        return False
+    if getattr(conn, "active_mode", None) in {"scheduled_conversation", "morning_alarm"}:
         return False
     if getattr(conn, "next_starter_scheduled", False):
         return False
@@ -101,8 +110,11 @@ class ListenTextMessageHandler(TextMessageHandler):
         elif msg_json["state"] == "stop":
             conn.client_have_voice = True
             conn.client_voice_stop = True
-            if len(conn.asr_audio) > 0:
-                await handleAudioMessage(conn, b"")
+            try:
+                if len(conn.asr_audio) > 0:
+                    await handleAudioMessage(conn, b"")
+            finally:
+                _release_vad_after_listen(conn)
         elif msg_json["state"] == "detect":
             conn.client_have_voice = False
             conn.asr_audio.clear()

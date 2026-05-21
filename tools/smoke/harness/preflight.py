@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -8,12 +9,55 @@ from pathlib import Path
 from .models import EnvironmentConfig, PreflightCheck
 
 
+def _command_candidates(name: str) -> list[str]:
+    candidates = []
+    found = shutil.which(name)
+    if found:
+        candidates.append(found)
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        cloud_sdk_bin = Path(local_app_data) / "Google" / "Cloud SDK" / "google-cloud-sdk" / "bin"
+        candidates.extend(
+            [
+                str(cloud_sdk_bin / f"{name}.cmd"),
+                str(cloud_sdk_bin / f"{name}.CMD"),
+                str(cloud_sdk_bin / name),
+            ]
+        )
+    return list(dict.fromkeys(candidates))
+
+
+def _is_usable_command(path: str) -> bool:
+    try:
+        return (
+            subprocess.run(
+                [path, "--version"],
+                text=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+            ).returncode
+            == 0
+        )
+    except Exception:
+        return False
+
+
+def _command(name: str) -> str:
+    candidates = _command_candidates(name)
+    for path in candidates:
+        if Path(path).exists() and _is_usable_command(path):
+            return path
+    return candidates[0] if candidates else name
+
+
 def _check_command(name: str) -> PreflightCheck:
-    path = shutil.which(name)
+    path = _command(name)
+    exists = bool(path) and path != name and Path(path).exists()
     return PreflightCheck(
         name=f"command:{name}",
-        ok=bool(path),
-        detail=path or "not found on PATH",
+        ok=exists,
+        detail=path if exists else "not found on PATH",
     )
 
 
@@ -38,7 +82,7 @@ def _check_import(name: str) -> PreflightCheck:
 def _check_gcloud_access_token() -> PreflightCheck:
     try:
         token = subprocess.check_output(
-            ["gcloud", "auth", "print-access-token"],
+            [_command("gcloud"), "auth", "print-access-token"],
             text=True,
             stderr=subprocess.STDOUT,
         ).strip()
@@ -80,7 +124,7 @@ def _check_firestore(project: str) -> PreflightCheck:
 def _check_adc_token_detail() -> tuple[bool, str, str]:
     try:
         token = subprocess.check_output(
-            ["gcloud", "auth", "application-default", "print-access-token"],
+            [_command("gcloud"), "auth", "application-default", "print-access-token"],
             text=True,
             stderr=subprocess.STDOUT,
         ).strip()

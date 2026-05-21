@@ -121,6 +121,17 @@ python3 tools/smoke/run.py run \
   --label "codex shared alarm smoke"
 ```
 
+Magic Camera example:
+
+```bash
+python3 tools/smoke/run.py run \
+  --config /Users/yan/Desktop/BabyMilu/BabyMilu-voice-streaming-server/tools/smoke/environments/staging.local.json \
+  --scenario interaction.magic_camera_photo \
+  --uid +11551551551 \
+  --device-id 90:e5:b1:d6:fb:0c \
+  --label "codex magic camera smoke"
+```
+
 ## Environment Config
 
 The committed staging config is:

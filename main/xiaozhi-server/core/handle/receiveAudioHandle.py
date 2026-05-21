@@ -12,7 +12,34 @@ TAG = __name__
 
 async def handleAudioMessage(conn, audio):
     # 当前片段是否有人说话
-    have_voice = conn.vad.is_vad(conn, audio)
+    try:
+        if hasattr(conn, "run_sync") and hasattr(conn, "run_vad"):
+            have_voice = await conn.run_sync(
+                "audio",
+                conn.run_vad,
+                audio,
+                timeout=getattr(conn, "executor_timeout", lambda _name: 15.0)(
+                    "audio"
+                ),
+            )
+        elif hasattr(conn, "run_sync"):
+            have_voice = await conn.run_sync(
+                "audio",
+                conn.vad.is_vad,
+                conn,
+                audio,
+                timeout=getattr(conn, "executor_timeout", lambda _name: 15.0)(
+                    "audio"
+                ),
+            )
+        else:
+            have_voice = await asyncio.to_thread(conn.vad.is_vad, conn, audio)
+    except asyncio.TimeoutError:
+        conn.logger.bind(tag=TAG).warning("VAD timed out; treating frame as silence")
+        have_voice = False
+    except Exception as e:
+        conn.logger.bind(tag=TAG).warning(f"VAD failed; treating frame as silence: {e}")
+        have_voice = False
     # 如果设备刚刚被唤醒，短暂忽略VAD检测
     if have_voice and hasattr(conn, "just_woken_up") and conn.just_woken_up:
         have_voice = False

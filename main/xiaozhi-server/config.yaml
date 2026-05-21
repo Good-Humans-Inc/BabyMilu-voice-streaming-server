@@ -41,6 +41,32 @@ server:
     # 可选:设备白名单，如果设置了白名单，那么白名单的机器无论是什么token都可以连接。
     #allowed_devices:
     #  - "24:0A:C4:1D:3B:F0"  # MAC地址列表
+
+# Runtime concurrency limits.
+# Effective concurrent Silero VAD lanes = min(concurrency.vad_pool.size,
+# concurrency.executors.audio.max_workers). Keep vad_pool.size at or below
+# audio.max_workers unless you intentionally want idle preloaded VAD models.
+concurrency:
+  vad_pool:
+    # Each leased VAD provider owns one mutable Silero model instance.
+    size: 20
+    lease_timeout: 20.0
+    active_acquire_timeout: 0.05
+    idle_release_ms: 1200
+  executors:
+    audio:
+      # Shared worker pool for audio-side blocking work, including VAD calls.
+      max_workers: 28
+      max_queue_size: 1000
+  timeouts:
+    profile: 30.0
+    db: 20.0
+    provider: 120.0
+    tool: 45.0
+    audio: 15.0
+    persistence: 20.0
+    bootstrap_text_wait: 30.0
+
 log:
   # 设置控制台输出的日志格式，时间、日志级别、标签、消息
   log_format: "<green>{time:YYMMDD HH:mm:ss}</green>[{version}_{selected_module}][<light-blue>{extra[tag]}</light-blue>]-<level>{level}</level>-<light-green>{extra[device_id]} | {message}</light-green>"
@@ -235,9 +261,16 @@ Intent:
     # 下面是加载查天气、角色切换、加载查新闻的插件示例
     functions:
       - change_role
+      - get_current_time
       - get_weather
       - play_music
       - set_alarm
+      - schedule_conversation
+      - list_reminders
+      - cancel_reminder
+      - modify_reminder
+      - complete_reminder
+      - inspect_recent_magic_camera_photo
       - get_capabilities
       - self_introduction
       - lookup_recipe
@@ -709,8 +742,8 @@ TTS:
     max_concurrent_requests: 3
     retry_429_attempts: 1
     retry_429_backoff_ms: 500
-    connect_timeout_seconds: 8
-    total_timeout_seconds: 60
+    connect_timeout_seconds: 15
+    total_timeout_seconds: 120
   GPT_SOVITS_V2:
     # 定义TTS API类型
     #启动tts方法：

@@ -1,5 +1,6 @@
 """统一工具管理器"""
 
+import asyncio
 from typing import Dict, List, Optional, Any
 from config.logger import setup_logging
 from plugins_func.register import Action, ActionResponse
@@ -101,7 +102,15 @@ class ToolManager:
 
             # 执行工具
             self.logger.info(f"执行工具: {tool_name}，参数: {arguments}")
-            result = await executor.execute(self.conn, tool_name, arguments)
+            timeout = (
+                self.conn.executor_timeout("tool")
+                if hasattr(self.conn, "executor_timeout")
+                else 20.0
+            )
+            result = await asyncio.wait_for(
+                executor.execute(self.conn, tool_name, arguments),
+                timeout=timeout,
+            )
             self.logger.debug(f"工具执行结果: {result}")
             return result
 

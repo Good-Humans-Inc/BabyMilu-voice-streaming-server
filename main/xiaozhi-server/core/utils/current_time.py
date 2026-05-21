@@ -67,7 +67,7 @@ def get_current_lunar_date() -> str:
         return "农历获取失败"
 
 
-def get_current_time_info() -> tuple:
+def get_current_time_info(timezone: Optional[str] = None) -> tuple:
     """
     获取当前时间信息
     返回: (当前时间字符串, 今天日期, 今天星期, 农历日期)

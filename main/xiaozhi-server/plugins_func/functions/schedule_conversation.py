@@ -14,6 +14,12 @@ logger = setup_logging()
 # Matches bare times like "8pm", "9:30am", "8 pm", "9:30 AM"
 _BARE_TIME_RE = re.compile(r'\b(\d{1,2}(?::\d{2})?\s*[ap]m)\b', re.IGNORECASE)
 
+
+def _format_local_datetime(value: datetime) -> str:
+    time_text = value.strftime("%I:%M %p").lstrip("0")
+    return f"{value.strftime('%A, %B')} {value.day} at {time_text}"
+
+
 SCHEDULE_CONVERSATION_FUNCTION_DESC = {
     "type": "function",
     "function": {
@@ -262,7 +268,7 @@ def schedule_conversation(
     return ActionResponse(
         action=Action.REQLLM,
         result=(
-            f"Scheduled: '{label}' on {resolved.strftime('%A, %B %-d at %-I:%M %p')} ({tz_str}). "
+            f"Scheduled: '{label}' on {_format_local_datetime(resolved)} ({tz_str}). "
             f"reminder_id={reminder_id if uid else 'unavailable'}"
         ),
         response=None,
