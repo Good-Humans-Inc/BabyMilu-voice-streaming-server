@@ -120,7 +120,12 @@ def test_daily_scheduled_conversation_hydrates_plushie_session(monkeypatch):
     monkeypatch.setenv("MQTT_URL", "mqtt://broker.test")
     monkeypatch.setattr(reminder_push_job.session_context_store, "get_session", lambda *a, **k: None)
     monkeypatch.setattr(reminder_push_job, "publish_ws_start", lambda broker, device, ws: True)
-    monkeypatch.setattr(reminder_push_job, "publish_rtc_alarm", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        reminder_push_job,
+        "publish_rtc_alarm",
+        lambda *args, **kwargs: True,
+        raising=False,
+    )
 
     created = {}
 

@@ -51,7 +51,13 @@ def test_scan_due_alarms_triggers_publish(monkeypatch):
         return True
 
     monkeypatch.setattr(cloud_functions, "publish_ws_start", fake_publish)
-    monkeypatch.setattr(cloud_functions, "publish_rtc_alarm", lambda *args, **kwargs: True)
+    rtc_calls = []
+    monkeypatch.setattr(
+        cloud_functions,
+        "publish_rtc_alarm",
+        lambda *args, **kwargs: rtc_calls.append((args, kwargs)) or True,
+        raising=False,
+    )
     finalized = []
     rolled_back = []
     monkeypatch.setattr(
@@ -76,6 +82,7 @@ def test_scan_due_alarms_triggers_publish(monkeypatch):
     assert len(published) == 2
     assert published[0][1] == "DEV1"
     assert published[1][1] == "DEV2"
+    assert rtc_calls == []
     assert finalized == ["DEV1", "DEV2"]
     assert rolled_back == []
 
@@ -90,7 +97,7 @@ def test_scan_due_alarms_rolls_back_on_publish_failure(monkeypatch):
     monkeypatch.setattr(
         cloud_functions, "publish_ws_start", lambda broker, device_id, ws_url, version=3: False
     )
-    monkeypatch.setattr(cloud_functions, "publish_rtc_alarm", lambda *args, **kwargs: True)
+    monkeypatch.setattr(cloud_functions, "publish_rtc_alarm", lambda *args, **kwargs: True, raising=False)
     finalized = []
     rolled_back = []
     monkeypatch.setattr(
@@ -132,7 +139,7 @@ def test_scan_due_alarms_filters_devices_by_allowlist(monkeypatch):
         "publish_ws_start",
         lambda broker, device_id, ws_url, version=3: published.append(device_id) or True,
     )
-    monkeypatch.setattr(cloud_functions, "publish_rtc_alarm", lambda *args, **kwargs: True)
+    monkeypatch.setattr(cloud_functions, "publish_rtc_alarm", lambda *args, **kwargs: True, raising=False)
     finalized = []
     rolled_back = []
     monkeypatch.setattr(
@@ -172,7 +179,7 @@ def test_scan_due_alarms_honors_denylist(monkeypatch):
         "publish_ws_start",
         lambda broker, device_id, ws_url, version=3: published.append(device_id) or True,
     )
-    monkeypatch.setattr(cloud_functions, "publish_rtc_alarm", lambda *args, **kwargs: True)
+    monkeypatch.setattr(cloud_functions, "publish_rtc_alarm", lambda *args, **kwargs: True, raising=False)
     finalized = []
     rolled_back = []
     monkeypatch.setattr(

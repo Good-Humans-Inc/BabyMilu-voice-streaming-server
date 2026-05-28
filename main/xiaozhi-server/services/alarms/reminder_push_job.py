@@ -26,7 +26,7 @@ from core.utils.mac import normalize_mac
 from services.alarms import reminder_advancement
 from services.alarms.config import ALARM_TIMING
 from services.logging import setup_logging
-from services.messaging.mqtt import publish_rtc_alarm, publish_ws_start
+from services.messaging.mqtt import publish_ws_start
 from services.session_context import store as session_context_store
 
 TAG = __name__
@@ -291,27 +291,6 @@ def _resolve_ws_url() -> str:
 
 def _resolve_broker_url() -> str:
     return os.environ.get("ALARM_MQTT_URL") or os.environ.get("MQTT_URL", "")
-
-
-def _resolve_offline_wav_url(reminder_data: Dict[str, Any]) -> str:
-    return str(
-        reminder_data.get("offlineWavUrl")
-        or reminder_data.get("offline_wav_url")
-        or reminder_data.get("audioUrl")
-        or os.environ.get("ALARM_OFFLINE_WAV_URL", "")
-        or ""
-    ).strip()
-
-
-def _resolve_custom_mode(reminder_data: Dict[str, Any], target: Dict[str, Any]) -> bool:
-    value = (
-        target.get("customMode")
-        if isinstance(target, dict) and "customMode" in target
-        else reminder_data.get("customMode", reminder_data.get("custom_mode", False))
-    )
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
 
 
 def _parse_device_set(raw: str) -> set[str]:
@@ -593,31 +572,6 @@ def _send_plushie_notification(
                 "firstMessage": first_message,
             },
         )
-        due_dt = _parse_occurrence(reminder_data.get("nextOccurrenceUTC")) or now
-        offline_wav_url = _resolve_offline_wav_url(reminder_data)
-        custom_mode = _resolve_custom_mode(reminder_data, target)
-        rtc_ok = publish_rtc_alarm(
-            broker_url,
-            device_id,
-            int(due_dt.timestamp()),
-            offline_wav_url=offline_wav_url,
-            custom_mode=custom_mode,
-            reminder_id=reminder_id,
-            priority=int(reminder_data.get("priority") or 0)
-            if str(reminder_data.get("priority") or "").isdigit()
-            else 0,
-            replay_if_no_mic=True,
-        )
-        if rtc_ok:
-            logger.bind(tag=TAG).info(
-                f"Published rtc_alarm for reminder {reminder_id} device {device_id} "
-                f"custom={custom_mode} offline_wav={bool(offline_wav_url)}"
-            )
-        else:
-            logger.bind(tag=TAG).warning(
-                f"Failed rtc_alarm publish for reminder {reminder_id} device {device_id}; continuing ws_start"
-            )
-
         if publish_ws_start(broker_url, device_id, ws_url):
             any_sent = True
             continue

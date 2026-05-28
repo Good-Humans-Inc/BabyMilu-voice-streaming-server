@@ -7,6 +7,7 @@ from services.messaging.mqtt import publish_ws_start, publish_auto_update, publi
 import os
 import json
 from core.utils.mac import normalize_mac
+from datetime import datetime, timezone
 
 TAG = __name__
 
@@ -27,6 +28,7 @@ class SimpleHttpServer:
         self.logger = setup_logging()
         self.ota_handler = OTAHandler(config)
         self.vision_handler = VisionHandler(config)
+        self._alarm_tasks = set()
 
     def _get_websocket_url(self, local_ip: str, port: int) -> str:
         """获取websocket地址
@@ -95,6 +97,42 @@ class SimpleHttpServer:
             while True:
                 await asyncio.sleep(3600)  # 每隔 1 小时检查一次
 
+    def _track_alarm_task(self, task: asyncio.Task) -> None:
+        self._alarm_tasks.add(task)
+
+        def _cleanup(done: asyncio.Task) -> None:
+            self._alarm_tasks.discard(done)
+            try:
+                done.result()
+            except Exception as exc:
+                self.logger.bind(tag=TAG).warning(
+                    f"Delayed ws_start task failed: {type(exc).__name__}: {exc}"
+                )
+
+        task.add_done_callback(_cleanup)
+
+    async def _publish_ws_start_after_delay(
+        self,
+        *,
+        delay_seconds: float,
+        broker: str,
+        device_id: str,
+        ws_url: str,
+        version: int,
+        reminder_id: str,
+    ) -> None:
+        await asyncio.sleep(max(0.0, delay_seconds))
+        ok = await asyncio.to_thread(
+            publish_ws_start,
+            broker,
+            device_id,
+            ws_url,
+            version=version,
+        )
+        self.logger.bind(tag=TAG).info(
+            f"Delayed ws_start fired ok={bool(ok)} device={device_id} reminder={reminder_id or '<none>'}"
+        )
+
     async def handle_alarm_ws_start(self, request: web.Request) -> web.Response:
         """HTTP endpoint to publish ws_start to a device via MQTT.
         Body JSON:
@@ -102,6 +140,8 @@ class SimpleHttpServer:
           "deviceId": "A4:CF:12:34:56:78",
           "wsUrl": "ws://<server>:8000/xiaozhi/v1/",
           "version": 3,
+          "epoch": 1770000000,          # optional: publish at this Unix second
+          "delaySeconds": 45,           # optional: publish after this delay
           "broker": "mqtt://localhost:1883"   # optional, fallback env MQTT_URL
         }
         """
@@ -119,12 +159,44 @@ class SimpleHttpServer:
         ws_url = (data.get("wsUrl") or data.get("wss") or "").strip()
         version = int(data.get("version") or 3)
         broker = (data.get("broker") or os.environ.get("MQTT_URL") or "").strip()
+        reminder_id = str(data.get("reminderId") or data.get("reminder_id") or "").strip()
 
         if not device_id or not ws_url:
             return web.json_response({"ok": False, "error": "deviceId and wsUrl are required"}, status=400)
 
+        delay_seconds = None
+        if data.get("delaySeconds") is not None:
+            delay_seconds = float(data.get("delaySeconds") or 0)
+        else:
+            trigger_at = data.get("epoch") or data.get("triggerAtEpoch")
+            if trigger_at is not None:
+                now_epoch = datetime.now(timezone.utc).timestamp()
+                delay_seconds = max(0.0, float(trigger_at) - now_epoch)
+
+        if delay_seconds is not None and delay_seconds > 0:
+            task = asyncio.create_task(
+                self._publish_ws_start_after_delay(
+                    delay_seconds=delay_seconds,
+                    broker=broker,
+                    device_id=device_id,
+                    ws_url=ws_url,
+                    version=version,
+                    reminder_id=reminder_id,
+                )
+            )
+            self._track_alarm_task(task)
+            return web.json_response(
+                {
+                    "ok": True,
+                    "scheduled": True,
+                    "delaySeconds": delay_seconds,
+                    "deviceId": device_id,
+                    "reminderId": reminder_id,
+                }
+            )
+
         ok = publish_ws_start(broker, device_id, ws_url, version=version)
-        return web.json_response({"ok": bool(ok)})
+        return web.json_response({"ok": bool(ok), "scheduled": False})
 
     async def handle_alarm_rtc(self, request: web.Request) -> web.Response:
         """HTTP endpoint to arm a device-side RTC alarm via MQTT.

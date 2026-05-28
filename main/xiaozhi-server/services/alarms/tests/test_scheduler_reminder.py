@@ -400,7 +400,13 @@ def test_plushie_session_hydration_includes_reminder_title(monkeypatch):
     monkeypatch.setenv("ALARM_MQTT_URL", "mqtt://example.com")
     monkeypatch.setattr(reminder_push_job, "session_context_store", _FakeStore())
     monkeypatch.setattr(reminder_push_job, "publish_ws_start", lambda *args, **kwargs: True)
-    monkeypatch.setattr(reminder_push_job, "publish_rtc_alarm", lambda *args, **kwargs: True)
+    rtc_calls = []
+    monkeypatch.setattr(
+        reminder_push_job,
+        "publish_rtc_alarm",
+        lambda *args, **kwargs: rtc_calls.append((args, kwargs)) or True,
+        raising=False,
+    )
 
     sent = reminder_push_job._send_plushie_notification(
         reminder_id="rem-123",
@@ -422,6 +428,7 @@ def test_plushie_session_hydration_includes_reminder_title(monkeypatch):
     assert created["session_config"]["title"] == "Drink water"
     assert created["session_config"]["context"] == "drink water"
     assert created["session_config"]["firstMessage"] == "Don't forget to drink water."
+    assert rtc_calls == []
 
 
 def test_android_expo_push_preserves_legacy_data_fields_with_rich_content(monkeypatch):

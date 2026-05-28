@@ -7,23 +7,13 @@ from google.cloud import firestore
 
 from services.logging import setup_logging
 from services.alarms import reminder_push_job, scheduler, tasks
-from services.messaging.mqtt import publish_rtc_alarm, publish_ws_start
+from services.messaging.mqtt import publish_ws_start
 from services.alarms.config import ALARM_TIMING
 from core.utils.mac import normalize_mac
 
 TAG = __name__
 logger = setup_logging()
 _db = firestore.Client()
-
-
-def _as_bool(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
 
 
 def scan_due_alarms(request) -> Dict[str, Any]:
@@ -99,32 +89,6 @@ def _wake_device(wake_request: tasks.WakeRequest) -> bool:
         return False
     broker = _resolve_broker_url()
     alarm = wake_request.alarm
-    trigger_at = alarm.next_occurrence_utc or datetime.now(timezone.utc)
-    offline_wav_url = (
-        (alarm.raw or {}).get("offlineWavUrl")
-        or (alarm.raw or {}).get("offline_wav_url")
-        or os.environ.get("ALARM_OFFLINE_WAV_URL", "")
-        or ""
-    )
-    custom_mode = _as_bool((alarm.raw or {}).get("customMode", (alarm.raw or {}).get("custom_mode", False)))
-    rtc_ok = publish_rtc_alarm(
-        broker,
-        wake_request.target.device_id,
-        int(trigger_at.timestamp()),
-        offline_wav_url=str(offline_wav_url).strip(),
-        custom_mode=custom_mode,
-        reminder_id=alarm.alarm_id,
-        priority=0,
-        replay_if_no_mic=True,
-    )
-    if rtc_ok:
-        logger.bind(tag=TAG).info(
-            f"Published rtc_alarm to {wake_request.target.device_id} for alarm {alarm.alarm_id}"
-        )
-    else:
-        logger.bind(tag=TAG).warning(
-            f"Failed to publish rtc_alarm to {wake_request.target.device_id}; continuing ws_start"
-        )
     ok = publish_ws_start(broker, wake_request.target.device_id, ws_url)
     if ok:
         logger.bind(tag=TAG).info(
