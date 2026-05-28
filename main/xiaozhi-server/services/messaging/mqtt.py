@@ -142,6 +142,65 @@ def _parse_broker(broker_url: Optional[str]) -> Tuple[str, int]:
         return "localhost", 1883
 
 
+def publish_rtc_alarm(
+    broker_url: Optional[str],
+    device_mac: str,
+    trigger_epoch: int,
+    *,
+    offline_wav_url: str = "",
+    custom_mode: bool = False,
+    reminder_id: str = "",
+    priority: int = 0,
+    replay_if_no_mic: bool = True,
+) -> bool:
+    """
+    Publish an rtc_alarm control message to the device downlink topic.
+
+    The firmware arms BM8563 from this payload, caches offline_wav_url when
+    present, and reboots on RTC fire when custom_mode is true.
+    """
+    host, port = _parse_broker(broker_url)
+    normalized_mac = normalize_mac(device_mac or "")
+    topic = f"xiaozhi/{normalized_mac}/down"
+    payload = {
+        "type": "rtc_alarm",
+        "epoch": int(trigger_epoch),
+        "custom_mode": bool(custom_mode),
+        "offline_wav_url": offline_wav_url or "",
+        "reminder_id": reminder_id or "",
+        "priority": int(priority or 0),
+        "replay_if_no_mic": bool(replay_if_no_mic),
+    }
+
+    cid = f"serverpub-rtc-{(device_mac or '').replace(':','')}-{int(time.time()*1000)}"
+    client = mqtt_client.Client(client_id=cid, clean_session=True)
+    try:
+        _log(
+            "info",
+            f"Publishing rtc_alarm to topic {topic} for device {device_mac}",
+            device_id=normalized_mac,
+        )
+        client.connect(host, port, keepalive=30)
+        client.loop_start()
+        result = client.publish(topic, json.dumps(payload), qos=0)
+        result.wait_for_publish(1.0)
+        client.loop_stop()
+        client.disconnect()
+        return True
+    except Exception as e:
+        _log(
+            "error",
+            f"MQTT rtc_alarm publish failed for device {device_mac}: {type(e).__name__}: {e}",
+            device_id=normalized_mac,
+        )
+        try:
+            client.loop_stop()
+            client.disconnect()
+        except Exception:
+            pass
+        return False
+
+
 def publish_auto_update(
     broker_url: Optional[str],
     device_mac: str,

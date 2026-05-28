@@ -51,6 +51,7 @@ def test_scan_due_alarms_triggers_publish(monkeypatch):
         return True
 
     monkeypatch.setattr(cloud_functions, "publish_ws_start", fake_publish)
+    monkeypatch.setattr(cloud_functions, "publish_rtc_alarm", lambda *args, **kwargs: True)
     finalized = []
     rolled_back = []
     monkeypatch.setattr(
@@ -89,6 +90,7 @@ def test_scan_due_alarms_rolls_back_on_publish_failure(monkeypatch):
     monkeypatch.setattr(
         cloud_functions, "publish_ws_start", lambda broker, device_id, ws_url, version=3: False
     )
+    monkeypatch.setattr(cloud_functions, "publish_rtc_alarm", lambda *args, **kwargs: True)
     finalized = []
     rolled_back = []
     monkeypatch.setattr(
@@ -130,6 +132,7 @@ def test_scan_due_alarms_filters_devices_by_allowlist(monkeypatch):
         "publish_ws_start",
         lambda broker, device_id, ws_url, version=3: published.append(device_id) or True,
     )
+    monkeypatch.setattr(cloud_functions, "publish_rtc_alarm", lambda *args, **kwargs: True)
     finalized = []
     rolled_back = []
     monkeypatch.setattr(
@@ -169,6 +172,7 @@ def test_scan_due_alarms_honors_denylist(monkeypatch):
         "publish_ws_start",
         lambda broker, device_id, ws_url, version=3: published.append(device_id) or True,
     )
+    monkeypatch.setattr(cloud_functions, "publish_rtc_alarm", lambda *args, **kwargs: True)
     finalized = []
     rolled_back = []
     monkeypatch.setattr(

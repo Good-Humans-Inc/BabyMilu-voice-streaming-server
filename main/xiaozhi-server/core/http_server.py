@@ -3,12 +3,22 @@ from aiohttp import web
 from config.logger import setup_logging
 from core.api.ota_handler import OTAHandler
 from core.api.vision_handler import VisionHandler
-from services.messaging.mqtt import publish_ws_start, publish_auto_update
+from services.messaging.mqtt import publish_ws_start, publish_auto_update, publish_rtc_alarm
 import os
 import json
 from core.utils.mac import normalize_mac
 
 TAG = __name__
+
+
+def _as_bool(value, default=False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 class SimpleHttpServer:
@@ -62,6 +72,8 @@ class SimpleHttpServer:
                     web.options("/mcp/vision/explain", self.vision_handler.handle_post),
                     # Minimal alarm trigger: publish ws_start to device via MQTT
                     web.post("/alarm/ws_start", self.handle_alarm_ws_start),
+                    # Arm a device-side BM8563 RTC alarm and optional offline WAV cache
+                    web.post("/alarm/rtc", self.handle_alarm_rtc),
                     # Publish animation auto_update to device via MQTT
                     web.post("/animation/auto_updates", self.handle_animation_auto_updates),
                 ]
@@ -112,6 +124,59 @@ class SimpleHttpServer:
             return web.json_response({"ok": False, "error": "deviceId and wsUrl are required"}, status=400)
 
         ok = publish_ws_start(broker, device_id, ws_url, version=version)
+        return web.json_response({"ok": bool(ok)})
+
+    async def handle_alarm_rtc(self, request: web.Request) -> web.Response:
+        """HTTP endpoint to arm a device-side RTC alarm via MQTT.
+        Body JSON:
+        {
+          "deviceId": "A4:CF:12:34:56:78",
+          "epoch": 1770000000,
+          "offlineWavUrl": "https://.../reminder.wav",
+          "customMode": true,
+          "reminderId": "abc",
+          "priority": 1,
+          "replayIfNoMic": true,
+          "broker": "mqtt://localhost:1883"
+        }
+        """
+        try:
+            data = await request.json()
+        except Exception:
+            text = await request.text()
+            try:
+                data = json.loads(text)
+            except Exception:
+                return web.json_response({"ok": False, "error": "invalid json"}, status=400)
+
+        device_id = (data.get("deviceId") or data.get("device_id") or "").strip()
+        device_id = normalize_mac(device_id) if device_id else device_id
+        broker = (data.get("broker") or os.environ.get("MQTT_URL") or "").strip()
+        epoch = data.get("epoch") or data.get("triggerAtEpoch")
+        if not device_id or not epoch:
+            return web.json_response({"ok": False, "error": "deviceId and epoch are required"}, status=400)
+
+        offline_wav_url = (
+            data.get("offlineWavUrl")
+            or data.get("offline_wav_url")
+            or data.get("wavUrl")
+            or data.get("audioUrl")
+            or data.get("url")
+            or ""
+        )
+        ok = publish_rtc_alarm(
+            broker,
+            device_id,
+            int(epoch),
+            offline_wav_url=str(offline_wav_url or "").strip(),
+            custom_mode=_as_bool(data.get("customMode", data.get("custom_mode", False))),
+            reminder_id=str(data.get("reminderId") or data.get("reminder_id") or "").strip(),
+            priority=int(data.get("priority") or 0),
+            replay_if_no_mic=_as_bool(
+                data.get("replayIfNoMic", data.get("replay_if_no_mic", True)),
+                default=True,
+            ),
+        )
         return web.json_response({"ok": bool(ok)})
 
     async def handle_animation_auto_updates(self, request: web.Request) -> web.Response:

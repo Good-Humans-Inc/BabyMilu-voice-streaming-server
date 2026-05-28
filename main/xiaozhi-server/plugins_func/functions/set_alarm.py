@@ -1,10 +1,12 @@
 import dateparser
+import os
 from zoneinfo import ZoneInfo
 from datetime import datetime
 
 from plugins_func.register import register_function, ToolType, ActionResponse, Action
 from core.utils.firestore_client import get_timezone_for_device, get_owner_phone_for_device
 from services.alarms.firestore_client import create_alarm
+from services.messaging.mqtt import publish_rtc_alarm
 from config.logger import setup_logging
 
 TAG = __name__
@@ -98,6 +100,25 @@ def set_alarm(conn, time_expression: str, reason: str) -> ActionResponse:
                 tz_str=tz_str,
             )
             logger.bind(tag=TAG).info(f"Alarm {alarm_id} written to Firestore for user {uid}")
+            if os.environ.get("ALARM_RTC_ON_SET", "1").strip().lower() in {"1", "true", "yes", "on"}:
+                broker = os.environ.get("ALARM_MQTT_URL") or os.environ.get("MQTT_URL", "")
+                offline_wav_url = os.environ.get("ALARM_OFFLINE_WAV_URL", "")
+                custom_mode = os.environ.get("ALARM_RTC_CUSTOM_MODE", "0").strip().lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
+                publish_rtc_alarm(
+                    broker,
+                    conn.device_id,
+                    int(resolved.astimezone(ZoneInfo("UTC")).timestamp()),
+                    offline_wav_url=offline_wav_url,
+                    custom_mode=custom_mode,
+                    reminder_id=alarm_id,
+                    priority=0,
+                    replay_if_no_mic=True,
+                )
         except Exception as e:
             logger.bind(tag=TAG).error(f"Failed to write alarm to Firestore: {e}")
     else:
