@@ -1,0 +1,44 @@
+name: current
+
+services:
+  mqtt:
+    image: eclipse-mosquitto:2.0
+    ports:
+      - "1883:1883"
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: /srv/dev/current/mosquitto.conf
+        target: /mosquitto/config/mosquitto.conf
+        read_only: true
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile-server
+    command: ["python", "app.py"]
+    working_dir: /opt/echoear-ground-server
+    environment:
+      ECHOEAR_CONFIG_DIR: /opt/echoear-ground-server
+      GOOGLE_APPLICATION_CREDENTIALS: /opt/secrets/gcp/sa.json
+      GOOGLE_CLOUD_PROJECT: composed-augury-469200-g6
+      PYTHONUNBUFFERED: "1"
+      TZ: America/Los_Angeles
+    ports:
+      - "8000:8000"
+      - "8003:8003"
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: /srv/dev/ground-up-server
+        target: /opt/echoear-ground-server
+      - type: bind
+        source: /srv/dev/current/data
+        target: /opt/echoear-ground-server/data
+      - type: bind
+        source: /srv/dev/current/data/.gcp/sa.json
+        target: /opt/secrets/gcp/sa.json
+        read_only: true
+    depends_on:
+      - mqtt
+
