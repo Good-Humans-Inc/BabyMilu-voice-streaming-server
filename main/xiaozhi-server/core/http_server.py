@@ -236,6 +236,20 @@ class SimpleHttpServer:
             or data.get("url")
             or ""
         )
+        websocket_url = (
+            data.get("wss")
+            or data.get("wsUrl")
+            or data.get("ws_url")
+            or data.get("websocketUrl")
+            or data.get("websocket_url")
+            or ""
+        )
+        websocket_version = data.get("version")
+        rtc_only = _as_bool(data.get("rtcOnly", data.get("rtc_only", False)))
+        software_fallback = _as_bool(
+            data.get("softwareFallback", data.get("software_fallback", not rtc_only)),
+            default=not rtc_only,
+        )
         ok = publish_rtc_alarm(
             broker,
             device_id,
@@ -248,6 +262,9 @@ class SimpleHttpServer:
                 data.get("replayIfNoMic", data.get("replay_if_no_mic", True)),
                 default=True,
             ),
+            websocket_url=str(websocket_url or "").strip(),
+            websocket_version=int(websocket_version) if websocket_version is not None else None,
+            software_fallback=software_fallback and not rtc_only,
         )
         return web.json_response({"ok": bool(ok)})
 

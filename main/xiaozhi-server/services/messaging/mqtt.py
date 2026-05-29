@@ -152,6 +152,9 @@ def publish_rtc_alarm(
     reminder_id: str = "",
     priority: int = 0,
     replay_if_no_mic: bool = True,
+    websocket_url: str = "",
+    websocket_version: Optional[int] = None,
+    software_fallback: bool = True,
 ) -> bool:
     """
     Publish an rtc_alarm control message to the device downlink topic.
@@ -171,6 +174,19 @@ def publish_rtc_alarm(
         "priority": int(priority or 0),
         "replay_if_no_mic": bool(replay_if_no_mic),
     }
+    if software_fallback:
+        now = time.time()
+        delay_seconds = max(1, int(round(int(trigger_epoch) - now)))
+        payload["delay_seconds"] = delay_seconds
+        payload["delay_ms"] = delay_seconds * 1000
+        payload["software_fallback"] = True
+    else:
+        payload["software_fallback"] = False
+        payload["rtc_only"] = True
+    if websocket_url:
+        payload["wss"] = websocket_url
+    if websocket_version is not None:
+        payload["version"] = int(websocket_version)
 
     cid = f"serverpub-rtc-{(device_mac or '').replace(':','')}-{int(time.time()*1000)}"
     client = mqtt_client.Client(client_id=cid, clean_session=True)

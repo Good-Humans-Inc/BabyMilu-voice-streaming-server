@@ -130,6 +130,70 @@ Alarm recurrence timezone resolution order:
 2. fresh `users/{uid}` lookup if cache is unavailable
 3. fail loudly if the user profile timezone is still missing
 
+### Device RTC / offline reminder workflow
+
+The staging server can also arm device-side RTC reminders through MQTT. This is
+used when the plushie should survive WiFi loss by caching a WAV locally and
+letting firmware trigger from BM8563.
+
+Relevant server files:
+
+- `main/xiaozhi-server/core/http_server.py`
+- `main/xiaozhi-server/services/messaging/mqtt.py`
+- `main/xiaozhi-server/services/messaging/tests/test_mqtt_rtc_alarm.py`
+
+HTTP endpoint:
+
+- `POST /alarm/rtc`
+
+Accepted fields:
+
+- `deviceId` / `device_id`
+- `epoch` / `triggerAtEpoch`
+- `offlineWavUrl` / `offline_wav_url` / `wavUrl` / `audioUrl` / `url`
+- `customMode` / `custom_mode`
+- `replayIfNoMic` / `replay_if_no_mic`
+- `rtcOnly` / `rtc_only`
+- `softwareFallback` / `software_fallback`
+- `wss` / `wsUrl` / `ws_url` / `websocketUrl` / `websocket_url`
+- `version`
+- optional `broker`
+
+MQTT payload shape:
+
+```json
+{
+  "type": "rtc_alarm",
+  "epoch": 1780017353,
+  "custom_mode": true,
+  "offline_wav_url": "http://34.30.157.45:8003/test/offline-reminder.wav",
+  "reminder_id": "reminder-id",
+  "priority": 1,
+  "replay_if_no_mic": true,
+  "software_fallback": false,
+  "rtc_only": true,
+  "wss": "ws://34.30.157.45:8000/xiaozhi/v1/",
+  "version": 3
+}
+```
+
+Fallback rules:
+
+- Default server behavior includes `delay_seconds`, `delay_ms`, and
+  `software_fallback=true`; this lets powered-on firmware fire with an ESP timer
+  if BM8563 interrupt detection is missed.
+- If `software_fallback=false` or `rtcOnly=true`, the server omits `delay_ms`
+  and emits `software_fallback=false`, `rtc_only=true`. This is the pure BM8563
+  validation path.
+
+Firmware behavior expected by this server contract:
+
+- Normal mode + offline: firmware plays the cached WAV locally without reboot.
+- Custom mode + offline: firmware marks the reminder fired, reboots, then plays
+  the cached WAV on boot.
+- Online: firmware can open/reuse a WebSocket alarm session using `wss` and
+  `version`.
+
 ### Reminder workflow
 
 1. Reminder is created from app or voice and stored in Firestore.
