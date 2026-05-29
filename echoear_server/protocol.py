@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass, field
+from typing import Any
 
 
 def dumps(message: dict) -> str:
@@ -54,6 +55,7 @@ class SessionState:
     listening: bool = False
     audio_frames: list[bytes] = field(default_factory=list)
     processing: bool = False
+    turn_task: Any | None = None
 
     def begin_listen(self, audio_format: str | None = None) -> None:
         if audio_format:
@@ -70,4 +72,3 @@ class SessionState:
         frames = self.audio_frames
         self.audio_frames = []
         return frames
-

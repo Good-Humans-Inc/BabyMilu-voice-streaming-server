@@ -112,6 +112,8 @@ class EchoEarServer:
                 await websocket.send(dumps(error(session.session_id, "websocket", "internal server error")))
             except Exception:
                 pass
+        finally:
+            await self._cancel_turn(session)
 
     @staticmethod
     def _path_for(websocket) -> str:
@@ -138,8 +140,8 @@ class EchoEarServer:
             return
 
         if msg_type == "abort":
-            session.audio_frames.clear()
-            session.listening = False
+            await self._cancel_turn(session)
+            session.stop_listen()
             await websocket.send(dumps(tts(session.session_id, "stop")))
             return
 
@@ -157,22 +159,43 @@ class EchoEarServer:
             frames = session.stop_listen()
             LOGGER.info("listen stop session=%s frames=%s", session.session_id, len(frames))
             if frames:
-                await self._process_audio_turn(websocket, session, frames)
+                await self._start_turn(websocket, session, self._process_audio_turn(websocket, session, frames))
             return
 
         if state == "detect":
             text = str(message.get("text") or "").strip()
             if text:
-                await self._process_text_turn(websocket, session, text)
+                await self._start_turn(websocket, session, self._process_text_turn(websocket, session, text))
             return
 
         await websocket.send(dumps(error(session.session_id, "protocol", f"unsupported listen state: {state}")))
 
-    async def _process_audio_turn(self, websocket, session: SessionState, frames: list[bytes]) -> None:
-        if session.processing:
+    async def _start_turn(self, websocket, session: SessionState, turn) -> None:
+        if session.turn_task is not None and not session.turn_task.done():
+            turn.close()
             await websocket.send(dumps(error(session.session_id, "turn", "turn already in progress")))
             return
-        session.processing = True
+
+        async def run_turn() -> None:
+            session.processing = True
+            try:
+                await turn
+            except asyncio.CancelledError:
+                LOGGER.info("turn cancelled session=%s", session.session_id)
+                raise
+            finally:
+                session.processing = False
+
+        session.turn_task = asyncio.create_task(run_turn())
+
+    async def _cancel_turn(self, session: SessionState) -> None:
+        task = session.turn_task
+        if task is None or task.done():
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def _process_audio_turn(self, websocket, session: SessionState, frames: list[bytes]) -> None:
         try:
             transcript = await self.asr.transcribe(frames, session.audio_format, session.session_id)
             if not transcript:
@@ -183,22 +206,14 @@ class EchoEarServer:
             LOGGER.exception("audio turn failed session=%s", session.session_id)
             await websocket.send(dumps(error(session.session_id, "turn", str(exc))))
             await websocket.send(dumps(tts(session.session_id, "stop")))
-        finally:
-            session.processing = False
 
     async def _process_text_turn(self, websocket, session: SessionState, transcript: str) -> None:
-        if session.processing:
-            await websocket.send(dumps(error(session.session_id, "turn", "turn already in progress")))
-            return
-        session.processing = True
         try:
             await self._respond_to_transcript(websocket, session, transcript)
         except Exception as exc:
             LOGGER.exception("text turn failed session=%s", session.session_id)
             await websocket.send(dumps(error(session.session_id, "turn", str(exc))))
             await websocket.send(dumps(tts(session.session_id, "stop")))
-        finally:
-            session.processing = False
 
     async def _respond_to_transcript(self, websocket, session: SessionState, transcript: str) -> None:
         await websocket.send(dumps(stt(session.session_id, transcript)))
@@ -211,4 +226,3 @@ class EchoEarServer:
             await websocket.send(packet)
             await asyncio.sleep(0)
         await websocket.send(dumps(tts(session.session_id, "stop")))
-
