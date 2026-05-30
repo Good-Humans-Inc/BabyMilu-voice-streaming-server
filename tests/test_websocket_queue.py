@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import time
 
 import pytest
@@ -143,3 +144,21 @@ async def test_tts_binary_frames_are_paced(tmp_path, monkeypatch):
     binary_times = [sent_at for sent_at, message in websocket.messages if isinstance(message, bytes)]
     assert len(binary_times) == 4
     assert binary_times[-1] - binary_times[0] >= 0.012
+
+
+@pytest.mark.asyncio
+async def test_audio_turn_logs_timing_from_listen_stop(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("ECHOEAR_MOCK_PROVIDERS", "1")
+    cfg = load_config(tmp_path)
+    cfg["server"]["tts_frame_interval_ms"] = 0
+    server = EchoEarServer(cfg, providers=(FixedAsr(), FixedLlm(), MultiFrameTts()))
+    websocket = RecordingWebSocket()
+    session = SessionState()
+
+    caplog.set_level(logging.INFO, logger="echoear_server")
+    await server._process_audio_turn(websocket, session, [b"frame-1", b"frame-2"], time.perf_counter())
+
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "listen_stop_to_tts_start_ms=" in logs
+    assert "listen_stop_to_first_opus_ms=" in logs
+    assert "tts_start_to_first_opus_ms=" in logs

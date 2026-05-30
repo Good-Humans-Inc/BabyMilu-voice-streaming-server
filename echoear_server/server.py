@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 from aiohttp import web
@@ -160,10 +161,15 @@ class EchoEarServer:
             return
 
         if state == "stop":
+            listen_stop_at = time.perf_counter()
             frames = session.stop_listen()
             LOGGER.info("listen stop session=%s frames=%s", session.session_id, len(frames))
             if frames:
-                await self._start_turn(websocket, session, self._process_audio_turn(websocket, session, frames))
+                await self._start_turn(
+                    websocket,
+                    session,
+                    self._process_audio_turn(websocket, session, frames, listen_stop_at),
+                )
             return
 
         if state == "detect":
@@ -199,13 +205,25 @@ class EchoEarServer:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
-    async def _process_audio_turn(self, websocket, session: SessionState, frames: list[bytes]) -> None:
+    async def _process_audio_turn(
+        self,
+        websocket,
+        session: SessionState,
+        frames: list[bytes],
+        listen_stop_at: float | None = None,
+    ) -> None:
         try:
             transcript = await self.asr.transcribe(frames, session.audio_format, session.session_id)
             if not transcript:
                 await websocket.send(dumps(error(session.session_id, "asr", "empty transcript")))
                 return
-            await self._respond_to_transcript(websocket, session, transcript)
+            await self._respond_to_transcript(
+                websocket,
+                session,
+                transcript,
+                turn_started_at=listen_stop_at,
+                input_audio_frames=len(frames),
+            )
         except Exception as exc:
             LOGGER.exception("audio turn failed session=%s", session.session_id)
             await websocket.send(dumps(error(session.session_id, "turn", str(exc))))
@@ -219,9 +237,24 @@ class EchoEarServer:
             await websocket.send(dumps(error(session.session_id, "turn", str(exc))))
             await websocket.send(dumps(tts(session.session_id, "stop")))
 
-    async def _respond_to_transcript(self, websocket, session: SessionState, transcript: str) -> None:
+    async def _respond_to_transcript(
+        self,
+        websocket,
+        session: SessionState,
+        transcript: str,
+        turn_started_at: float | None = None,
+        input_audio_frames: int | None = None,
+    ) -> None:
         await websocket.send(dumps(stt(session.session_id, transcript)))
         await websocket.send(dumps(tts(session.session_id, "start")))
+        tts_start_at = time.perf_counter()
+        if turn_started_at is not None:
+            LOGGER.info(
+                "turn timing session=%s input_frames=%s listen_stop_to_tts_start_ms=%.1f",
+                session.session_id,
+                input_audio_frames,
+                (tts_start_at - turn_started_at) * 1000.0,
+            )
         response_text = await self.llm.complete(transcript)
         await websocket.send(dumps(llm(session.session_id, response_text)))
         await websocket.send(dumps(tts(session.session_id, "sentence_start", response_text)))
@@ -230,6 +263,18 @@ class EchoEarServer:
         for index, packet in enumerate(frames):
             await websocket.send(packet)
             bytes_sent += len(packet)
+            if index == 0 and turn_started_at is not None:
+                first_opus_at = time.perf_counter()
+                LOGGER.info(
+                    "turn timing session=%s input_frames=%s listen_stop_to_first_opus_ms=%.1f "
+                    "tts_start_to_first_opus_ms=%.1f output_frames=%s first_opus_bytes=%s",
+                    session.session_id,
+                    input_audio_frames,
+                    (first_opus_at - turn_started_at) * 1000.0,
+                    (first_opus_at - tts_start_at) * 1000.0,
+                    len(frames),
+                    len(packet),
+                )
             if self._tts_frame_interval_seconds > 0 and index + 1 < len(frames):
                 await asyncio.sleep(self._tts_frame_interval_seconds)
         LOGGER.info(
