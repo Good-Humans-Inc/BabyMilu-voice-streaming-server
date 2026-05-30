@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import uuid
 from dataclasses import dataclass
@@ -19,6 +20,8 @@ from .audio import (
     pcm16_to_wav_bytes,
 )
 from .config import provider_config
+
+LOGGER = logging.getLogger("echoear_server")
 
 
 class ProviderError(RuntimeError):
@@ -183,10 +186,12 @@ class FishAudioTts(TtsProvider):
         if not reference_id:
             raise ProviderError("Fish Audio reference_id is not configured")
 
+        fish_sample_rate = int(self.config.get("sample_rate", 44100))
         request_data = {
             "text": text,
             "reference_id": reference_id,
             "format": "pcm",
+            "sample_rate": fish_sample_rate,
             "normalize": bool(self.config.get("normalize", True)),
             "chunk_length": int(self.config.get("chunk_length", 100)),
             "top_p": float(self.config.get("top_p", 0.7)),
@@ -195,9 +200,10 @@ class FishAudioTts(TtsProvider):
             "streaming": True,
         }
         timeout = aiohttp.ClientTimeout(total=float(self.config.get("total_timeout_seconds", 120)))
-        resampler = StreamingPcmResampler(input_rate=44100, output_rate=OPUS_SAMPLE_RATE)
+        resampler = StreamingPcmResampler(input_rate=fish_sample_rate, output_rate=OPUS_SAMPLE_RATE)
         encoder = OpusStreamEncoder()
         frames: list[bytes] = []
+        fish_pcm_chunks: list[bytes] = []
         pcm_carry = b""
 
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -222,12 +228,51 @@ class FishAudioTts(TtsProvider):
                         chunk = chunk[:-1]
                     else:
                         pcm_carry = b""
+                    if chunk:
+                        fish_pcm_chunks.append(chunk)
                     pcm16_16k = resampler.process(chunk)
                     if pcm16_16k:
                         frames.extend(encoder.feed(pcm16_16k))
 
         frames.extend(encoder.finish())
+        self._write_debug_audio(text, fish_sample_rate, fish_pcm_chunks, frames)
         return frames
+
+    def _write_debug_audio(
+        self,
+        text: str,
+        fish_sample_rate: int,
+        fish_pcm_chunks: list[bytes],
+        frames: list[bytes],
+    ) -> None:
+        debug_dir_value = self.config.get("debug_audio_dir", "generated_audio")
+        if not debug_dir_value:
+            return
+
+        try:
+            debug_dir = Path(debug_dir_value)
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            safe_prefix = "".join(ch.lower() if ch.isalnum() else "_" for ch in text[:36]).strip("_")
+            if not safe_prefix:
+                safe_prefix = "tts"
+            stem = f"tts_{uuid.uuid4().hex[:12]}_{safe_prefix}"
+
+            fish_pcm = b"".join(fish_pcm_chunks)
+            fish_wav = debug_dir / f"{stem}_fish_{fish_sample_rate}.wav"
+            fish_wav.write_bytes(pcm16_to_wav_bytes(fish_pcm, fish_sample_rate))
+
+            sent_pcm = decode_opus_frames(frames) if frames else b""
+            sent_wav = debug_dir / f"{stem}_sent_{OPUS_SAMPLE_RATE}.wav"
+            sent_wav.write_bytes(pcm16_to_wav_bytes(sent_pcm, OPUS_SAMPLE_RATE))
+
+            LOGGER.info(
+                "tts debug audio saved fish=%s sent=%s frames=%s",
+                fish_wav,
+                sent_wav,
+                len(frames),
+            )
+        except Exception:
+            LOGGER.exception("failed to save tts debug audio")
 
 
 def _sine_pcm(seconds: float = 0.3, rate: int = OPUS_SAMPLE_RATE) -> bytes:
@@ -249,4 +294,3 @@ def build_providers(config: dict[str, Any]) -> tuple[AsrProvider, LlmProvider, T
     llm = OpenAiChatLlm(llm_cfg)
     tts = FishAudioTts(tts_cfg)
     return asr, llm, tts
-

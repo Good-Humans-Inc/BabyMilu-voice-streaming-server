@@ -33,10 +33,11 @@ TTS:
     api_url: https://api.fish.audio/v1/tts
     api_key: ""
     reference_id: ""
+    sample_rate: 44100
+    debug_audio_dir: generated_audio
     latency: normal
     normalize: true
     chunk_length: 100
     top_p: 0.7
     temperature: 0.7
     repetition_penalty: 1.2
-

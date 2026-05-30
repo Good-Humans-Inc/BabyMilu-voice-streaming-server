@@ -5,5 +5,6 @@ __pycache__/
 data/*
 !data/.gitkeep
 tmp/
+generated_audio/
 *.log
 local-smoke.*

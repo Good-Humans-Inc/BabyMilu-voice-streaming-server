@@ -36,6 +36,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "api_url": "https://api.fish.audio/v1/tts",
             "api_key": "",
             "reference_id": "",
+            "sample_rate": 44100,
+            "debug_audio_dir": "generated_audio",
             "latency": "normal",
             "normalize": True,
             "chunk_length": 100,
@@ -100,6 +102,12 @@ def _apply_env_overrides(config: dict[str, Any]) -> None:
     fish_reference = os.getenv("FISH_AUDIO_REFERENCE_ID")
     if fish_reference:
         config.setdefault("TTS", {}).setdefault("FishAudio", {})["reference_id"] = fish_reference
+    fish_sample_rate = os.getenv("FISH_AUDIO_SAMPLE_RATE")
+    if fish_sample_rate:
+        config.setdefault("TTS", {}).setdefault("FishAudio", {})["sample_rate"] = int(fish_sample_rate)
+    tts_debug_audio_dir = os.getenv("ECHOEAR_TTS_DEBUG_AUDIO_DIR")
+    if tts_debug_audio_dir:
+        config.setdefault("TTS", {}).setdefault("FishAudio", {})["debug_audio_dir"] = tts_debug_audio_dir
 
     llm_model = os.getenv("LLM_MODEL")
     if llm_model:

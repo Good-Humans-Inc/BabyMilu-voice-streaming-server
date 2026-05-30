@@ -23,6 +23,8 @@ The service reads `data/.config.yaml` first, then `config.yaml`, and supports en
 - `ECHOEAR_WS_PORT`
 - `ECHOEAR_HTTP_PORT`
 - `ECHOEAR_TTS_FRAME_INTERVAL_MS` defaults to `60`, matching the Opus frame duration so small device playback queues are not flooded.
+- `ECHOEAR_TTS_DEBUG_AUDIO_DIR` defaults to `generated_audio`; each Fish TTS turn saves the raw Fish PCM WAV and the final 16 kHz Opus-decoded WAV sent to the device.
+- `FISH_AUDIO_SAMPLE_RATE` defaults to `44100`.
 
 The staging VM already keeps real API config in `/srv/dev/current/data/.config.yaml`; do not commit secrets.
 
