@@ -5,12 +5,20 @@ import json
 import logging
 import time
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from aiohttp import web
 import websockets
 
 from .audio import OPUS_FRAME_MS
 from .config import public_summary
+from .profile_context import (
+    DEFAULT_SYSTEM_PROMPT,
+    SupabaseProfileStore,
+    build_llm_messages,
+    build_profile_system_prompt,
+    normalize_device_id,
+)
 from .protocol import SessionState, dumps, error, hello, llm, stt, tts
 from .providers import AsrProvider, LlmProvider, TtsProvider, build_providers
 
@@ -25,6 +33,7 @@ class EchoEarServer:
     ) -> None:
         self.config = config
         self.asr, self.llm, self.tts = providers or build_providers(config)
+        self.profile_store = SupabaseProfileStore(config)
         self._ws_server = None
         self._http_runner: web.AppRunner | None = None
         server_cfg = self.config.get("server") or {}
@@ -82,11 +91,15 @@ class EchoEarServer:
         except Exception:
             payload = {}
         text = str(payload.get("text") or "").strip()
+        device_id = normalize_device_id(payload.get("device_id") or payload.get("device-id"))
         include_tts = bool(payload.get("tts", True))
         if not text:
             return web.json_response({"ok": False, "error": "text is required"}, status=400)
         try:
-            response_text = await self.llm.complete(text)
+            context = await self.profile_store.load_for_device(device_id)
+            system_prompt = build_profile_system_prompt(context)
+            messages = build_llm_messages(system_prompt, [], text)
+            response_text = await self.llm.complete(text, messages=messages)
             audio_frames = await self.tts.synthesize_opus(response_text) if include_tts else []
         except Exception as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=500)
@@ -97,11 +110,16 @@ class EchoEarServer:
                 "reply": response_text,
                 "audio_frames": len(audio_frames),
                 "audio_bytes": sum(len(frame) for frame in audio_frames),
+                "device_id": context.device_id,
+                "profile_loaded": context.loaded,
+                "user_name": context.user_name,
             }
         )
 
     async def _handle_ws(self, websocket) -> None:
         session = SessionState()
+        session.device_id = self._device_id_for(websocket)
+        await self._load_profile(session)
         LOGGER.info("ws connected session=%s path=%s", session.session_id, self._path_for(websocket))
         try:
             async for message in websocket:
@@ -136,6 +154,13 @@ class EchoEarServer:
         if msg_type == "hello":
             audio_params = message.get("audio_params") or {}
             session.audio_format = audio_params.get("format") or session.audio_format
+            supplied_device_id = normalize_device_id(
+                message.get("device_id") or message.get("device-id") or message.get("device_mac")
+            )
+            if supplied_device_id and supplied_device_id != session.device_id:
+                session.device_id = supplied_device_id
+                session.profile_loaded = False
+            await self._load_profile(session)
             version = int(message.get("version") or 3)
             await websocket.send(dumps(hello(session.session_id, version=version)))
             return
@@ -156,8 +181,9 @@ class EchoEarServer:
         state = message.get("state")
         if state == "start":
             mode = message.get("format")
+            await self._load_profile(session)
             session.begin_listen(audio_format=mode)
-            LOGGER.info("listen start session=%s", session.session_id)
+            LOGGER.info("listen start session=%s device_id=%s", session.session_id, session.device_id or "-")
             return
 
         if state == "stop":
@@ -173,6 +199,11 @@ class EchoEarServer:
             return
 
         if state == "detect":
+            supplied_device_id = normalize_device_id(message.get("device_id") or message.get("device-id"))
+            if supplied_device_id and supplied_device_id != session.device_id:
+                session.device_id = supplied_device_id
+                session.profile_loaded = False
+            await self._load_profile(session)
             text = str(message.get("text") or "").strip()
             if text:
                 await self._start_turn(websocket, session, self._process_text_turn(websocket, session, text))
@@ -255,7 +286,10 @@ class EchoEarServer:
                 input_audio_frames,
                 (tts_start_at - turn_started_at) * 1000.0,
             )
-        response_text = await self.llm.complete(transcript)
+        messages = build_llm_messages(session.system_prompt or DEFAULT_SYSTEM_PROMPT, session.history, transcript)
+        response_text = await self.llm.complete(transcript, messages=messages)
+        session.append_history("user", transcript)
+        session.append_history("assistant", response_text)
         await websocket.send(dumps(llm(session.session_id, response_text)))
         await websocket.send(dumps(tts(session.session_id, "sentence_start", response_text)))
         frames = await self.tts.synthesize_opus(response_text)
@@ -285,3 +319,39 @@ class EchoEarServer:
             self._tts_frame_interval_seconds * 1000.0,
         )
         await websocket.send(dumps(tts(session.session_id, "stop")))
+
+    def _device_id_for(self, websocket) -> str:
+        request = getattr(websocket, "request", None)
+        headers = getattr(request, "headers", {}) or {}
+        header_device_id = headers.get("device-id") or headers.get("Device-Id") or headers.get("device_id")
+        if header_device_id:
+            return normalize_device_id(header_device_id)
+
+        path = self._path_for(websocket)
+        query = parse_qs(urlparse(path).query)
+        for key in ("device-id", "device_id", "deviceId"):
+            if query.get(key):
+                return normalize_device_id(query[key][0])
+
+        return normalize_device_id((self.config.get("profile") or {}).get("default_device_id"))
+
+    async def _load_profile(self, session: SessionState) -> None:
+        if session.profile_loaded:
+            return
+        if not session.device_id:
+            session.device_id = normalize_device_id((self.config.get("profile") or {}).get("default_device_id"))
+
+        context = await self.profile_store.load_for_device(session.device_id)
+        session.device_id = context.device_id or session.device_id
+        session.user_id = context.user_id
+        session.user_name = context.user_name
+        session.system_prompt = build_profile_system_prompt(context)
+        session.profile_loaded = True
+        LOGGER.info(
+            "profile loaded session=%s device_id=%s user_id=%s user_name=%s loaded=%s",
+            session.session_id,
+            session.device_id or "-",
+            session.user_id or "-",
+            session.user_name or "-",
+            context.loaded,
+        )

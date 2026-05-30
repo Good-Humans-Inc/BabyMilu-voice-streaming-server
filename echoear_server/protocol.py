@@ -51,6 +51,12 @@ def error(session_id: str, stage: str, message: str) -> dict:
 @dataclass
 class SessionState:
     session_id: str = field(default_factory=new_session_id)
+    device_id: str = ""
+    user_id: str = ""
+    user_name: str = ""
+    system_prompt: str = ""
+    profile_loaded: bool = False
+    history: list[dict[str, str]] = field(default_factory=list)
     audio_format: str = "opus"
     listening: bool = False
     audio_frames: list[bytes] = field(default_factory=list)
@@ -72,3 +78,10 @@ class SessionState:
         frames = self.audio_frames
         self.audio_frames = []
         return frames
+
+    def append_history(self, role: str, content: str, max_messages: int = 8) -> None:
+        if role not in {"user", "assistant"} or not content:
+            return
+        self.history.append({"role": role, "content": content})
+        if len(self.history) > max_messages:
+            self.history = self.history[-max_messages:]

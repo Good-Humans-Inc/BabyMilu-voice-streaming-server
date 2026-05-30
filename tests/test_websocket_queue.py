@@ -61,8 +61,17 @@ class FixedAsr(AsrProvider):
 
 
 class FixedLlm(LlmProvider):
-    async def complete(self, transcript):
+    async def complete(self, transcript, messages=None):
         return "This response should be interrupted before audio plays."
+
+
+class CapturingLlm(LlmProvider):
+    def __init__(self):
+        self.calls = []
+
+    async def complete(self, transcript, messages=None):
+        self.calls.append(messages or [])
+        return "I remember Jackson's profile."
 
 
 class SlowTts(TtsProvider):
@@ -162,3 +171,25 @@ async def test_audio_turn_logs_timing_from_listen_stop(tmp_path, monkeypatch, ca
     assert "listen_stop_to_tts_start_ms=" in logs
     assert "listen_stop_to_first_opus_ms=" in logs
     assert "tts_start_to_first_opus_ms=" in logs
+
+
+@pytest.mark.asyncio
+async def test_profile_prompt_and_history_are_sent_to_llm(tmp_path, monkeypatch):
+    monkeypatch.setenv("ECHOEAR_MOCK_PROVIDERS", "1")
+    cfg = load_config(tmp_path)
+    cfg["server"]["tts_frame_interval_ms"] = 0
+    llm = CapturingLlm()
+    server = EchoEarServer(cfg, providers=(FixedAsr(), llm, MultiFrameTts()))
+    websocket = RecordingWebSocket()
+    session = SessionState(
+        device_id="90:e5:b1:d6:f8:64",
+        system_prompt="Supabase profile: User's name: Jackson",
+        profile_loaded=True,
+    )
+
+    await server._respond_to_transcript(websocket, session, "what do you know about me?")
+    await server._respond_to_transcript(websocket, session, "and my device?")
+
+    assert "Jackson" in llm.calls[0][0]["content"]
+    assert llm.calls[1][1] == {"role": "user", "content": "what do you know about me?"}
+    assert llm.calls[1][2] == {"role": "assistant", "content": "I remember Jackson's profile."}

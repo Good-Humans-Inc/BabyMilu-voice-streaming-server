@@ -8,6 +8,14 @@ import yaml
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "server": {"ip": "0.0.0.0", "port": 8000, "http_port": 8003, "tts_frame_interval_ms": 60},
+    "profile": {
+        "default_device_id": "",
+        "supabase_url": "",
+        "supabase_service_role_key": "",
+        "timeout_seconds": 10,
+        "users_table": "users",
+        "memory_read_model_table": "memory_read_model",
+    },
     "selected_module": {"ASR": "OpenaiASR", "LLM": "OpenAILLM", "TTS": "FishAudio"},
     "ASR": {
         "OpenaiASR": {
@@ -124,6 +132,20 @@ def _apply_env_overrides(config: dict[str, Any]) -> None:
     if os.getenv("ECHOEAR_TTS_FRAME_INTERVAL_MS"):
         config.setdefault("server", {})["tts_frame_interval_ms"] = int(os.environ["ECHOEAR_TTS_FRAME_INTERVAL_MS"])
 
+    profile = config.setdefault("profile", {})
+    if os.getenv("ECHOEAR_DEFAULT_DEVICE_ID"):
+        profile["default_device_id"] = os.environ["ECHOEAR_DEFAULT_DEVICE_ID"]
+    if os.getenv("SUPABASE_URL"):
+        profile["supabase_url"] = os.environ["SUPABASE_URL"]
+    if os.getenv("SUPABASE_SERVICE_ROLE_KEY"):
+        profile["supabase_service_role_key"] = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+    if os.getenv("SUPABASE_TIMEOUT_SECONDS"):
+        profile["timeout_seconds"] = int(os.environ["SUPABASE_TIMEOUT_SECONDS"])
+    if os.getenv("SUPABASE_USERS_TABLE"):
+        profile["users_table"] = os.environ["SUPABASE_USERS_TABLE"]
+    if os.getenv("SUPABASE_MEMORY_READ_MODEL_TABLE"):
+        profile["memory_read_model_table"] = os.environ["SUPABASE_MEMORY_READ_MODEL_TABLE"]
+
 
 def load_config(config_dir: str | Path | None = None) -> dict[str, Any]:
     root = Path(config_dir or os.getenv("ECHOEAR_CONFIG_DIR") or ".").resolve()
@@ -177,6 +199,10 @@ def public_summary(config: dict[str, Any]) -> dict[str, Any]:
             "asr": summarize("ASR"),
             "llm": summarize("LLM"),
             "tts": summarize("TTS"),
+        },
+        "profile": {
+            "supabase": bool((config.get("profile") or {}).get("supabase_url")),
+            "default_device_id": bool((config.get("profile") or {}).get("default_device_id")),
         },
         "queued_audio_only": True,
     }

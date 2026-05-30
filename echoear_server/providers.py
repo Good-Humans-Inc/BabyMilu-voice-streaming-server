@@ -38,7 +38,7 @@ class AsrProvider:
 class LlmProvider:
     name = "llm"
 
-    async def complete(self, transcript: str) -> str:
+    async def complete(self, transcript: str, messages: list[dict[str, str]] | None = None) -> str:
         raise NotImplementedError
 
 
@@ -61,7 +61,7 @@ class MockAsr(AsrProvider):
 class MockLlm(LlmProvider):
     name = "mock-llm"
 
-    async def complete(self, transcript: str) -> str:
+    async def complete(self, transcript: str, messages: list[dict[str, str]] | None = None) -> str:
         await asyncio.sleep(0)
         return f"I heard you say: {transcript}. The queued audio path is working."
 
@@ -132,7 +132,7 @@ class OpenAiChatLlm(LlmProvider):
     config: dict[str, Any]
     name: str = "openai-llm"
 
-    async def complete(self, transcript: str) -> str:
+    async def complete(self, transcript: str, messages: list[dict[str, str]] | None = None) -> str:
         api_key = self.config.get("api_key")
         if not api_key:
             raise ProviderError("OpenAI LLM api_key is not configured")
@@ -141,7 +141,7 @@ class OpenAiChatLlm(LlmProvider):
         url = base_url.rstrip("/") + "/chat/completions"
         payload = {
             "model": self.config.get("model_name", "gpt-4o"),
-            "messages": [
+            "messages": messages or [
                 {
                     "role": "system",
                     "content": (

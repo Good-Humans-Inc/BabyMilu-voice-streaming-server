@@ -24,6 +24,13 @@ services:
       GOOGLE_CLOUD_PROJECT: composed-augury-469200-g6
       PYTHONUNBUFFERED: "1"
       TZ: America/Los_Angeles
+      CHAT_STORE_BACKEND: ${CHAT_STORE_BACKEND:-auto}
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
+      SUPABASE_TIMEOUT_SECONDS: ${SUPABASE_TIMEOUT_SECONDS:-10}
+      SUPABASE_USERS_TABLE: ${SUPABASE_USERS_TABLE:-users}
+      SUPABASE_MEMORY_READ_MODEL_TABLE: ${SUPABASE_MEMORY_READ_MODEL_TABLE:-memory_read_model}
+      ECHOEAR_DEFAULT_DEVICE_ID: ${ECHOEAR_DEFAULT_DEVICE_ID:-}
     ports:
       - "8000:8000"
       - "8003:8003"
@@ -41,4 +48,3 @@ services:
         read_only: true
     depends_on:
       - mqtt
-
