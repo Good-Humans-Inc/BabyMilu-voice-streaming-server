@@ -144,6 +144,7 @@ async def test_tts_binary_frames_are_paced(tmp_path, monkeypatch):
     monkeypatch.setenv("ECHOEAR_MOCK_PROVIDERS", "1")
     cfg = load_config(tmp_path)
     cfg["server"]["tts_frame_interval_ms"] = 5
+    cfg["server"]["tts_prebuffer_frames"] = 0
     server = EchoEarServer(cfg, providers=(FixedAsr(), FixedLlm(), MultiFrameTts()))
     websocket = RecordingWebSocket()
     session = SessionState()
@@ -153,6 +154,24 @@ async def test_tts_binary_frames_are_paced(tmp_path, monkeypatch):
     binary_times = [sent_at for sent_at, message in websocket.messages if isinstance(message, bytes)]
     assert len(binary_times) == 4
     assert binary_times[-1] - binary_times[0] >= 0.012
+
+
+@pytest.mark.asyncio
+async def test_tts_prebuffer_sends_initial_frames_without_delay(tmp_path, monkeypatch):
+    monkeypatch.setenv("ECHOEAR_MOCK_PROVIDERS", "1")
+    cfg = load_config(tmp_path)
+    cfg["server"]["tts_frame_interval_ms"] = 20
+    cfg["server"]["tts_prebuffer_frames"] = 3
+    server = EchoEarServer(cfg, providers=(FixedAsr(), FixedLlm(), MultiFrameTts()))
+    websocket = RecordingWebSocket()
+    session = SessionState()
+
+    await server._respond_to_transcript(websocket, session, "ignored")
+
+    binary_times = [sent_at for sent_at, message in websocket.messages if isinstance(message, bytes)]
+    assert len(binary_times) == 4
+    assert binary_times[2] - binary_times[0] < 0.01
+    assert binary_times[3] - binary_times[2] >= 0.015
 
 
 @pytest.mark.asyncio

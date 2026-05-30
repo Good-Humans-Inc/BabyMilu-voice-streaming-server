@@ -7,7 +7,13 @@ import yaml
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    "server": {"ip": "0.0.0.0", "port": 8000, "http_port": 8003, "tts_frame_interval_ms": 60},
+    "server": {
+        "ip": "0.0.0.0",
+        "port": 8000,
+        "http_port": 8003,
+        "tts_frame_interval_ms": 60,
+        "tts_prebuffer_frames": 4,
+    },
     "profile": {
         "default_device_id": "",
         "supabase_url": "",
@@ -131,6 +137,8 @@ def _apply_env_overrides(config: dict[str, Any]) -> None:
         config.setdefault("server", {})["http_port"] = int(os.environ["ECHOEAR_HTTP_PORT"])
     if os.getenv("ECHOEAR_TTS_FRAME_INTERVAL_MS"):
         config.setdefault("server", {})["tts_frame_interval_ms"] = int(os.environ["ECHOEAR_TTS_FRAME_INTERVAL_MS"])
+    if os.getenv("ECHOEAR_TTS_PREBUFFER_FRAMES"):
+        config.setdefault("server", {})["tts_prebuffer_frames"] = int(os.environ["ECHOEAR_TTS_PREBUFFER_FRAMES"])
 
     profile = config.setdefault("profile", {})
     if os.getenv("ECHOEAR_DEFAULT_DEVICE_ID"):
@@ -194,6 +202,7 @@ def public_summary(config: dict[str, Any]) -> dict[str, Any]:
             "port": int(server.get("port", 8000)),
             "http_port": int(server.get("http_port", 8003)),
             "tts_frame_interval_ms": int(server.get("tts_frame_interval_ms", 60)),
+            "tts_prebuffer_frames": int(server.get("tts_prebuffer_frames", 4)),
         },
         "providers": {
             "asr": summarize("ASR"),

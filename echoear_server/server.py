@@ -39,6 +39,7 @@ class EchoEarServer:
         server_cfg = self.config.get("server") or {}
         frame_interval_ms = float(server_cfg.get("tts_frame_interval_ms", OPUS_FRAME_MS))
         self._tts_frame_interval_seconds = max(0.0, frame_interval_ms / 1000.0)
+        self._tts_prebuffer_frames = max(0, int(server_cfg.get("tts_prebuffer_frames", 4)))
 
     async def start(self) -> None:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -309,14 +310,16 @@ class EchoEarServer:
                     len(frames),
                     len(packet),
                 )
-            if self._tts_frame_interval_seconds > 0 and index + 1 < len(frames):
+            should_sleep = index + 1 >= self._tts_prebuffer_frames
+            if self._tts_frame_interval_seconds > 0 and should_sleep and index + 1 < len(frames):
                 await asyncio.sleep(self._tts_frame_interval_seconds)
         LOGGER.info(
-            "tts sent session=%s frames=%s bytes=%s interval_ms=%.1f",
+            "tts sent session=%s frames=%s bytes=%s interval_ms=%.1f prebuffer_frames=%s",
             session.session_id,
             len(frames),
             bytes_sent,
             self._tts_frame_interval_seconds * 1000.0,
+            self._tts_prebuffer_frames,
         )
         await websocket.send(dumps(tts(session.session_id, "stop")))
 
