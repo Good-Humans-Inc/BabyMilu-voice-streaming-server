@@ -6,9 +6,9 @@ import sys
 import websockets
 
 
-async def run(url: str, text: str, timeout: float) -> int:
-    seen = {"hello": False, "stt": False, "llm": False, "tts_stop": False}
-    audio_frames = 0
+async def run(url: str, text: str, timeout: float, turns: int) -> int:
+    seen = {"hello": False}
+    total_audio_frames = 0
 
     async with websockets.connect(url, max_size=8 * 1024 * 1024) as ws:
         await ws.send(json.dumps({"type": "hello", "version": 3, "audio_params": {"format": "opus"}}))
@@ -16,26 +16,37 @@ async def run(url: str, text: str, timeout: float) -> int:
         print("hello", hello)
         seen["hello"] = hello.get("type") == "hello"
 
-        await ws.send(json.dumps({"type": "listen", "state": "detect", "text": text}))
-        while True:
-            message = await asyncio.wait_for(ws.recv(), timeout=timeout)
-            if isinstance(message, bytes):
-                audio_frames += 1
-                continue
-            data = json.loads(message)
-            print(data)
-            if data.get("type") == "stt":
-                seen["stt"] = bool(data.get("text"))
-            if data.get("type") == "llm":
-                seen["llm"] = bool(data.get("text"))
-            if data.get("type") == "tts" and data.get("state") == "stop":
-                seen["tts_stop"] = True
-                break
+        for turn in range(1, turns + 1):
+            turn_seen = {"stt": False, "llm": False, "tts_stop": False}
+            turn_audio_frames = 0
+            turn_text = text if turns == 1 else f"{text} Turn {turn}."
+            print(f"turn {turn} send listen:detect text={turn_text!r}")
+            await ws.send(json.dumps({"type": "listen", "state": "detect", "text": turn_text}))
+            while True:
+                message = await asyncio.wait_for(ws.recv(), timeout=timeout)
+                if isinstance(message, bytes):
+                    turn_audio_frames += 1
+                    total_audio_frames += 1
+                    continue
+                data = json.loads(message)
+                print(data)
+                if data.get("type") == "stt":
+                    turn_seen["stt"] = bool(data.get("text"))
+                if data.get("type") == "llm":
+                    turn_seen["llm"] = bool(data.get("text"))
+                if data.get("type") == "tts" and data.get("state") == "stop":
+                    turn_seen["tts_stop"] = True
+                    break
+            seen.update({f"turn_{turn}_{name}": ok for name, ok in turn_seen.items()})
+            print(f"turn {turn} audio_frames={turn_audio_frames}")
 
-    print(f"audio_frames={audio_frames}")
+    print(f"total_audio_frames={total_audio_frames}")
     missing = [name for name, ok in seen.items() if not ok]
     if missing:
         print(f"missing expected events: {missing}", file=sys.stderr)
+        return 1
+    if total_audio_frames <= 0:
+        print("missing expected binary TTS audio frames", file=sys.stderr)
         return 1
     return 0
 
@@ -45,10 +56,12 @@ def main() -> None:
     parser.add_argument("--url", required=True)
     parser.add_argument("--text", default="Hey EchoEar, can you hear me?")
     parser.add_argument("--timeout", type=float, default=45)
+    parser.add_argument("--turns", type=int, default=1)
     args = parser.parse_args()
-    raise SystemExit(asyncio.run(run(args.url, args.text, args.timeout)))
+    if args.turns < 1:
+        parser.error("--turns must be at least 1")
+    raise SystemExit(asyncio.run(run(args.url, args.text, args.timeout, args.turns)))
 
 
 if __name__ == "__main__":
     main()
-
