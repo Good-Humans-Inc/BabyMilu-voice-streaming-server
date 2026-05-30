@@ -8,6 +8,7 @@ from typing import Any
 from aiohttp import web
 import websockets
 
+from .audio import OPUS_FRAME_MS
 from .config import public_summary
 from .protocol import SessionState, dumps, error, hello, llm, stt, tts
 from .providers import AsrProvider, LlmProvider, TtsProvider, build_providers
@@ -25,6 +26,9 @@ class EchoEarServer:
         self.asr, self.llm, self.tts = providers or build_providers(config)
         self._ws_server = None
         self._http_runner: web.AppRunner | None = None
+        server_cfg = self.config.get("server") or {}
+        frame_interval_ms = float(server_cfg.get("tts_frame_interval_ms", OPUS_FRAME_MS))
+        self._tts_frame_interval_seconds = max(0.0, frame_interval_ms / 1000.0)
 
     async def start(self) -> None:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -222,7 +226,17 @@ class EchoEarServer:
         await websocket.send(dumps(llm(session.session_id, response_text)))
         await websocket.send(dumps(tts(session.session_id, "sentence_start", response_text)))
         frames = await self.tts.synthesize_opus(response_text)
-        for packet in frames:
+        bytes_sent = 0
+        for index, packet in enumerate(frames):
             await websocket.send(packet)
-            await asyncio.sleep(0)
+            bytes_sent += len(packet)
+            if self._tts_frame_interval_seconds > 0 and index + 1 < len(frames):
+                await asyncio.sleep(self._tts_frame_interval_seconds)
+        LOGGER.info(
+            "tts sent session=%s frames=%s bytes=%s interval_ms=%.1f",
+            session.session_id,
+            len(frames),
+            bytes_sent,
+            self._tts_frame_interval_seconds * 1000.0,
+        )
         await websocket.send(dumps(tts(session.session_id, "stop")))

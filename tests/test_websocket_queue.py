@@ -1,10 +1,12 @@
 import asyncio
 import json
+import time
 
 import pytest
 import websockets
 
 from echoear_server.config import load_config
+from echoear_server.protocol import SessionState
 from echoear_server.providers import AsrProvider, LlmProvider, TtsProvider
 from echoear_server.server import EchoEarServer
 
@@ -77,6 +79,19 @@ class SlowTts(TtsProvider):
         return [b"late-audio"]
 
 
+class MultiFrameTts(TtsProvider):
+    async def synthesize_opus(self, text):
+        return [b"frame-1", b"frame-2", b"frame-3", b"frame-4"]
+
+
+class RecordingWebSocket:
+    def __init__(self):
+        self.messages = []
+
+    async def send(self, message):
+        self.messages.append((time.monotonic(), message))
+
+
 @pytest.mark.asyncio
 async def test_abort_cancels_active_tts_before_audio(tmp_path, monkeypatch):
     monkeypatch.setenv("ECHOEAR_MOCK_PROVIDERS", "1")
@@ -112,3 +127,19 @@ async def test_abort_cancels_active_tts_before_audio(tmp_path, monkeypatch):
                 await asyncio.wait_for(ws.recv(), timeout=0.15)
     finally:
         await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_tts_binary_frames_are_paced(tmp_path, monkeypatch):
+    monkeypatch.setenv("ECHOEAR_MOCK_PROVIDERS", "1")
+    cfg = load_config(tmp_path)
+    cfg["server"]["tts_frame_interval_ms"] = 5
+    server = EchoEarServer(cfg, providers=(FixedAsr(), FixedLlm(), MultiFrameTts()))
+    websocket = RecordingWebSocket()
+    session = SessionState()
+
+    await server._respond_to_transcript(websocket, session, "ignored")
+
+    binary_times = [sent_at for sent_at, message in websocket.messages if isinstance(message, bytes)]
+    assert len(binary_times) == 4
+    assert binary_times[-1] - binary_times[0] >= 0.012

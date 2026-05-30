@@ -22,6 +22,7 @@ The service reads `data/.config.yaml` first, then `config.yaml`, and supports en
 - `ECHOEAR_MOCK_PROVIDERS=1`
 - `ECHOEAR_WS_PORT`
 - `ECHOEAR_HTTP_PORT`
+- `ECHOEAR_TTS_FRAME_INTERVAL_MS` defaults to `60`, matching the Opus frame duration so small device playback queues are not flooded.
 
 The staging VM already keeps real API config in `/srv/dev/current/data/.config.yaml`; do not commit secrets.
 

@@ -7,7 +7,7 @@ import yaml
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    "server": {"ip": "0.0.0.0", "port": 8000, "http_port": 8003},
+    "server": {"ip": "0.0.0.0", "port": 8000, "http_port": 8003, "tts_frame_interval_ms": 60},
     "selected_module": {"ASR": "OpenaiASR", "LLM": "OpenAILLM", "TTS": "FishAudio"},
     "ASR": {
         "OpenaiASR": {
@@ -113,6 +113,8 @@ def _apply_env_overrides(config: dict[str, Any]) -> None:
         config.setdefault("server", {})["port"] = int(os.environ["ECHOEAR_WS_PORT"])
     if os.getenv("ECHOEAR_HTTP_PORT"):
         config.setdefault("server", {})["http_port"] = int(os.environ["ECHOEAR_HTTP_PORT"])
+    if os.getenv("ECHOEAR_TTS_FRAME_INTERVAL_MS"):
+        config.setdefault("server", {})["tts_frame_interval_ms"] = int(os.environ["ECHOEAR_TTS_FRAME_INTERVAL_MS"])
 
 
 def load_config(config_dir: str | Path | None = None) -> dict[str, Any]:
@@ -161,6 +163,7 @@ def public_summary(config: dict[str, Any]) -> dict[str, Any]:
             "ip": server.get("ip", "0.0.0.0"),
             "port": int(server.get("port", 8000)),
             "http_port": int(server.get("http_port", 8003)),
+            "tts_frame_interval_ms": int(server.get("tts_frame_interval_ms", 60)),
         },
         "providers": {
             "asr": summarize("ASR"),
