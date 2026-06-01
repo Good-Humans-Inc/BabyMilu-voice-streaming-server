@@ -186,3 +186,4 @@ uploadfile
 env.*.yaml
 
 _build_alarms/
+conversations.db
