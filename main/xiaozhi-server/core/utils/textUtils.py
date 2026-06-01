@@ -33,6 +33,46 @@ EMOJI_RANGES = [
     (0x2600, 0x26FF),
     (0x2700, 0x27BF),
 ]
+EMOJI_JOINERS = {"\u200d", "\ufe0f", "\ufe0e"}
+
+# Canonical mapping source (in-code, no file read).
+CANONICAL_EMOTION_MAP = {
+    "smirk": ["😏", "🤨", "😐", "😑", "😶", "🫥", "😬", "😒", "🙄", "🤔"],
+    "heart": ["🥰", "😍", "😘", "🤗", "😍", "😘", "😚", "😙", "🥰", "❤️"],
+    "cheerful": ["😊", "☺️", "🙂", "😌", "😇", "🤭"],
+    "blush": ["😳"],
+    "sad": ["🙁", "☹️", "😕", "☹️", "😕", "😟", "😨", "😦", "😞", "😧", "🥲", "🫠", "😔", "🤕", "😮‍💨", "❤️‍🩹"],
+    "laugh": ["😄", "😁", "😄", "😁", "😆", "🤣", "😂", "😋", "😛"],
+    "sleep": ["😴", "😪", "😪", "😴", "🥱"],
+    "starry": ["🤩", "🤩", "🤠", "🥳", "🤯", "😮", "😯", "😲", "❤️‍🔥"],
+    "cry": ["😭", "😥", "😢", "😭", "😫", "😩", "😖", "😖", "😣", "💔"],
+    "angry": ["😡", "😤", "😠", "😤", "😡", "😠", "🤬", "😒"],
+}
+
+EMOJI_MAP = {
+    emoji: emotion
+    for emotion, emojis in CANONICAL_EMOTION_MAP.items()
+    for emoji in emojis
+}
+_DEFAULT_EMOTION = "normal"
+_DEFAULT_EMOJI = "😄"
+
+
+def _is_skin_tone_modifier(char: str) -> bool:
+    cp = ord(char)
+    return 0x1F3FB <= cp <= 0x1F3FF
+
+
+def get_allowed_emoji_list_string() -> str:
+    """Return space-separated allowed emoji list from canonical mapping."""
+    ordered = []
+    seen = set()
+    for emojis in CANONICAL_EMOTION_MAP.values():
+        for emoji in emojis:
+            if emoji not in seen:
+                ordered.append(emoji)
+                seen.add(emoji)
+    return " ".join(ordered)
 
 
 def get_string_no_punctuation_or_emoji(s):
