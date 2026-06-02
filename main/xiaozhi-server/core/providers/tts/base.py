@@ -12,6 +12,7 @@ from core.utils import textUtils
 from typing import Callable, Any
 from abc import ABC, abstractmethod
 from config.logger import setup_logging
+from core.concurrency import DropOldestQueue
 from core.utils.tts import MarkdownCleaner
 from core.utils.output_counter import add_device_output
 from core.handle.reportHandle import enqueue_tts_report
@@ -35,8 +36,16 @@ class TTSProviderBase(ABC):
         self.delete_audio_file = delete_audio_file
         self.audio_file_type = "wav"
         self.output_file = config.get("output_dir", "tmp/")
-        self.tts_text_queue = queue.Queue()
-        self.tts_audio_queue = queue.Queue()
+        concurrency = config.get("concurrency", {}) or {}
+        queue_config = concurrency.get("queues", {}) or {}
+        self.tts_text_queue = DropOldestQueue(
+            int(queue_config.get("tts_text_queue_size", 256)),
+            name="tts_text",
+        )
+        self.tts_audio_queue = DropOldestQueue(
+            int(queue_config.get("tts_audio_queue_size", 512)),
+            name="tts_audio",
+        )
         self.tts_audio_first_sentence = True
         self.before_stop_play_files = []
 
@@ -68,6 +77,7 @@ class TTSProviderBase(ABC):
         self.tts_stop_request = False
         self.processed_chars = 0
         self.is_first_sentence = True
+        self._audio_play_disconnect_logged = False
 
     def generate_filename(self, extension=".wav"):
         return os.path.join(
@@ -143,7 +153,7 @@ class TTSProviderBase(ABC):
             except Exception as e:
                 logger.bind(tag=TAG).error(f"Failed to generate TTS file: {e}")
                 return None
-    
+
     def to_tts(self, text):
         text = MarkdownCleaner.clean_markdown(text)
         max_repeat_time = 5
@@ -252,6 +262,7 @@ class TTSProviderBase(ABC):
 
     async def open_audio_channels(self, conn):
         self.conn = conn
+        self._audio_play_disconnect_logged = False
         # tts 消化线程
         self.tts_priority_thread = threading.Thread(
             target=self.tts_text_priority_thread, daemon=True
@@ -353,7 +364,71 @@ class TTSProviderBase(ABC):
                     add_device_output(self.conn.headers.get("device-id"), len(text))
 
             except Exception as e:
-                logger.bind(tag=TAG).error(f"audio_play_priority_thread: {text} {e}")
+                self._log_audio_play_exception(text, e)
+
+    def _log_audio_play_exception(self, text, exc):
+        conn = getattr(self, "conn", None)
+        device_id = getattr(conn, "device_id", None) or self._header_device_id(conn)
+        session_id = getattr(conn, "session_id", None)
+        close_error = self._is_connection_close_error(exc)
+
+        if self._is_audio_play_shutdown(conn):
+            event = "audio_play_priority_thread send stopped during shutdown"
+            level = "debug"
+        elif close_error:
+            event = "audio_play_priority_thread device disconnected abruptly"
+            level = (
+                "debug"
+                if getattr(self, "_audio_play_disconnect_logged", False)
+                else "warning"
+            )
+            self._audio_play_disconnect_logged = True
+        else:
+            event = "audio_play_priority_thread send failed"
+            level = "warning"
+
+        message = (
+            f"{event}: "
+            f"device_id={device_id or 'unknown'} "
+            f"session_id={session_id or 'unknown'} text={text!r} "
+            f"error={type(exc).__name__}: {exc}"
+        )
+        bound_logger = logger.bind(tag=TAG, device_id=device_id, session_id=session_id)
+
+        if level == "debug":
+            bound_logger.debug(message)
+            return
+
+        bound_logger.warning(message)
+
+    @staticmethod
+    def _header_device_id(conn):
+        headers = getattr(conn, "headers", None)
+        getter = getattr(headers, "get", None)
+        if callable(getter):
+            return getter("device-id")
+        return None
+
+    @staticmethod
+    def _is_connection_close_error(exc) -> bool:
+        error_text = str(exc).lower()
+        error_type = type(exc).__name__.lower()
+        return (
+            "no close frame received or sent" in error_text
+            or "sent 1000" in error_text
+            or "connectionclosed" in error_type
+        )
+
+    @staticmethod
+    def _is_audio_play_shutdown(conn) -> bool:
+        if getattr(conn, "_closing", False):
+            return True
+
+        stop_event = getattr(conn, "stop_event", None)
+        if callable(getattr(stop_event, "is_set", None)) and stop_event.is_set():
+            return True
+
+        return False
 
     async def start_session(self, session_id):
         pass

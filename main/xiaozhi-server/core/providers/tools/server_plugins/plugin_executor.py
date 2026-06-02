@@ -1,5 +1,6 @@
 """服务端插件工具执行器"""
 
+import asyncio
 from typing import Dict, Any
 from ..base import ToolType, ToolDefinition, ToolExecutor
 from plugins_func.register import all_function_registry, Action, ActionResponse
@@ -23,20 +24,27 @@ class ServerPluginExecutor(ToolExecutor):
             )
 
         try:
-            # 根据工具类型决定如何调用
-            if hasattr(func_item, "type"):
-                func_type = func_item.type
-                if func_type.code in [4, 5]:  # SYSTEM_CTL, IOT_CTL (需要conn参数)
-                    result = func_item.func(conn, **arguments)
-                elif func_type.code == 2:  # WAIT
-                    result = func_item.func(**arguments)
-                elif func_type.code == 3:  # CHANGE_SYS_PROMPT
-                    result = func_item.func(conn, **arguments)
-                else:
-                    result = func_item.func(**arguments)
+            def invoke_plugin():
+                if hasattr(func_item, "type"):
+                    func_type = func_item.type
+                    if func_type.code in [4, 5]:
+                        return func_item.func(conn, **arguments)
+                    if func_type.code == 2:
+                        return func_item.func(**arguments)
+                    if func_type.code == 3:
+                        return func_item.func(conn, **arguments)
+                    return func_item.func(**arguments)
+                return func_item.func(**arguments)
+
+            if hasattr(conn, "run_sync"):
+                timeout_for = getattr(conn, "executor_timeout", lambda _name: 20.0)
+                result = await conn.run_sync(
+                    "tool",
+                    invoke_plugin,
+                    timeout=timeout_for("tool"),
+                )
             else:
-                # 默认不传conn参数
-                result = func_item.func(**arguments)
+                result = await asyncio.to_thread(invoke_plugin)
 
             return result
 
@@ -51,12 +59,28 @@ class ServerPluginExecutor(ToolExecutor):
         tools = {}
 
         # 获取必要的函数
-        necessary_functions = ["handle_exit_intent", "get_lunar"]
+        necessary_functions = ["handle_exit_intent", "get_lunar", "get_current_time"]
 
-        # 获取配置中的函数
-        config_functions = self.config["Intent"][
-            self.config["selected_module"]["Intent"]
-        ].get("functions", [])
+        # function-call tools are configured under LLM.function_call.functions.
+        llm_functions = (
+            self.config.get("LLM", {})
+            .get("function_call", {})
+            .get("functions", [])
+        )
+
+        # Some deployments also enable intent-side plugin functions; keep those too.
+        intent_module = self.config.get("selected_module", {}).get("Intent")
+        intent_functions = (
+            self.config.get("Intent", {})
+            .get(intent_module, {})
+            .get("functions", [])
+        )
+
+        config_functions = []
+        if isinstance(llm_functions, list):
+            config_functions.extend(llm_functions)
+        if isinstance(intent_functions, list):
+            config_functions.extend(intent_functions)
 
         # 转换为列表
         if not isinstance(config_functions, list):

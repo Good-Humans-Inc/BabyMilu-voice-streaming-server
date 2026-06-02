@@ -8,6 +8,12 @@ from core.providers.tts.dto.dto import SentenceType
 TAG = __name__
 
 
+def _release_vad_for_tts(conn):
+    release_vad = getattr(conn, "release_vad_lease", None)
+    if callable(release_vad):
+        release_vad(reset_connection_state=False)
+
+
 async def sendAudioMessage(conn, sentenceType, audios, text):
     if conn.tts.tts_audio_first_sentence:
         conn.logger.bind(tag=TAG).info(f"发送第一段语音: {text}")
@@ -15,6 +21,7 @@ async def sendAudioMessage(conn, sentenceType, audios, text):
         await send_tts_message(conn, "start", None)
 
     if sentenceType == SentenceType.FIRST:
+        _release_vad_for_tts(conn)
         # 标记当前正在播放TTS，便于VAD检测到用户说话时触发打断
         conn.client_is_speaking = True
         await send_tts_message(conn, "sentence_start", text)
@@ -25,7 +32,7 @@ async def sendAudioMessage(conn, sentenceType, audios, text):
         conn.logger.bind(tag=TAG).info(f"发送音频消息: {sentenceType}, {text}")
 
     # 发送结束消息（如果是最后一个文本）
-    if conn.llm_finish_task and sentenceType == SentenceType.LAST:
+    if sentenceType == SentenceType.LAST:
         await send_tts_message(conn, "stop", None)
         conn.client_is_speaking = False
         if conn.close_after_chat:

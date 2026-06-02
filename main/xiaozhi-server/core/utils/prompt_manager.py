@@ -4,13 +4,20 @@
 """
 
 import os
-import requests
 import json
+import hashlib
 import cnlunar
 from typing import Dict, Any
 from config.logger import setup_logging
 from jinja2 import Template
-from core.utils.firestore_client import get_timezone_for_device, get_owner_phone_for_device, get_user_profile_by_phone, extract_user_profile_fields
+from core.utils.firestore_client import (
+    get_timezone_for_device,
+    get_owner_phone_for_device,
+    get_user_profile_by_phone,
+    extract_user_profile_fields,
+    get_active_character_for_device,
+)
+from core.utils.textUtils import get_allowed_emoji_list_string
 
 TAG = __name__
 
@@ -24,31 +31,6 @@ WEEKDAY_MAP = {
     "Sunday": "Sunday",
 }
 
-EMOJI_List = [
-    "😶",
-    "🙂",
-    "😆",
-    "😂",
-    "😔",
-    "😠",
-    "😭",
-    "😍",
-    "😳",
-    "😲",
-    "😱",
-    "🤔",
-    "😉",
-    "😎",
-    "😌",
-    "🤤",
-    "😘",
-    "😏",
-    "😴",
-    "😜",
-    "🙄",
-]
-
-
 class PromptManager:
     """系统提示词管理器，负责管理和更新系统提示词"""
 
@@ -57,6 +39,7 @@ class PromptManager:
         self.logger = logger or setup_logging()
         self.base_prompt_template = None
         self.last_update_time = 0
+        self._enhanced_prompt_ttl_seconds = 12 * 60 * 60
 
         # 导入全局缓存管理器
         from core.utils.cache.manager import cache_manager, CacheType
@@ -95,6 +78,59 @@ class PromptManager:
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"加载提示词模板失败: {e}")
 
+    def _get_enhanced_prompt_cache_key(
+        self, device_id: str, prompt_text: str = None
+    ) -> str:
+        """Build a cache key scoped by device + active character + prompt hash.
+
+        This prevents stale prompt reuse after character switch:
+        same device_id with new activeCharacterId should miss old cache.
+        """
+        if not device_id:
+            return "enhanced_prompt:anonymous"
+
+        char_id = "unknown"
+        try:
+            resolved = get_active_character_for_device(device_id)
+            if resolved:
+                char_id = str(resolved)
+        except Exception:
+            # Best-effort key enrichment; fallback still works
+            pass
+
+        prompt_hash = "nohash"
+        if prompt_text is not None:
+            try:
+                prompt_hash = hashlib.sha1(
+                    str(prompt_text).encode("utf-8")
+                ).hexdigest()[:12]
+            except Exception:
+                prompt_hash = "nohash"
+
+        return f"enhanced_prompt:{device_id}:{char_id}:{prompt_hash}"
+
+    def _get_cached_enhanced_prompt(self, device_id: str, prompt_text: str = None) -> str:
+        if not device_id:
+            return ""
+        cache_key = self._get_enhanced_prompt_cache_key(device_id, prompt_text=prompt_text)
+        cached_prompt = self.cache_manager.get(self.CacheType.DEVICE_PROMPT, cache_key)
+        return cached_prompt or ""
+
+    def get_cached_enhanced_prompt(self, device_id: str, prompt_text: str = None) -> str:
+        return self._get_cached_enhanced_prompt(device_id, prompt_text=prompt_text)
+
+    def invalidate_device_prompt_cache(self, device_id: str) -> int:
+        """Invalidate all prompt cache entries for a device."""
+        if not device_id:
+            return 0
+        deleted = self.cache_manager.invalidate_pattern(
+            self.CacheType.DEVICE_PROMPT, f"enhanced_prompt:{device_id}:"
+        )
+        deleted += self.cache_manager.invalidate_pattern(
+            self.CacheType.DEVICE_PROMPT, f"device_prompt:{device_id}"
+        )
+        return deleted
+
     def get_quick_prompt(self, user_prompt: str, device_id: str = None) -> str:
         """快速获取系统提示词（使用用户配置）"""
         device_cache_key = f"device_prompt:{device_id}"
@@ -112,7 +148,9 @@ class PromptManager:
         # 使用传入的提示词并缓存（如果有设备ID）
         if device_id:
             device_cache_key = f"device_prompt:{device_id}"
-            self.cache_manager.set(self.CacheType.CONFIG, device_cache_key, user_prompt)
+            self.cache_manager.set(
+                self.CacheType.DEVICE_PROMPT, device_cache_key, user_prompt
+            )
             self.logger.bind(tag=TAG).debug(f"设备 {device_id} 的提示词已缓存")
 
         self.logger.bind(tag=TAG).info(f"使用快速提示词: {user_prompt[:50]}...")
@@ -204,112 +242,36 @@ class PromptManager:
         print(f"[WeatherDebug] _resolve_preferred_location: fallback IP city={fallback!r}")
         return fallback
 
-    def _get_weather_info_openweather(self, location_str: str) -> str:
-        """
-        使用 OpenWeather API 获取天气信息。
-        - location_str 期望格式：'City, ST'（美国州代码）
-        - 先用 Direct Geocoding 拿到 lat/lon，再查询当前天气
-        - 输出英文精简描述
-        """
-        try:
-            print(f"[WeatherDebug] _get_weather_info_openweather: input location_str={location_str!r}")
-            if not location_str or "," not in location_str:
-                print(f"[WeatherDebug] _get_weather_info_openweather: invalid location_str")
-                return "Weather unavailable"
-            parts = [p.strip() for p in location_str.split(",", 1)]
-            if len(parts) != 2 or not parts[0] or not parts[1]:
-                print(f"[WeatherDebug] _get_weather_info_openweather: parse parts failed -> {parts}")
-                return "Weather unavailable"
-            city_name, state_code = parts[0], parts[1]
-            print(f"[WeatherDebug] _get_weather_info_openweather: parsed city={city_name!r}, state={state_code!r}")
-
-            # API Key 优先从环境变量读取，其次从配置读取
-            api_key = (
-                os.environ.get("OPENWEATHER_API_KEY")
-                or (self.config.get("openweather", {}) or {}).get("api_key")
-            )
-            if not api_key:
-                print(f"[WeatherDebug] _get_weather_info_openweather: no API key found in env or config")
-                return "Weather unavailable"
-            else:
-                print(f"[WeatherDebug] _get_weather_info_openweather: API key present (not printing)")
-
-            # 1) Direct Geocoding
-            geo_url = "http://api.openweathermap.org/geo/1.0/direct"
-            geo_params = {
-                "q": f"{city_name},{state_code},US",
-                "limit": 1,
-                "appid": api_key,
-            }
-            print(f"[WeatherDebug] _get_weather_info_openweather: geocode GET {geo_url} params={ {'q': geo_params.get('q'), 'limit': geo_params.get('limit')} }")
-            geo_resp = requests.get(geo_url, params=geo_params, timeout=5)
-            print(f"[WeatherDebug] _get_weather_info_openweather: geocode status={geo_resp.status_code}")
-            if geo_resp.status_code != 200:
-                return "Weather unavailable"
-            geo_data = geo_resp.json() or []
-            print(f"[WeatherDebug] _get_weather_info_openweather: geocode data length={len(geo_data) if isinstance(geo_data, list) else 'N/A'}")
-            if not isinstance(geo_data, list) or len(geo_data) == 0:
-                return "Weather unavailable"
-            lat = geo_data[0].get("lat")
-            lon = geo_data[0].get("lon")
-            resolved_city = geo_data[0].get("name") or city_name
-            print(f"[WeatherDebug] _get_weather_info_openweather: geocode resolved lat={lat}, lon={lon}, city={resolved_city!r}")
-            if lat is None or lon is None:
-                return "Weather unavailable"
-
-            # 2) Current weather
-            weather_url = "https://api.openweathermap.org/data/2.5/weather"
-            weather_params = {
-                "lat": lat,
-                "lon": lon,
-                "appid": api_key,
-                # 美国地区使用华氏度
-                "units": "imperial",
-            }
-            print(f"[WeatherDebug] _get_weather_info_openweather: weather GET {weather_url} params={ {'lat': lat, 'lon': lon, 'units': 'imperial'} }")
-            w_resp = requests.get(weather_url, params=weather_params, timeout=5)
-            print(f"[WeatherDebug] _get_weather_info_openweather: weather status={w_resp.status_code}")
-            if w_resp.status_code != 200:
-                return "Weather unavailable"
-            w = w_resp.json() or {}
-            weather_list = w.get("weather") or []
-            description = (
-                (weather_list[0] or {}).get("description", "").capitalize()
-                if weather_list
-                else ""
-            )
-            main = w.get("main") or {}
-            temp = main.get("temp")
-            feels = main.get("feels_like")
-            print(f"[WeatherDebug] _get_weather_info_openweather: parsed description={description!r}, temp={temp}, feels_like={feels}")
-            temp_str = f"{round(temp)} Fahrenheit" if isinstance(temp, (int, float)) else ""
-            feels_str = (
-                f"{round(feels)} Fahrenheit" if isinstance(feels, (int, float)) else ""
-            )
-
-            # 组装简洁描述
-            pieces = []
-            if description:
-                pieces.append(description)
-            if temp_str:
-                pieces.append(f"{temp_str}")
-            if feels_str:
-                pieces.append(f"feels {feels_str}")
-            summary = ", ".join(pieces) if pieces else "Weather unavailable"
-
-            # 例如："San Francisco: Clear sky, 62°F, feels 60°F"
-            print(f"[WeatherDebug] _get_weather_info_openweather: summary={summary!r} -> {resolved_city!r}")
-            return f"{resolved_city}: {summary}"
-        except Exception as e:
-            self.logger.bind(tag=TAG).error(f"Failed to fetch weather via OpenWeather: {e}")
-            return "Weather unavailable"
-
     def _get_weather_info(self, location: str) -> str:
         """获取天气信息"""
         try:
-            print(f"[WeatherDebug] _get_weather_info: fetch fresh for location={location!r} (no cache)")
-            # 始终新鲜获取（不使用缓存）
-            return self._get_weather_info_openweather(location)
+            print(f"[WeatherDebug] _get_weather_info: resolve weather for location={location!r}")
+            # Prompt weather uses the same Open-Meteo report builder as the tool.
+            if not location:
+                return "Weather unavailable"
+
+            weather_cache_key = f"prompt_weather_{location}_en_US"
+            cached_weather = self.cache_manager.get(
+                self.CacheType.WEATHER, weather_cache_key
+            )
+            if cached_weather:
+                print(f"[WeatherDebug] _get_weather_info: cache HIT for location={location!r}")
+                return cached_weather
+
+            print(f"[WeatherDebug] _get_weather_info: fetch Open-Meteo for location={location!r}")
+            from plugins_func.functions.get_weather import build_weather_report
+
+            weather_report, error = build_weather_report(location)
+            if error:
+                self.logger.bind(tag=TAG).warning(
+                    f"Failed to fetch weather via Open-Meteo: {error}"
+                )
+                return "Weather unavailable"
+
+            self.cache_manager.set(
+                self.CacheType.WEATHER, weather_cache_key, weather_report
+            )
+            return weather_report
 
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"Failed to get weather info: {e}")
@@ -318,9 +280,18 @@ class PromptManager:
     def update_context_info(self, conn, client_ip: str):
         """同步更新上下文信息"""
         try:
+            device_id = getattr(conn, "device_id", None)
+            cached_enhanced = self._get_cached_enhanced_prompt(
+                device_id, prompt_text=self.config.get("prompt")
+            )
+            if cached_enhanced:
+                self.logger.bind(tag=TAG).info(
+                    f"Enhanced prompt cache hit for device {device_id}, "
+                    "skipping context update (firestore/weather)"
+                )
+                return
             print(f"[WeatherDebug] update_context_info: start device_id={getattr(conn, 'device_id', None)!r}, client_ip={client_ip!r}")
             # 优先使用用户档案中的城市；否则使用IP定位
-            device_id = getattr(conn, "device_id", None)
             local_address = self._resolve_preferred_location(device_id, client_ip)
             # 将决策后的地址写入缓存（以 client_ip 为键，便于后续读取）
             if client_ip and local_address:
@@ -342,6 +313,16 @@ class PromptManager:
             return user_prompt
 
         try:
+            cached_enhanced = self._get_cached_enhanced_prompt(
+                device_id, prompt_text=user_prompt
+            )
+            if cached_enhanced:
+                self.logger.bind(tag=TAG).info(
+                    f"Enhanced prompt cache hit for device {device_id}, "
+                    "skipping enhanced prompt render"
+                )
+                return cached_enhanced
+
             # 获取最新的时间信息（不缓存）
             tz = get_timezone_for_device(device_id) if device_id else None
             current_time, today_date, today_weekday = self._get_current_time_info(tz or None)
@@ -366,7 +347,7 @@ class PromptManager:
             # 替换模板变量
             template = Template(self.base_prompt_template)
             # 读取用户名称用于 {{user}}
-            user_name = ""
+            user_name = "user"
             try:
                 if device_id:
                     owner_phone = get_owner_phone_for_device(device_id)
@@ -374,9 +355,9 @@ class PromptManager:
                         user_doc = get_user_profile_by_phone(owner_phone)
                         if user_doc:
                             user_fields = extract_user_profile_fields(user_doc)
-                            user_name = user_fields.get("name") or ""
+                            user_name = user_fields.get("name") or "user"
             except Exception:
-                user_name = ""
+                user_name = "user"
             enhanced_prompt = template.render(
                 base_prompt=user_prompt,
                 current_time=current_time,
@@ -384,7 +365,7 @@ class PromptManager:
                 today_weekday=today_weekday,
                 local_address=local_address,
                 weather_info=weather_info,
-                emojiList=EMOJI_List,
+                emojiList=get_allowed_emoji_list_string(),
                 device_id=device_id,
                 user=user_name,
             )
@@ -394,9 +375,14 @@ class PromptManager:
             print(f"[WeatherDebug] build_enhanced_prompt: template has local={contains_local}, weather={contains_weather}")
             print(f"[WeatherDebug] build_enhanced_prompt: values -> local_address={local_address!r}, weather_info={weather_info!r}")
             print(f"[WeatherDebug] build_enhanced_prompt: enhanced prompt length={len(enhanced_prompt)}")
-            device_cache_key = f"device_prompt:{device_id}"
+            device_cache_key = self._get_enhanced_prompt_cache_key(
+                device_id, prompt_text=user_prompt
+            )
             self.cache_manager.set(
-                self.CacheType.DEVICE_PROMPT, device_cache_key, enhanced_prompt
+                self.CacheType.DEVICE_PROMPT,
+                device_cache_key,
+                enhanced_prompt,
+                ttl=self._enhanced_prompt_ttl_seconds,
             )
             self.logger.bind(tag=TAG).info(
                 f"构建增强提示词成功，长度: {len(enhanced_prompt)}"

@@ -1,7 +1,9 @@
 import asyncio
 import websockets
 from config.logger import setup_logging
+from core.concurrency import ServerExecutors
 from core.connection import ConnectionHandler
+from core.vad_pool import VadProviderPool
 from config.config_loader import get_config_from_api
 from core.utils.modules_initialize import initialize_modules
 from core.utils.util import check_vad_update, check_asr_update
@@ -18,22 +20,25 @@ class WebSocketServer:
         self.active_ws_by_device = {}
         self.ws_lock = asyncio.Lock()
         self.last_disconnect_ms = {}
+        self.executors = ServerExecutors.from_config(config)
         modules = initialize_modules(
             self.logger,
             self.config,
-            "VAD" in self.config["selected_module"],
+            False,
             "ASR" in self.config["selected_module"],
             "LLM" in self.config["selected_module"],
             False,
             "Memory" in self.config["selected_module"],
             "Intent" in self.config["selected_module"],
+            "Task" in self.config["selected_module"],
         )
-        self._vad = modules["vad"] if "vad" in modules else None
+        self._vad_pool = VadProviderPool.from_config(self.config, self.logger)
+        self._vad = self._vad_pool
         self._asr = modules["asr"] if "asr" in modules else None
         self._llm = modules["llm"] if "llm" in modules else None
         self._intent = modules["intent"] if "intent" in modules else None
         self._memory = modules["memory"] if "memory" in modules else None
-
+        self._task = modules["task"] if "task" in modules else None
         self.active_connections = set()
 
     async def start(self):
@@ -42,7 +47,11 @@ class WebSocketServer:
         port = int(server_config.get("port", 8000))
 
         async with websockets.serve(
-            self._handle_connection, host, port, process_request=self._http_response
+            self._handle_connection,
+            host,
+            port,
+            process_request=self._http_response,
+            compression=None,
         ):
             await asyncio.Future()
 
@@ -55,8 +64,10 @@ class WebSocketServer:
             self._asr,
             self._llm,
             self._memory,
+            self._task,
             self._intent,
             self,  # 传入server实例
+            self.executors,
         )
         self.active_connections.add(handler)
         try:
@@ -90,6 +101,9 @@ class WebSocketServer:
             # 如果是普通 HTTP 请求，返回 "server is running"
             return websocket.respond(200, "Server is running\n")
 
+    def shutdown(self):
+        self.executors.shutdown()
+
     async def update_config(self) -> bool:
         """更新服务器配置并重新初始化组件
 
@@ -99,7 +113,12 @@ class WebSocketServer:
         try:
             async with self.config_lock:
                 # 重新获取配置
-                new_config = get_config_from_api(self.config)
+                new_config = await self.executors.run_sync(
+                    "profile",
+                    get_config_from_api,
+                    self.config,
+                    timeout=self.executors.timeout_for("profile"),
+                )
                 if new_config is None:
                     self.logger.bind(tag=TAG).error("获取新配置失败")
                     return False
@@ -113,20 +132,31 @@ class WebSocketServer:
                 # 更新配置
                 self.config = new_config
                 # 重新初始化组件
-                modules = initialize_modules(
+                modules = await self.executors.run_sync(
+                    "provider",
+                    initialize_modules,
                     self.logger,
                     new_config,
-                    update_vad,
+                    False,
                     update_asr,
                     "LLM" in new_config["selected_module"],
                     False,
                     "Memory" in new_config["selected_module"],
                     "Intent" in new_config["selected_module"],
+                    "Task" in new_config["selected_module"],
+                    timeout=self.executors.timeout_for("provider"),
                 )
 
                 # 更新组件实例
-                if "vad" in modules:
-                    self._vad = modules["vad"]
+                if update_vad:
+                    self._vad_pool = await self.executors.run_sync(
+                        "provider",
+                        VadProviderPool.from_config,
+                        new_config,
+                        self.logger,
+                        timeout=self.executors.timeout_for("provider"),
+                    )
+                    self._vad = self._vad_pool
                 if "asr" in modules:
                     self._asr = modules["asr"]
                 if "llm" in modules:
@@ -135,8 +165,41 @@ class WebSocketServer:
                     self._intent = modules["intent"]
                 if "memory" in modules:
                     self._memory = modules["memory"]
+                if "task" in modules:
+                    self._task = modules["task"]
                 self.logger.bind(tag=TAG).info(f"更新配置任务执行完毕")
                 return True
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"更新服务器配置失败: {str(e)}")
             return False
+
+    async def claim_device(self, device_id, handler):
+        """Claim a device_id for a connection handler.
+
+        If another handler already holds this device_id, close the old
+        connection first (last-writer-wins / supersede policy).
+        """
+        if not device_id:
+            return
+        async with self.ws_lock:
+            old_handler = self.active_ws_by_device.get(device_id)
+            if old_handler is not None and old_handler is not handler:
+                self.logger.bind(tag=TAG).warning(
+                    f"Device {device_id} already has active connection — superseding"
+                )
+                try:
+                    await old_handler.close()
+                except Exception as e:
+                    self.logger.bind(tag=TAG).error(
+                        f"Failed to close superseded connection for {device_id}: {e}"
+                    )
+            self.active_ws_by_device[device_id] = handler
+
+    async def release_device(self, device_id, handler):
+        """Release a device_id claim, but only if *handler* still owns it."""
+        if not device_id:
+            return
+        async with self.ws_lock:
+            current = self.active_ws_by_device.get(device_id)
+            if current is handler:
+                del self.active_ws_by_device[device_id]

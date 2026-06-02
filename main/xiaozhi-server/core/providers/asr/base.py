@@ -4,6 +4,7 @@ import wave
 import uuid
 import json
 import time
+import shutil
 import queue
 import asyncio
 import traceback
@@ -11,12 +12,14 @@ import threading
 import opuslib_next
 import concurrent.futures
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
 from config.logger import setup_logging
 from typing import Optional, Tuple, List
 from core.handle.receiveAudioHandle import startToChat
 from core.handle.reportHandle import enqueue_asr_report
 from core.utils.util import remove_punctuation_and_length
 from core.handle.receiveAudioHandle import handleAudioMessage
+from services import log_context
 
 TAG = __name__
 logger = setup_logging()
@@ -25,6 +28,72 @@ logger = setup_logging()
 class ASRProviderBase(ABC):
     def __init__(self):
         pass
+
+    def configure_audio_retention(
+        self,
+        config: dict,
+        delete_audio_file: bool,
+    ) -> None:
+        self.delete_audio_file = delete_audio_file
+        self.audio_retention_mode = str(
+            config.get(
+                "audio_retention_mode",
+                "delete" if delete_audio_file else "archive",
+            )
+        ).strip().lower()
+        self.audio_archive_dir = str(
+            config.get("audio_archive_dir") or "data/asr_archive"
+        ).strip()
+        self.audio_manifest_file = str(
+            config.get("audio_manifest_file") or "manifest.jsonl"
+        ).strip()
+
+    def finalize_audio_file(self, file_path: Optional[str], session_id: str) -> Optional[str]:
+        if not file_path or not os.path.exists(file_path):
+            return None
+
+        mode = self.audio_retention_mode
+        if mode == "delete":
+            try:
+                os.remove(file_path)
+                logger.bind(tag=TAG).debug(f"已删除临时音频文件: {file_path}")
+            except Exception as e:
+                logger.bind(tag=TAG).error(f"文件删除失败: {file_path} | 错误: {e}")
+            return None
+
+        if mode == "keep":
+            logger.bind(tag=TAG).info(f"保留ASR音频文件: {file_path}")
+            return file_path
+
+        if mode != "archive":
+            logger.bind(tag=TAG).warning(
+                f"未知 audio_retention_mode={mode}，保留原文件: {file_path}"
+            )
+            return file_path
+
+        archive_root = os.path.abspath(self.audio_archive_dir or "data/asr_archive")
+        date_part = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        archive_dir = os.path.join(archive_root, date_part, session_id)
+        os.makedirs(archive_dir, exist_ok=True)
+        archived_path = os.path.join(archive_dir, os.path.basename(file_path))
+        try:
+            shutil.move(file_path, archived_path)
+            manifest_path = os.path.join(archive_root, self.audio_manifest_file)
+            os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
+            record = {
+                "archivedAt": datetime.now(timezone.utc).isoformat(),
+                "sessionId": session_id,
+                "sourcePath": file_path,
+                "archivedPath": archived_path,
+                "sizeBytes": os.path.getsize(archived_path),
+            }
+            with open(manifest_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            logger.bind(tag=TAG).info(f"已归档ASR音频文件: {archived_path}")
+            return archived_path
+        except Exception as e:
+            logger.bind(tag=TAG).error(f"文件归档失败: {file_path} | 错误: {e}")
+            return file_path
 
     # 打开音频通道
     async def open_audio_channels(self, conn):
@@ -57,18 +126,26 @@ class ASRProviderBase(ABC):
             have_voice = audio_have_voice
         else:
             have_voice = conn.client_have_voice
-        
+
         conn.asr_audio.append(audio)
         if not have_voice and not conn.client_have_voice:
             conn.asr_audio = conn.asr_audio[-10:]
+            release_inactive = getattr(conn, "release_inactive_vad_lease", None)
+            if callable(release_inactive):
+                release_inactive()
             return
 
         if conn.client_voice_stop:
             asr_audio_task = conn.asr_audio.copy()
             conn.asr_audio.clear()
             conn.reset_vad_states()
+            release_vad = getattr(conn, "release_vad_lease", None)
+            if callable(release_vad):
+                release_vad(reset_connection_state=False)
 
-            if len(asr_audio_task) > 15:
+            # Opus packets are handled as ~60 ms frames here, so >3 packets
+            # allows forwarding utterances of roughly 0.2 seconds or longer.
+            if len(asr_audio_task) > 3:
                 await self.handle_voice_stop(conn, asr_audio_task)
 
     # 处理语音停止
@@ -76,23 +153,46 @@ class ASRProviderBase(ABC):
         """并行处理ASR和声纹识别"""
         try:
             total_start_time = time.monotonic()
-            
+
             # 准备音频数据
             if conn.audio_format == "pcm":
                 pcm_data = asr_audio_task
+            elif hasattr(conn, "run_sync"):
+                pcm_data = await conn.run_sync(
+                    "audio",
+                    self.decode_opus,
+                    asr_audio_task,
+                    timeout=getattr(conn, "executor_timeout", lambda _name: 15.0)(
+                        "audio"
+                    ),
+                )
             else:
-                pcm_data = self.decode_opus(asr_audio_task)
-            
+                pcm_data = await asyncio.to_thread(self.decode_opus, asr_audio_task)
+
             combined_pcm_data = b"".join(pcm_data)
-            
+
             # 预先准备WAV数据
             wav_data = None
             if conn.voiceprint_provider and combined_pcm_data:
-                wav_data = self._pcm_to_wav(combined_pcm_data)
-            
+                if hasattr(conn, "run_sync"):
+                    wav_data = await conn.run_sync(
+                        "audio",
+                        self._pcm_to_wav,
+                        combined_pcm_data,
+                        timeout=getattr(conn, "executor_timeout", lambda _name: 15.0)(
+                            "audio"
+                        ),
+                    )
+                else:
+                    wav_data = await asyncio.to_thread(
+                        self._pcm_to_wav,
+                        combined_pcm_data,
+                    )
+
             # 定义ASR任务
             def run_asr():
                 start_time = time.monotonic()
+                device_token = log_context.set_device_id(getattr(conn, "device_id", None))
                 try:
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
@@ -109,7 +209,9 @@ class ASRProviderBase(ABC):
                     end_time = time.monotonic()
                     logger.bind(tag=TAG).error(f"ASR失败: {e}")
                     return ("", None)
-            
+                finally:
+                    log_context.reset_device_id(device_token)
+
             # 定义声纹识别任务
             def run_voiceprint():
                 if not wav_data:
@@ -128,50 +230,72 @@ class ASRProviderBase(ABC):
                 except Exception as e:
                     logger.bind(tag=TAG).error(f"声纹识别失败: {e}")
                     return None
-            
+
             # 使用线程池执行器并行运行
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as thread_executor:
+            thread_executor = getattr(getattr(conn, "executors", None), "audio", None)
+            owns_thread_executor = False
+            if thread_executor is None:
+                thread_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+                owns_thread_executor = True
+            asr_future = None
+            voiceprint_future = None
+            try:
                 asr_future = thread_executor.submit(run_asr)
-                
+
                 if conn.voiceprint_provider and wav_data:
                     voiceprint_future = thread_executor.submit(run_voiceprint)
-                    
+
                     # 等待两个线程都完成
-                    asr_result = asr_future.result(timeout=15)
-                    voiceprint_result = voiceprint_future.result(timeout=15)
-                    
+                    asr_result, voiceprint_result = await asyncio.gather(
+                        asyncio.wait_for(asyncio.wrap_future(asr_future), timeout=15),
+                        asyncio.wait_for(asyncio.wrap_future(voiceprint_future), timeout=15),
+                    )
+
                     results = {"asr": asr_result, "voiceprint": voiceprint_result}
                 else:
-                    asr_result = asr_future.result(timeout=15)
+                    asr_result = await asyncio.wait_for(
+                        asyncio.wrap_future(asr_future),
+                        timeout=15,
+                    )
                     results = {"asr": asr_result, "voiceprint": None}
-            
-            
+            except asyncio.TimeoutError:
+                logger.bind(tag=TAG).error("ASR/voiceprint recognition timed out")
+                if asr_future:
+                    asr_future.cancel()
+                if voiceprint_future:
+                    voiceprint_future.cancel()
+                results = {"asr": ("", None), "voiceprint": None}
+            finally:
+                if owns_thread_executor:
+                    thread_executor.shutdown(wait=False, cancel_futures=True)
+
+
             # 处理结果
             raw_text, _ = results.get("asr", ("", None))
             speaker_name = results.get("voiceprint", None)
-            
+
             # 记录识别结果
             if raw_text:
                 logger.bind(tag=TAG).info(f"识别文本: {raw_text}")
             if speaker_name:
                 logger.bind(tag=TAG).info(f"识别说话人: {speaker_name}")
-            
+
             # 性能监控
             total_time = time.monotonic() - total_start_time
             logger.bind(tag=TAG).info(f"总处理耗时: {total_time:.3f}s")
-            
+
             # 检查文本长度
             text_len, _ = remove_punctuation_and_length(raw_text)
             self.stop_ws_connection()
-            
+
             if text_len > 0:
                 # 构建包含说话人信息的JSON字符串
                 enhanced_text = self._build_enhanced_text(raw_text, speaker_name)
-                
+
                 # 使用自定义模块进行上报
                 await startToChat(conn, enhanced_text)
                 enqueue_asr_report(conn, enhanced_text, asr_audio_task)
-                
+
         except Exception as e:
             logger.bind(tag=TAG).error(f"处理语音停止失败: {e}")
             import traceback
@@ -192,11 +316,11 @@ class ASRProviderBase(ABC):
         if len(pcm_data) == 0:
             logger.bind(tag=TAG).warning("PCM数据为空，无法转换WAV")
             return b""
-        
+
         # 确保数据长度是偶数（16位音频）
         if len(pcm_data) % 2 != 0:
             pcm_data = pcm_data[:-1]
-        
+
         # 创建WAV文件头
         wav_buffer = io.BytesIO()
         try:
@@ -205,10 +329,10 @@ class ASRProviderBase(ABC):
                 wav_file.setsampwidth(2)      # 16位
                 wav_file.setframerate(16000)  # 16kHz采样率
                 wav_file.writeframes(pcm_data)
-            
+
             wav_buffer.seek(0)
             wav_data = wav_buffer.read()
-            
+
             return wav_data
         except Exception as e:
             logger.bind(tag=TAG).error(f"WAV转换失败: {e}")
@@ -245,23 +369,23 @@ class ASRProviderBase(ABC):
             decoder = opuslib_next.Decoder(16000, 1)
             pcm_data = []
             buffer_size = 960  # 每次处理960个采样点 (60ms at 16kHz)
-            
+
             for i, opus_packet in enumerate(opus_data):
                 try:
                     if not opus_packet or len(opus_packet) == 0:
                         continue
-                    
+
                     pcm_frame = decoder.decode(opus_packet, buffer_size)
                     if pcm_frame and len(pcm_frame) > 0:
                         pcm_data.append(pcm_frame)
-                        
+
                 except opuslib_next.OpusError as e:
                     logger.bind(tag=TAG).warning(f"Opus解码错误，跳过数据包 {i}: {e}")
                 except Exception as e:
                     logger.bind(tag=TAG).error(f"音频处理错误，数据包 {i}: {e}")
-            
+
             return pcm_data
-            
+
         except Exception as e:
             logger.bind(tag=TAG).error(f"音频解码过程发生错误: {e}")
             return []

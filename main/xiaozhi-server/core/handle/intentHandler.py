@@ -1,15 +1,72 @@
 import json
+import random
 import uuid
 import asyncio
-from core.utils.dialogue import Message
+import concurrent.futures
 from core.providers.tts.dto.dto import ContentType
 from core.handle.helloHandle import checkWakeupWords
 from plugins_func.register import Action, ActionResponse
 from core.handle.sendAudioHandle import send_stt_message
+from core.utils.dialogue import Message
 from core.utils.util import remove_punctuation_and_length
-from core.providers.tts.dto.dto import TTSMessageDTO, SentenceType
+from core.providers.tts.dto.dto import SentenceType, TTSMessageDTO
 
 TAG = __name__
+MAGIC_SPELL = "Milu milu on the wall, who's the fairest of them all"
+MAGIC_SPELL_REPLIES = (
+    "Hmm... I checked... and it says... me",
+    "Wait wait- I need better lighting for this question...",
+    "The wall said 'loading...' hold on...",
+    "The wall says... ERROR: TOO POWERFUL",
+    "Can I pick you anyway?",
+)
+
+def _get_match_variants(text, filtered_text):
+    raw = (text or "").strip().lower()
+    squashed = (filtered_text or "").strip().lower()
+    return raw, squashed
+
+
+def _normalize_magic_spell_text(text: str) -> str:
+    normalized = (text or "").strip().lower()
+    replacements = (
+        ("who's", "who"),
+        ("who is", "who"),
+        ("whos", "who"),
+        ("who'", "who"),
+    )
+    for old, new in replacements:
+        normalized = normalized.replace(old, new)
+    return remove_punctuation_and_length(normalized)[1].lower()
+
+
+def _is_magic_spell(text, filtered_text) -> bool:
+    raw, squashed = _get_match_variants(text, filtered_text)
+    normalized_spell = _normalize_magic_spell_text(MAGIC_SPELL)
+    normalized_text = _normalize_magic_spell_text(text)
+    spell_variants = (
+        normalized_spell,
+        _normalize_magic_spell_text("Milu milu on the wall, who the fairest of them all"),
+        _normalize_magic_spell_text("Milu milu on the wall, who is the fairest of them all"),
+    )
+    anchor_phrases = (
+        ("milu milu", "on the wall", "fairest", "them all"),
+        ("milu milu", "wall", "fairest", "all"),
+    )
+    return (
+        MAGIC_SPELL.lower() in raw
+        or any(variant in squashed for variant in spell_variants)
+        or any(variant in normalized_text for variant in spell_variants)
+        or any(all(anchor in normalized_text for anchor in anchors) for anchors in anchor_phrases)
+    )
+
+
+async def _trigger_magic_spell(conn, original_text: str):
+    await send_stt_message(conn, original_text)
+    conn.client_abort = False
+    reply = random.choice(MAGIC_SPELL_REPLIES)
+    speak_txt(conn, reply)
+    conn.logger.bind(tag=TAG).info("触发镜子咒语彩蛋回复")
 
 
 async def handle_user_intent(conn, text):
@@ -30,6 +87,10 @@ async def handle_user_intent(conn, text):
 
     # 检查是否是唤醒词
     if await checkWakeupWords(conn, filtered_text):
+        return True
+
+    if _is_magic_spell(text, filtered_text):
+        await _trigger_magic_spell(conn, text)
         return True
 
     if conn.intent_type == "function_call":
@@ -94,10 +155,10 @@ async def process_intent_result(conn, intent_result, original_text):
             if function_name == "result_for_context":
                 await send_stt_message(conn, original_text)
                 conn.client_abort = False
-                
+
                 def process_context_result():
                     conn.dialogue.put(Message(role="user", content=original_text))
-                    
+
                     from core.utils.current_time import get_current_time_info
                     from core.utils.firestore_client import get_timezone_for_device
 
@@ -106,17 +167,17 @@ async def process_intent_result(conn, intent_result, original_text):
                     except Exception:
                         tz = None
                     current_time, today_date, today_weekday, lunar_date = get_current_time_info()
-                    
+
                     # 构建带上下文的基础提示
                     context_prompt = f"""当前时间：{current_time}
                                         今天日期：{today_date} ({today_weekday})
                                         今天农历：{lunar_date}
 
                                         请根据以上信息回答用户的问题：{original_text}"""
-                    
+
                     response = conn.intent.replyResult(context_prompt, original_text)
                     speak_txt(conn, response)
-                
+
                 conn.executor.submit(process_context_result)
                 return True
 
@@ -144,12 +205,27 @@ async def process_intent_result(conn, intent_result, original_text):
 
                 # 使用统一工具处理器处理所有工具调用
                 try:
-                    result = asyncio.run_coroutine_threadsafe(
+                    future = asyncio.run_coroutine_threadsafe(
                         conn.func_handler.handle_llm_function_call(
                             conn, function_call_data
                         ),
                         conn.loop,
-                    ).result()
+                    )
+                    timeout_for = getattr(conn, "executor_timeout", lambda _name: 20.0)
+                    result = future.result(timeout=timeout_for("tool"))
+                except concurrent.futures.TimeoutError:
+                    try:
+                        future.cancel()
+                    except Exception:
+                        pass
+                    conn.logger.bind(tag=TAG).error(
+                        f"宸ュ叿璋冪敤瓒呮椂: {function_name}"
+                    )
+                    result = ActionResponse(
+                        action=Action.ERROR,
+                        result="Tool call timed out",
+                        response="Tool call timed out",
+                    )
                 except Exception as e:
                     conn.logger.bind(tag=TAG).error(f"工具调用失败: {e}")
                     result = ActionResponse(
@@ -194,6 +270,7 @@ async def process_intent_result(conn, intent_result, original_text):
 
 
 def speak_txt(conn, text):
+    conn.tts_MessageText = text
     conn.tts.tts_text_queue.put(
         TTSMessageDTO(
             sentence_id=conn.sentence_id,
@@ -210,3 +287,26 @@ def speak_txt(conn, text):
         )
     )
     conn.dialogue.put(Message(role="assistant", content=text))
+    if getattr(conn, "_session_created", False) and text and text.strip():
+        conn.turn_index += 1
+        conn.chat_store.insert_turn(
+            session_id=conn.session_id,
+            turn_index=conn.turn_index,
+            speaker="assistant",
+            text=text,
+        )
+    if getattr(conn, "websocket", None) and text and text.strip():
+        try:
+            llm_message = {
+                "type": "llm",
+                "text": text,
+                "session_id": conn.session_id,
+            }
+            asyncio.run_coroutine_threadsafe(
+                conn.websocket.send(json.dumps(llm_message, ensure_ascii=False)),
+                conn.loop,
+            )
+        except Exception as e:
+            conn.logger.bind(tag=TAG).warning(
+                f"Failed to send direct response to frontend: {e}"
+            )

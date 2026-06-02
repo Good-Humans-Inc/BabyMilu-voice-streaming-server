@@ -4,6 +4,7 @@ from config.logger import setup_logging
 from typing import Optional, Tuple, List
 from core.providers.asr.dto.dto import InterfaceType
 from core.providers.asr.base import ASRProviderBase
+from services import log_context
 
 import requests
 
@@ -12,13 +13,15 @@ logger = setup_logging()
 
 class ASRProvider(ASRProviderBase):
     def __init__(self, config: dict, delete_audio_file: bool):
+        super().__init__()
         self.interface_type = InterfaceType.NON_STREAM
         self.api_key = config.get("api_key")
         self.api_url = config.get("base_url")
         self.model = config.get("model_name")        
         self.output_dir = config.get("output_dir")
         self.language = config.get("language")  # Optional: ISO-639-1 format (e.g., "en")
-        self.delete_audio_file = delete_audio_file
+        self.timeout_seconds = float(config.get("timeout_seconds", 20))
+        self.configure_audio_retention(config, delete_audio_file)
 
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -36,7 +39,8 @@ class ASRProvider(ASRProviderBase):
                 f"音频文件保存耗时: {time.time() - start_time:.3f}s | 路径: {file_path}"
             )
 
-            logger.bind(tag=TAG).info(f"file path: {file_path}")
+            device_id = log_context.get_device_id() or "-"
+            logger.bind(tag=TAG).info(f"{device_id} | file path: {file_path}")
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
             }
@@ -61,7 +65,8 @@ class ASRProvider(ASRProviderBase):
                     self.api_url,
                     files=files,
                     data=data,
-                    headers=headers
+                    headers=headers,
+                    timeout=self.timeout_seconds,
                 )
                 logger.bind(tag=TAG).debug(
                     f"语音识别耗时: {time.time() - start_time:.3f}s | 结果: {response.text}"
@@ -77,11 +82,5 @@ class ASRProvider(ASRProviderBase):
             logger.bind(tag=TAG).error(f"语音识别失败: {e}")
             return "", None
         finally:
-            # 文件清理逻辑
-            if self.delete_audio_file and file_path and os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                    logger.bind(tag=TAG).debug(f"已删除临时音频文件: {file_path}")
-                except Exception as e:
-                    logger.bind(tag=TAG).error(f"文件删除失败: {file_path} | 错误: {e}")
+            self.finalize_audio_file(file_path, session_id)
         

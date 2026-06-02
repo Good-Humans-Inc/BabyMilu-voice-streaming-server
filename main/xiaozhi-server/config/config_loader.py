@@ -100,7 +100,22 @@ def get_private_config_from_api(config, device_id, client_id):
     if profile.get("prompt"):
         private_config["prompt"] = profile["prompt"]
 
-    # TTS override (CustomTTS default for stability)
+    selected_tts_name = (config.get("selected_module") or {}).get("TTS")
+    selected_tts_config = (config.get("TTS") or {}).get(selected_tts_name, {})
+    selected_tts_type = selected_tts_config.get("type", selected_tts_name)
+
+    # Fish Audio migration path:
+    # If the base config already selected Fish Audio, don't override users back onto
+    # legacy ElevenLabs settings that may still live on the device profile.
+    if selected_tts_type == "fish_audio":
+        private_config["selected_module"]["TTS"] = selected_tts_name or "FishAudio"
+        if selected_tts_name and selected_tts_config:
+            private_config.setdefault("TTS", {})[selected_tts_name] = dict(
+                selected_tts_config
+            )
+        return private_config
+
+    # Legacy TTS override (CustomTTS default for stability)
     eleven_key = profile.get("elevenlabs_api_key") or fs_conf.get("elevenlabs_api_key", "")
     voice_id = profile.get("voice_id")
     tts_mode = profile.get("tts_mode", "custom").lower()

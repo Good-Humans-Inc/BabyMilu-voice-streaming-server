@@ -67,6 +67,12 @@ class SimpleHttpServer:
                 ]
             )
 
+            # Serve the test frontend as static files
+            test_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "test")
+            if os.path.isdir(test_dir):
+                app.router.add_static("/test/", path=test_dir, show_index=True)
+                self.logger.bind(tag=TAG).info("Test frontend served at http://{}:{}/test/test_page.html", host, port)
+
             # 运行服务
             runner = web.AppRunner(app)
             await runner.setup()

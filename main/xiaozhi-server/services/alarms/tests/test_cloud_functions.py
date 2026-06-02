@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from services.alarms.cloud import functions as cloud_functions
-from services.alarms import scheduler, tasks
+from services.alarms import reminder_push_job, scheduler, tasks
 from services.session_context import models as session_models
 
 
@@ -51,6 +51,18 @@ def test_scan_due_alarms_triggers_publish(monkeypatch):
         return True
 
     monkeypatch.setattr(cloud_functions, "publish_ws_start", fake_publish)
+    finalized = []
+    rolled_back = []
+    monkeypatch.setattr(
+        cloud_functions.scheduler,
+        "finalize_wake_request",
+        lambda wake_request, now=None: finalized.append(wake_request.target.device_id),
+    )
+    monkeypatch.setattr(
+        cloud_functions.scheduler,
+        "rollback_wake_request",
+        lambda wake_request: rolled_back.append(wake_request.target.device_id),
+    )
     monkeypatch.setenv("ALARM_WS_URL", "ws://fake")
     monkeypatch.setenv("ALARM_MQTT_URL", "mqtt://fake")
 
@@ -63,4 +75,174 @@ def test_scan_due_alarms_triggers_publish(monkeypatch):
     assert len(published) == 2
     assert published[0][1] == "DEV1"
     assert published[1][1] == "DEV2"
+    assert finalized == ["DEV1", "DEV2"]
+    assert rolled_back == []
 
+
+def test_scan_due_alarms_rolls_back_on_publish_failure(monkeypatch):
+    fake_requests = [_DummyWakeRequest("DEV1")]
+    monkeypatch.setattr(
+        cloud_functions.scheduler,
+        "prepare_wake_requests",
+        lambda now, lookahead: fake_requests,
+    )
+    monkeypatch.setattr(
+        cloud_functions, "publish_ws_start", lambda broker, device_id, ws_url, version=3: False
+    )
+    finalized = []
+    rolled_back = []
+    monkeypatch.setattr(
+        cloud_functions.scheduler,
+        "finalize_wake_request",
+        lambda wake_request, now=None: finalized.append(wake_request.target.device_id),
+    )
+    monkeypatch.setattr(
+        cloud_functions.scheduler,
+        "rollback_wake_request",
+        lambda wake_request: rolled_back.append(wake_request.target.device_id),
+    )
+    monkeypatch.setenv("ALARM_WS_URL", "ws://fake")
+    monkeypatch.setenv("ALARM_MQTT_URL", "mqtt://fake")
+
+    response = cloud_functions.scan_due_alarms(request={})  # type: ignore[arg-type]
+
+    assert response["ok"] is True
+    assert response["count"] == 1
+    assert response["triggered"] == 0
+    assert finalized == []
+    assert rolled_back == ["DEV1"]
+
+
+def test_scan_due_alarms_filters_devices_by_allowlist(monkeypatch):
+    fake_requests = [_DummyWakeRequest("DEV1"), _DummyWakeRequest("DEV2")]
+    monkeypatch.setattr(
+        cloud_functions.scheduler,
+        "prepare_wake_requests",
+        lambda now, lookahead: fake_requests,
+    )
+    monkeypatch.setenv("ALARM_DEVICE_ALLOWLIST", "DEV1")
+    monkeypatch.setenv("ALARM_WS_URL", "ws://fake")
+    monkeypatch.setenv("ALARM_MQTT_URL", "mqtt://fake")
+
+    published = []
+    monkeypatch.setattr(
+        cloud_functions,
+        "publish_ws_start",
+        lambda broker, device_id, ws_url, version=3: published.append(device_id) or True,
+    )
+    finalized = []
+    rolled_back = []
+    monkeypatch.setattr(
+        cloud_functions.scheduler,
+        "finalize_wake_request",
+        lambda wake_request, now=None: finalized.append(wake_request.target.device_id),
+    )
+    monkeypatch.setattr(
+        cloud_functions.scheduler,
+        "rollback_wake_request",
+        lambda wake_request: rolled_back.append(wake_request.target.device_id),
+    )
+
+    response = cloud_functions.scan_due_alarms(request={})  # type: ignore[arg-type]
+
+    assert response["count"] == 2
+    assert response["triggered"] == 1
+    assert published == ["DEV1"]
+    assert finalized == ["DEV1"]
+    assert rolled_back == ["DEV2"]
+
+
+def test_scan_due_alarms_honors_denylist(monkeypatch):
+    fake_requests = [_DummyWakeRequest("DEV1"), _DummyWakeRequest("DEV2")]
+    monkeypatch.setattr(
+        cloud_functions.scheduler,
+        "prepare_wake_requests",
+        lambda now, lookahead: fake_requests,
+    )
+    monkeypatch.setenv("ALARM_DEVICE_DENYLIST", "DEV2")
+    monkeypatch.setenv("ALARM_WS_URL", "ws://fake")
+    monkeypatch.setenv("ALARM_MQTT_URL", "mqtt://fake")
+
+    published = []
+    monkeypatch.setattr(
+        cloud_functions,
+        "publish_ws_start",
+        lambda broker, device_id, ws_url, version=3: published.append(device_id) or True,
+    )
+    finalized = []
+    rolled_back = []
+    monkeypatch.setattr(
+        cloud_functions.scheduler,
+        "finalize_wake_request",
+        lambda wake_request, now=None: finalized.append(wake_request.target.device_id),
+    )
+    monkeypatch.setattr(
+        cloud_functions.scheduler,
+        "rollback_wake_request",
+        lambda wake_request: rolled_back.append(wake_request.target.device_id),
+    )
+
+    response = cloud_functions.scan_due_alarms(request={})  # type: ignore[arg-type]
+
+    assert response["count"] == 2
+    assert response["triggered"] == 1
+    assert published == ["DEV1"]
+    assert finalized == ["DEV1"]
+    assert rolled_back == ["DEV2"]
+
+
+def test_scan_due_scheduled_items_combines_alarm_and_reminder_results(monkeypatch):
+    monkeypatch.setattr(
+        cloud_functions,
+        "scan_due_alarms",
+        lambda request: {"ok": True, "count": 2, "triggered": 1, "results": []},
+    )
+    captured = {}
+
+    def fake_run_send_reminder_push_job(*, execute=False, now=None, client=None):
+        captured["execute"] = execute
+        captured["now"] = now
+        captured["client"] = client
+        return {
+            "ok": True,
+            "count": 3,
+            "triggered": 2,
+            "skipped": 1,
+            "execute": execute,
+            "results": [],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(
+        reminder_push_job,
+        "run_send_reminder_push_job",
+        fake_run_send_reminder_push_job,
+    )
+    monkeypatch.setenv("INCLUDE_REMINDERS_IN_UNIFIED_SCAN", "true")
+    monkeypatch.setenv("REMINDER_EXECUTE", "false")
+
+    response = cloud_functions.scan_due_scheduled_items(request={})  # type: ignore[arg-type]
+
+    assert response["ok"] is True
+    assert response["alarms"]["count"] == 2
+    assert response["reminders"]["count"] == 3
+    assert response["totals"]["count"] == 5
+    assert response["totals"]["triggered"] == 3
+    assert captured["execute"] is False
+    assert captured["now"] is not None
+
+
+def test_scan_due_scheduled_items_can_disable_reminders(monkeypatch):
+    monkeypatch.setattr(
+        cloud_functions,
+        "scan_due_alarms",
+        lambda request: {"ok": True, "count": 1, "triggered": 1, "results": []},
+    )
+    monkeypatch.setenv("INCLUDE_REMINDERS_IN_UNIFIED_SCAN", "false")
+
+    response = cloud_functions.scan_due_scheduled_items(request={})  # type: ignore[arg-type]
+
+    assert response["ok"] is True
+    assert response["reminders"]["disabled"] is True
+    assert response["reminders"]["count"] == 0
+    assert response["totals"]["count"] == 1

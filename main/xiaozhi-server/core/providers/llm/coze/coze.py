@@ -73,3 +73,10 @@ class LLMProvider(LLMProviderBase):
 
         for token in self.response(session_id, dialogue):
             yield token, None
+
+    def release_conversation(self, session_id: str):
+        if session_id in self.session_conversation_map:
+            try:
+                del self.session_conversation_map[session_id]
+            except Exception:
+                pass

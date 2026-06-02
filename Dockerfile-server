@@ -11,9 +11,15 @@ RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
 
 COPY main/xiaozhi-server/requirements.txt .
 
-# 安装Python依赖，使用并行下载
+# 安装Python依赖：
+# 1) 先固定安装 CPU-only PyTorch，避免在 Linux 上拉取 CUDA/cuDNN 大包
+# 2) 再安装其余依赖（从 requirements 中排除 torch/torchaudio）
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir -r requirements.txt --default-timeout=120 --retries 5
+    pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cpu \
+        torch==2.2.2+cpu torchaudio==2.2.2+cpu && \
+    grep -vE '^(torch|torchaudio)==' requirements.txt > requirements.no_torch.txt && \
+    pip install --no-cache-dir -r requirements.no_torch.txt --default-timeout=120 --retries 5
 
 # 第二阶段：生产镜像
 FROM python:3.10-slim

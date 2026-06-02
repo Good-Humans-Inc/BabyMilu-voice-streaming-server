@@ -51,7 +51,7 @@ def change_role(conn, role: str, role_name: str):
     if role not in prompts:
         return ActionResponse(action=Action.RESPONSE, result="切换角色失败", response="不支持的角色")
     new_prompt = prompts[role].replace("{{assistant_name}}", role_name)
-    conn.change_system_prompt(new_prompt)
+    conn.change_system_prompt(new_prompt, prompt_label="role_change")
     logger.bind(tag=TAG).info(f"准备切换角色:{role},角色名字:{role_name}")
     res = f"切换角色成功,我是{role}{role_name}"
     return ActionResponse(action=Action.RESPONSE, result="切换角色已处理", response=res)

@@ -317,6 +317,20 @@ def audio_bytes_to_data_stream(audio_bytes, file_type, is_opus, callback: Callab
     pcm_to_data_stream(raw_data, is_opus, callback)
 
 
+def audio_bytes_to_data(audio_bytes, file_type, is_opus=True) -> list[bytes]:
+    """
+    Convert in-memory audio bytes (e.g. mp3 fetched from Supabase Storage)
+    into Opus/PCM frames using the same path as local file playback.
+    """
+    datas = []
+
+    def _collect(frame):
+        datas.append(frame)
+
+    audio_bytes_to_data_stream(audio_bytes, file_type, is_opus, _collect)
+    return datas
+
+
 def pcm_to_data_stream(raw_data, is_opus=True, callback: Callable[[Any], Any] = None):
     # 初始化Opus编码器
     encoder = opuslib_next.Encoder(16000, 1, opuslib_next.APPLICATION_AUDIO)
