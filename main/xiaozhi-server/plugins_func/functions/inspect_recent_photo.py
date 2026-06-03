@@ -11,6 +11,7 @@ import mimetypes
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 from google.cloud import firestore
@@ -246,6 +247,26 @@ def _select_photo_timestamp_field(photo: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _cache_busted_photo_url(photo_url: str) -> str:
+    parts = urlsplit(photo_url)
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    query.append(
+        (
+            "_recent_photo_cache_bust",
+            str(int(_utc_now().timestamp() * 1000)),
+        )
+    )
+    return urlunsplit(
+        (
+            parts.scheme,
+            parts.netloc,
+            parts.path,
+            urlencode(query),
+            parts.fragment,
+        )
+    )
+
+
 def _select_recent_photo(
     photos: Iterable[Dict[str, Any]],
     *,
@@ -371,8 +392,9 @@ def _download_image_as_data_url(photo_url: str) -> str:
         )
         return photo_url
 
+    request_url = _cache_busted_photo_url(photo_url)
     response = requests.get(
-        photo_url,
+        request_url,
         timeout=20,
         headers={
             "Cache-Control": "no-cache",
