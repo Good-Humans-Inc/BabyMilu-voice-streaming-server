@@ -63,8 +63,6 @@ TAG = __name__
 TOOL_WAIT_PLACEHOLDERS = {
     "inspect_recent_magic_camera_photo": "hmmm",
 }
-# TEMP TEST OVERRIDE: set to None to restore normal device-id handling.
-TEMP_FORCE_DEVICE_ID = "90:e5:b1:a8:ac:d0"
 
 auto_import_modules("plugins_func.functions")
 
@@ -681,14 +679,6 @@ class ConnectionHandler:
                     await ws.send("端口正常，如需测试连接，请使用test_page.html")
                     await self.close(ws)
                     return
-
-            if TEMP_FORCE_DEVICE_ID:
-                original_device_id = self.headers.get("device-id")
-                self.headers["device-id"] = TEMP_FORCE_DEVICE_ID
-                self.headers["client-id"] = TEMP_FORCE_DEVICE_ID
-                self.logger.bind(tag=TAG).warning(
-                    f"TEMP_FORCE_DEVICE_ID active: {original_device_id} -> {TEMP_FORCE_DEVICE_ID}"
-                )
 
             real_ip = self.headers.get("x-real-ip") or self.headers.get(
                 "x-forwarded-for"

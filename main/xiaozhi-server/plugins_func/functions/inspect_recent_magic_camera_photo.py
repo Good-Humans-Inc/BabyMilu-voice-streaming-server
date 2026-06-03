@@ -25,9 +25,7 @@ from plugins_func.register import Action, ActionResponse, ToolType, register_fun
 TAG = __name__
 logger = setup_logging()
 
-# TEMP TEST OVERRIDE: default to 0 to scan all returned moments/photos.
-# Restore to "24" after testing the Magic Camera Firestore migration.
-RECENCY_WINDOW_HOURS = int(os.environ.get("MAGIC_CAMERA_LOOKBACK_HOURS", "0"))
+RECENCY_WINDOW_HOURS = int(os.environ.get("MAGIC_CAMERA_LOOKBACK_HOURS", "24"))
 PHOTO_QUERY_LIMIT = int(os.environ.get("MAGIC_CAMERA_QUERY_LIMIT", "20"))
 OPENAI_MODEL = os.environ.get("MAGIC_CAMERA_INSPECT_MODEL", "gpt-4o-mini").strip()
 PHOTO_SOURCE_COLLECTIONS = ("moments", "photos")
@@ -250,33 +248,6 @@ def _select_recent_magic_photo(
     return candidates[0][1]
 
 
-def _summarize_photo_candidates(photos: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
-    summary = {
-        "total": 0,
-        "deleted": 0,
-        "missing_timestamp": 0,
-        "missing_url": 0,
-        "usable": 0,
-        "collections": {},
-    }
-    for photo in photos:
-        summary["total"] += 1
-        source_collection = str(photo.get("source_collection") or "unknown")
-        collections = summary["collections"]
-        collections[source_collection] = collections.get(source_collection, 0) + 1
-        if photo.get("deletedAt"):
-            summary["deleted"] += 1
-            continue
-        if _select_photo_timestamp(photo) is None:
-            summary["missing_timestamp"] += 1
-            continue
-        if not _select_photo_url(photo):
-            summary["missing_url"] += 1
-            continue
-        summary["usable"] += 1
-    return summary
-
-
 def _load_collection_items(
     uid: str,
     collection_name: str,
@@ -307,12 +278,7 @@ def _load_collection_items(
 def _load_candidate_photos(uid: str, *, limit: int = PHOTO_QUERY_LIMIT) -> List[Dict[str, Any]]:
     photos: List[Dict[str, Any]] = []
     for collection_name in PHOTO_SOURCE_COLLECTIONS:
-        collection_items = _load_collection_items(uid, collection_name, limit=limit)
-        logger.bind(tag=TAG).info(
-            f"Magic Camera loaded {len(collection_items)} docs from "
-            f"users/{uid}/{collection_name}"
-        )
-        photos.extend(collection_items)
+        photos.extend(_load_collection_items(uid, collection_name, limit=limit))
     return photos
 
 
@@ -487,11 +453,6 @@ def _build_tool_result(payload: Dict[str, Any]) -> str:
 )
 def inspect_recent_magic_camera_photo(conn) -> ActionResponse:
     uid = get_owner_phone_for_device(conn.device_id)
-    logger.bind(tag=TAG).info(
-        f"Magic Camera inspection lookup: device_id={conn.device_id}, "
-        f"owner_phone={uid}, lookback_hours={RECENCY_WINDOW_HOURS}, "
-        f"query_limit={PHOTO_QUERY_LIMIT}, collections={PHOTO_SOURCE_COLLECTIONS}"
-    )
     if not uid:
         payload = {
             "status": "no_match",
@@ -504,11 +465,6 @@ def inspect_recent_magic_camera_photo(conn) -> ActionResponse:
 
     try:
         photos = _load_candidate_photos(uid)
-        candidate_summary = _summarize_photo_candidates(photos)
-        logger.bind(tag=TAG).info(
-            "Magic Camera candidate summary: "
-            f"{json.dumps(candidate_summary, ensure_ascii=False)}"
-        )
         photo = _select_recent_magic_photo(photos)
         if not photo:
             payload = {
@@ -517,7 +473,6 @@ def inspect_recent_magic_camera_photo(conn) -> ActionResponse:
                 "reason": "No usable Magic Camera photo or moment image was found.",
                 "recency_window_hours": RECENCY_WINDOW_HOURS,
                 "source_collections": list(PHOTO_SOURCE_COLLECTIONS),
-                "candidate_summary": candidate_summary,
             }
             return ActionResponse(action=Action.REQLLM, result=_build_tool_result(payload))
 
@@ -529,16 +484,11 @@ def inspect_recent_magic_camera_photo(conn) -> ActionResponse:
                 "reason": "A Magic Camera photo or moment exists, but no usable image URL was found.",
                 "recency_window_hours": RECENCY_WINDOW_HOURS,
                 "source_collections": list(PHOTO_SOURCE_COLLECTIONS),
-                "candidate_summary": candidate_summary,
             }
             return ActionResponse(action=Action.REQLLM, result=_build_tool_result(payload))
 
         analysis = _analyze_magic_camera_photo(photo_url, conn)
         created_at = _normalize_datetime(photo.get("createdAt"))
-        logger.bind(tag=TAG).info(
-            f"Magic Camera selected doc: collection={photo.get('source_collection')}, "
-            f"id={photo.get('id')}, created_at={created_at}, url_field_present=True"
-        )
         payload = {
             "status": "found",
             "photo_found": True,
