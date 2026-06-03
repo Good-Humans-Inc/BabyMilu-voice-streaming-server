@@ -25,7 +25,9 @@ from plugins_func.register import Action, ActionResponse, ToolType, register_fun
 TAG = __name__
 logger = setup_logging()
 
-RECENCY_WINDOW_HOURS = int(os.environ.get("MAGIC_CAMERA_LOOKBACK_HOURS", "24"))
+# TEMP TEST OVERRIDE: default to 0 to scan all returned moments/photos.
+# Restore to "24" after testing the Magic Camera Firestore migration.
+RECENCY_WINDOW_HOURS = int(os.environ.get("MAGIC_CAMERA_LOOKBACK_HOURS", "0"))
 PHOTO_QUERY_LIMIT = int(os.environ.get("MAGIC_CAMERA_QUERY_LIMIT", "20"))
 OPENAI_MODEL = os.environ.get("MAGIC_CAMERA_INSPECT_MODEL", "gpt-4o-mini").strip()
 PHOTO_SOURCE_COLLECTIONS = ("moments", "photos")
