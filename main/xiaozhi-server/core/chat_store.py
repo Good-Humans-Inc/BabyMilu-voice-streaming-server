@@ -266,19 +266,11 @@ class SQLiteChatStore:
                 """
                 UPDATE sessions
                 SET end_time = ?,
-<<<<<<< HEAD
                     last_active_at = ?,
                     analysis_status = 'pending'
                 WHERE session_id = ?
                 """,
                 (datetime.utcnow(), datetime.utcnow(), session_id),
-=======
-                    analysis_status = 'pending',
-                    memory_status = 'pending'
-                WHERE session_id = ?
-                """,
-                (_now_iso(), session_id),
->>>>>>> 305138bd0a2dd51d0bb90ee7e060fae9c5329905
             )
 
             if self.logger:
@@ -328,7 +320,6 @@ class SQLiteChatStore:
                     f"[ChatStore:sqlite] update_session_conversation_id rowcount={cur.rowcount}"
                 )
 
-<<<<<<< HEAD
     def update_token_usage(self, session_id: str, token_usage: int):
         if token_usage is None:
             return
@@ -352,7 +343,6 @@ class SQLiteChatStore:
                     f"[ChatStore] update_token_usage rowcount={cur.rowcount}"
                 )
 
-=======
     def ensure_memory_profile_identity(self, user_id: str, device_id: str = ""):
         return
 
@@ -991,4 +981,3 @@ class ChatStore:
                     f"[ChatStore] ensure_character_memory_record failed for character_id={character_id}: {e}"
                 )
         return False
->>>>>>> 305138bd0a2dd51d0bb90ee7e060fae9c5329905
