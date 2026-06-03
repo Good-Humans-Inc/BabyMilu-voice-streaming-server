@@ -138,7 +138,6 @@ class LLMProvider(LLMProviderBase):
             return self.ensure_conversation(session_id)
 
     def response(self, session_id, dialogue, **kwargs):
-<<<<<<< HEAD
         try:
             is_active = True
             force_stateless = kwargs.get("stateless", self.stateless_default)
@@ -208,62 +207,6 @@ class LLMProvider(LLMProviderBase):
 
         except Exception as e:
             logger.bind(tag=TAG).error(f"Error in response generation: {e}")
-=======
-        last_exc = None
-        for attempt in range(_MAX_RETRIES):
-            try:
-                is_active = True
-                force_stateless = kwargs.get("stateless", self.stateless_default)
-                conv_id = None if force_stateless else self.ensure_conversation(session_id)
-                instructions = kwargs.get("instructions")
-                extra_inputs = kwargs.get("extra_inputs", [])
-                
-                final_input = list(dialogue) + list(extra_inputs) if extra_inputs else dialogue
-                
-                with self.client.responses.stream(
-                    model=self.model_name,
-                    input=final_input,
-                    instructions=instructions,
-                    conversation=conv_id,
-                    store=bool(conv_id),
-                ) as stream:
-                    for event in stream:
-                        if event.type == "response.output_text.delta":
-                            delta = event.delta or ""
-                            if not delta:
-                                continue
-                            
-                            if is_active:
-                                if "<think>" in delta:
-                                    idx = delta.find("<think>")
-                                    head = delta[:idx]
-                                    if head:
-                                        yield head
-                                    is_active = False
-                                else:
-                                    yield delta
-                            else:
-                                if "</think>" in delta:
-                                    idx = delta.rfind("</think>")
-                                    tail = delta[idx + len("</think>"):]
-                                    is_active = True
-                                    if tail:
-                                        yield tail
-                        elif event.type == "response.completed":
-                            break
-                return  # success — exit retry loop
-
-            except Exception as e:
-                last_exc = e
-                if _is_retryable(e) and attempt < _MAX_RETRIES - 1:
-                    delay = _RETRY_BASE_DELAY * (2 ** attempt)
-                    logger.bind(tag=TAG).warning(
-                        f"Retryable error (attempt {attempt + 1}/{_MAX_RETRIES}): {e} — retrying in {delay:.1f}s"
-                    )
-                    time.sleep(delay)
-                    continue
-                logger.bind(tag=TAG).error(f"Error in response generation: {e}")
->>>>>>> 305138bd0a2dd51d0bb90ee7e060fae9c5329905
 
     def response_with_functions(self, session_id, dialogue, functions=None, **kwargs):
         # Convert Chat Completions function schema to Responses tool schema
@@ -287,26 +230,6 @@ class LLMProvider(LLMProviderBase):
                 function=SimpleNamespace(name=name, arguments=arguments)
             )]
 
-<<<<<<< HEAD
-            is_active = True
-            force_stateless = kwargs.get("stateless", self.stateless_default)
-            conv_id = None if force_stateless else self.ensure_conversation(session_id)
-            instructions = kwargs.get("instructions")
-            extra_inputs = kwargs.get("extra_inputs", [])
-            
-            final_input = list(dialogue) + list(extra_inputs) if extra_inputs else dialogue
-            
-            usage_payload = None
-            with self.client.responses.stream(
-                model=self.model_name,
-                input=final_input,
-                tools=tools if tools else None,
-                instructions=instructions,
-                conversation=conv_id,
-                store=bool(conv_id),
-            ) as stream:
-                function_call = {"id": None, "name": None, "arguments": ""}
-=======
         last_exc = None
         for attempt in range(_MAX_RETRIES):
             try:
@@ -315,7 +238,6 @@ class LLMProvider(LLMProviderBase):
                 conv_id = None if force_stateless else self.ensure_conversation(session_id)
                 instructions = kwargs.get("instructions")
                 extra_inputs = kwargs.get("extra_inputs", [])
->>>>>>> 305138bd0a2dd51d0bb90ee7e060fae9c5329905
                 
                 final_input = list(dialogue) + list(extra_inputs) if extra_inputs else dialogue
                 
@@ -378,48 +300,6 @@ class LLMProvider(LLMProviderBase):
                             logger.bind(tag=TAG).info(
                                 f"Function call arguments complete: {len(function_call['arguments'])} chars"
                             )
-<<<<<<< HEAD
-                    
-                    elif event_type == "response.function_call_arguments.delta":
-                        # Accumulate function arguments
-                        if event.delta:
-                            function_call["arguments"] += event.delta
-                    
-                    elif event_type == "response.function_call_arguments.done":
-                        # Function arguments complete
-                        logger.bind(tag=TAG).info(
-                            f"Function call arguments complete: {len(function_call['arguments'])} chars"
-                        )
-                    
-                    elif event_type == "response.output_item.done":
-                        # Output item completed - could be function call or text
-                        pass
-                    
-                    elif event_type == "response.completed":
-                        response_obj = getattr(event, "response", None)
-                        usage = getattr(response_obj, "usage", None)
-                        if usage is not None:
-                            if isinstance(usage, dict):
-                                input_tokens = usage.get("input_tokens")
-                                output_tokens = usage.get("output_tokens")
-                                total_tokens = usage.get("total_tokens")
-                            else:
-                                input_tokens = getattr(usage, "input_tokens", None)
-                                output_tokens = getattr(usage, "output_tokens", None)
-                                total_tokens = getattr(usage, "total_tokens", None)
-
-                            if any(v is not None for v in (input_tokens, output_tokens, total_tokens)):
-                                usage_payload = {
-                                    "input_tokens": input_tokens,
-                                    "output_tokens": output_tokens,
-                                    "total_tokens": total_tokens,
-                                }
-                                logger.bind(tag=TAG).info(
-                                    "Token usage (OpenAILLM): "
-                                    f"input={input_tokens}, output={output_tokens}, total={total_tokens}"
-                                )
-                        break
-=======
                         
                         elif event_type == "response.output_item.done":
                             # Output item completed - could be function call or text
@@ -427,7 +307,6 @@ class LLMProvider(LLMProviderBase):
                         
                         elif event_type == "response.completed":
                             break
->>>>>>> 305138bd0a2dd51d0bb90ee7e060fae9c5329905
 
                     # Emit consolidated function call if we collected one
                     if function_call["id"] and function_call["name"]:
@@ -451,11 +330,6 @@ class LLMProvider(LLMProviderBase):
                                 )
                 return  # success — exit retry loop
 
-<<<<<<< HEAD
-                if usage_payload:
-                    yield {"__usage__": usage_payload}, None
-
-=======
             except Exception as e:
                 last_exc = e
                 if _is_retryable(e) and attempt < _MAX_RETRIES - 1:
@@ -488,7 +362,6 @@ class LLMProvider(LLMProviderBase):
             
             response_text = completion.choices[0].message.content
             return response_text
->>>>>>> 305138bd0a2dd51d0bb90ee7e060fae9c5329905
         except Exception as e:
             logger.bind(tag=TAG).error(f"Error in structured output streaming: {e}")
             return f"【OpenAI服务响应异常: {e}】"
