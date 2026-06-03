@@ -1,7 +1,7 @@
-"""LLM tool: inspect_recent_magic_camera_photo
+"""LLM tool: inspect_recent_photo
 
-Inspect the user's most recent Magic Camera photo within a recent time window
-and return grounded visual context for the main character model.
+Inspect the user's most recent photo within a recent time window and return
+grounded visual context for the main character model.
 """
 from __future__ import annotations
 
@@ -25,9 +25,9 @@ from plugins_func.register import Action, ActionResponse, ToolType, register_fun
 TAG = __name__
 logger = setup_logging()
 
-RECENCY_WINDOW_HOURS = int(os.environ.get("MAGIC_CAMERA_LOOKBACK_HOURS", "24"))
-PHOTO_QUERY_LIMIT = int(os.environ.get("MAGIC_CAMERA_QUERY_LIMIT", "20"))
-OPENAI_MODEL = os.environ.get("MAGIC_CAMERA_INSPECT_MODEL", "gpt-4o-mini").strip()
+RECENCY_WINDOW_HOURS = int(os.environ.get("RECENT_PHOTO_LOOKBACK_HOURS", "24"))
+PHOTO_QUERY_LIMIT = int(os.environ.get("RECENT_PHOTO_QUERY_LIMIT", "20"))
+OPENAI_MODEL = os.environ.get("RECENT_PHOTO_INSPECT_MODEL", "gpt-4o-mini").strip()
 PHOTO_SOURCE_COLLECTIONS = ("moments", "photos")
 PHOTO_URL_FIELDS = (
     "photoUrl",
@@ -43,21 +43,17 @@ PHOTO_URL_FIELDS = (
 )
 PHOTO_DATE_FIELDS = ("createdAt", "displayAt", "updatedAt")
 
-INSPECT_MAGIC_CAMERA_PHOTO_FUNCTION_DESC = {
+INSPECT_RECENT_PHOTO_FUNCTION_DESC = {
     "type": "function",
     "function": {
-        "name": "inspect_recent_magic_camera_photo",
+        "name": "inspect_recent_photo",
         "description": (
-            "Use this whenever the user wants you to inspect, react to, discuss, "
-            "or interpret the user's latest photo/moment from Magic Camera in the app. "
-            "Also use it when the user refers to a photo, picture, image, "
-            "painting, drawing, artwork, selfie, or screenshot they just took, "
-            "sent, shared, uploaded, or want you to check, even if they do not "
-            "repeat the words Magic Camera in their latest sentence. "
-            "The tool finds the newest usable image from the user's moments/photos, "
-            "analyzes it, and returns a rich grounded description for your "
-            "in-character response. If no qualifying image is found, it returns "
-            "a no-match result instead of guessing."
+            "Use this tool when the user wants you to inspect, react to, "
+            "discuss, or interpret a recent photo in the app. The tool finds "
+            "the most recent photo in the allowed recency window, analyzes it, "
+            "and returns a rich grounded description for you to use in your "
+            "in-character response. If no qualifying photo is found, it returns "
+            "a no-match result."
         ),
         "parameters": {
             "type": "object",
@@ -68,18 +64,18 @@ INSPECT_MAGIC_CAMERA_PHOTO_FUNCTION_DESC = {
 }
 
 VISION_ANALYSIS_PROMPT = """
-You are analyzing a user's recent Magic Camera photo for BabyMilu's voice
-interaction system. Your job is to inspect the image and return structured,
-grounded visual context for another LLM that will speak to the user in
-character. Do not address the user directly. Do not praise, critique, or give
-advice. Do not invent details that are not visible. If something is uncertain,
-ambiguous, partially obscured, stylized, or hard to identify, say so clearly.
-Prefer concrete observations over vague adjectives. If the image contains art,
-craft, cosplay, handwriting, design work, or other creative output, pay close
-attention to medium, texture, detail choices, and presentation. If little
-meaningful content is visible, say so instead of guessing.
+You are analyzing a user's recent photo for BabyMilu's voice interaction
+system. Your job is to inspect the image and return structured, grounded visual
+context for another LLM that will speak to the user in character. Do not address
+the user directly. Do not praise, critique, or give advice. Do not invent
+details that are not visible. If something is uncertain, ambiguous, partially
+obscured, stylized, or hard to identify, say so clearly. Prefer concrete
+observations over vague adjectives. If the image contains art, craft, cosplay,
+handwriting, design work, or other creative output, pay close attention to
+medium, texture, detail choices, and presentation. If little meaningful content
+is visible, say so instead of guessing.
 
-Return valid JSON matching this exact shape:
+Return valid structured output matching this shape:
 {
   "summary": "string",
   "detailed_description": "string",
@@ -111,12 +107,12 @@ def _utc_now() -> datetime:
 
 def _resolve_openai_client_config(conn: Any | None = None) -> Dict[str, str]:
     env_api_key = (
-        os.environ.get("MAGIC_CAMERA_OPENAI_API_KEY")
+        os.environ.get("RECENT_PHOTO_OPENAI_API_KEY")
         or os.environ.get("OPENAI_API_KEY")
         or ""
     ).strip()
     env_base_url = (
-        os.environ.get("MAGIC_CAMERA_OPENAI_BASE_URL")
+        os.environ.get("RECENT_PHOTO_OPENAI_BASE_URL")
         or os.environ.get("OPENAI_BASE_URL")
         or ""
     ).strip()
@@ -156,7 +152,7 @@ def _resolve_openai_client_config(conn: Any | None = None) -> Dict[str, str]:
         return resolved
 
     raise RuntimeError(
-        "Missing Magic Camera OpenAI credentials in environment and selected LLM config"
+        "Missing recent photo OpenAI credentials in environment and selected LLM config"
     )
 
 
@@ -200,7 +196,7 @@ def _select_photo_url(photo: Dict[str, Any]) -> Optional[str]:
             return value
     gcs_path = str(photo.get("gcsPath") or "").strip()
     bucket = (
-        os.environ.get("MAGIC_CAMERA_GCS_BUCKET")
+        os.environ.get("RECENT_PHOTO_GCS_BUCKET")
         or os.environ.get("FIREBASE_STORAGE_BUCKET")
         or os.environ.get("GCS_BUCKET")
         or ""
@@ -218,7 +214,7 @@ def _select_photo_timestamp(photo: Dict[str, Any]) -> Optional[datetime]:
     return None
 
 
-def _select_recent_magic_photo(
+def _select_recent_photo(
     photos: Iterable[Dict[str, Any]],
     *,
     lookback_hours: int = RECENCY_WINDOW_HOURS,
@@ -409,7 +405,7 @@ def _parse_analysis_json(text: str) -> Dict[str, Any]:
         raise ValueError(f"Vision model returned invalid JSON: {exc}") from exc
 
 
-def _analyze_magic_camera_photo(photo_url: str, conn: Any | None = None) -> Dict[str, Any]:
+def _analyze_recent_photo(photo_url: str, conn: Any | None = None) -> Dict[str, Any]:
     client = _get_openai_client(conn)
     image_input = _download_image_as_data_url(photo_url)
     response = client.responses.create(
@@ -433,13 +429,16 @@ def _analyze_magic_camera_photo(photo_url: str, conn: Any | None = None) -> Dict
 
 def _build_tool_result(payload: Dict[str, Any]) -> str:
     guidance = (
-        "Magic Camera inspection result. "
-        "If status is 'found', respond in character as a creative companion: "
-        "mention specific visible details, react with genuine feeling, add only "
-        "light grounded interpretation, and invite the user's story when natural. "
-        "If status is 'no_match', clearly say you couldn't find a Magic "
-        "Camera photo or moment to inspect, ask the user to take one in the app, and say "
-        "you can patiently wait for them to come back with their masterpiece. "
+        "Recent photo inspection result. "
+        "If status is 'found', respond in character like a warm companion who "
+        "actually looked at what the user shared: notice 1-2 specific visible "
+        "details and respond in a way that fits the subject. If the photo feels "
+        "personal, expressive, aesthetic, emotional, or creative, you can be "
+        "more interpretive. If it is ordinary or practical, keep the response "
+        "grounded and casual. Do not over-romanticize it, sound like a critic, "
+        "captioning system, teacher, productivity coach, or use child-directed "
+        "language. If status is 'no_match', clearly say you couldn't find a "
+        "recent photo to inspect and ask the user to share one in the app. "
         "If status is 'error', briefly say you couldn't look at the photo just now "
         "and invite them to try again."
     )
@@ -447,11 +446,11 @@ def _build_tool_result(payload: Dict[str, Any]) -> str:
 
 
 @register_function(
-    "inspect_recent_magic_camera_photo",
-    INSPECT_MAGIC_CAMERA_PHOTO_FUNCTION_DESC,
+    "inspect_recent_photo",
+    INSPECT_RECENT_PHOTO_FUNCTION_DESC,
     ToolType.SYSTEM_CTL,
 )
-def inspect_recent_magic_camera_photo(conn) -> ActionResponse:
+def inspect_recent_photo(conn) -> ActionResponse:
     uid = get_owner_phone_for_device(conn.device_id)
     if not uid:
         payload = {
@@ -465,12 +464,12 @@ def inspect_recent_magic_camera_photo(conn) -> ActionResponse:
 
     try:
         photos = _load_candidate_photos(uid)
-        photo = _select_recent_magic_photo(photos)
+        photo = _select_recent_photo(photos)
         if not photo:
             payload = {
                 "status": "no_match",
                 "photo_found": False,
-                "reason": "No usable Magic Camera photo or moment image was found.",
+                "reason": "No usable recent photo was found.",
                 "recency_window_hours": RECENCY_WINDOW_HOURS,
                 "source_collections": list(PHOTO_SOURCE_COLLECTIONS),
             }
@@ -481,13 +480,13 @@ def inspect_recent_magic_camera_photo(conn) -> ActionResponse:
             payload = {
                 "status": "no_match",
                 "photo_found": False,
-                "reason": "A Magic Camera photo or moment exists, but no usable image URL was found.",
+                "reason": "A recent photo exists, but no usable image URL was found.",
                 "recency_window_hours": RECENCY_WINDOW_HOURS,
                 "source_collections": list(PHOTO_SOURCE_COLLECTIONS),
             }
             return ActionResponse(action=Action.REQLLM, result=_build_tool_result(payload))
 
-        analysis = _analyze_magic_camera_photo(photo_url, conn)
+        analysis = _analyze_recent_photo(photo_url, conn)
         created_at = _normalize_datetime(photo.get("createdAt"))
         payload = {
             "status": "found",
@@ -503,7 +502,7 @@ def inspect_recent_magic_camera_photo(conn) -> ActionResponse:
         return ActionResponse(action=Action.REQLLM, result=_build_tool_result(payload))
 
     except (APIError, requests.RequestException, ValueError, RuntimeError) as exc:
-        logger.bind(tag=TAG).error(f"Magic Camera inspection failed for {uid}: {exc}")
+        logger.bind(tag=TAG).error(f"Recent photo inspection failed for {uid}: {exc}")
         payload = {
             "status": "error",
             "photo_found": False,
@@ -513,11 +512,11 @@ def inspect_recent_magic_camera_photo(conn) -> ActionResponse:
         }
         return ActionResponse(action=Action.REQLLM, result=_build_tool_result(payload))
     except Exception as exc:  # pragma: no cover - defensive catch for prod safety
-        logger.bind(tag=TAG).error(f"Unexpected Magic Camera inspection failure: {exc}")
+        logger.bind(tag=TAG).error(f"Unexpected recent photo inspection failure: {exc}")
         payload = {
             "status": "error",
             "photo_found": False,
-            "reason": "Unexpected error while inspecting the recent Magic Camera photo.",
+            "reason": "Unexpected error while inspecting the recent photo.",
             "recency_window_hours": RECENCY_WINDOW_HOURS,
             "source_collections": list(PHOTO_SOURCE_COLLECTIONS),
         }

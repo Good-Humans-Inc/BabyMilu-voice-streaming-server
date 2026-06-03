@@ -270,7 +270,7 @@ Intent:
       - cancel_reminder
       - modify_reminder
       - complete_reminder
-      - inspect_recent_magic_camera_photo
+      - inspect_recent_photo
       - get_capabilities
       - self_introduction
       - lookup_recipe

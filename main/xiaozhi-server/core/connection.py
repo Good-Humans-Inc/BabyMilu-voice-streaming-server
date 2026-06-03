@@ -61,7 +61,7 @@ from services import log_context
 from core.utils.api_client import query_task, get_assigned_tasks_for_user, process_user_action
 TAG = __name__
 TOOL_WAIT_PLACEHOLDERS = {
-    "inspect_recent_magic_camera_photo": "hmmm",
+    "inspect_recent_photo": "hmmm",
 }
 
 auto_import_modules("plugins_func.functions")
