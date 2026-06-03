@@ -32,6 +32,8 @@ services:
       MQTT_URL: mqtt://mqtt:1883
       SERVER_EXTERNAL_IP: 35.188.112.96
       OTA_MANIFEST_URL: https://storage.googleapis.com/milu-public/OTA_MIAO/ota_manifest.json
+      # TEMP TEST OVERRIDE: use 24 after Magic Camera migration testing.
+      MAGIC_CAMERA_LOOKBACK_HOURS: "0"
       CHAT_STORE_BACKEND: ${CHAT_STORE_BACKEND:-auto}
       SUPABASE_URL: ${SUPABASE_URL:-}
       SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
