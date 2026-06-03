@@ -206,11 +206,35 @@ def _select_photo_url(photo: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _select_photo_url_field(photo: Dict[str, Any]) -> Optional[str]:
+    for key in PHOTO_URL_FIELDS:
+        value = str(photo.get(key) or "").strip()
+        if value:
+            return key
+    gcs_path = str(photo.get("gcsPath") or "").strip()
+    bucket = (
+        os.environ.get("RECENT_PHOTO_GCS_BUCKET")
+        or os.environ.get("FIREBASE_STORAGE_BUCKET")
+        or os.environ.get("GCS_BUCKET")
+        or ""
+    ).strip()
+    if gcs_path and bucket:
+        return "gcsPath"
+    return None
+
+
 def _select_photo_timestamp(photo: Dict[str, Any]) -> Optional[datetime]:
     for key in PHOTO_DATE_FIELDS:
         timestamp = _normalize_datetime(photo.get(key))
         if timestamp is not None:
             return timestamp
+    return None
+
+
+def _select_photo_timestamp_field(photo: Dict[str, Any]) -> Optional[str]:
+    for key in PHOTO_DATE_FIELDS:
+        if _normalize_datetime(photo.get(key)) is not None:
+            return key
     return None
 
 
@@ -227,21 +251,66 @@ def _select_recent_photo(
 
     candidates: List[tuple[datetime, Dict[str, Any]]] = []
     for photo in photos:
+        photo_id = photo.get("id")
+        source_collection = photo.get("source_collection")
         if photo.get("deletedAt"):
+            logger.bind(tag=TAG).info(
+                "Recent photo candidate skipped: "
+                f"id={photo_id}, source={source_collection}, reason=deletedAt_present"
+            )
             continue
         created_at = _select_photo_timestamp(photo)
         if created_at is None:
+            logger.bind(tag=TAG).info(
+                "Recent photo candidate skipped: "
+                f"id={photo_id}, source={source_collection}, reason=missing_timestamp"
+            )
             continue
-        if not _select_photo_url(photo):
+        timestamp_field = _select_photo_timestamp_field(photo)
+        url_field = _select_photo_url_field(photo)
+        if not url_field:
+            logger.bind(tag=TAG).info(
+                "Recent photo candidate skipped: "
+                f"id={photo_id}, source={source_collection}, "
+                f"timestamp={created_at.isoformat()}, timestamp_field={timestamp_field}, "
+                "reason=missing_url"
+            )
             continue
         if cutoff is not None and created_at < cutoff:
+            logger.bind(tag=TAG).info(
+                "Recent photo candidate skipped: "
+                f"id={photo_id}, source={source_collection}, "
+                f"timestamp={created_at.isoformat()}, timestamp_field={timestamp_field}, "
+                f"url_field={url_field}, cutoff={cutoff.isoformat()}, "
+                "reason=outside_recency_window"
+            )
             continue
+        logger.bind(tag=TAG).info(
+            "Recent photo candidate accepted: "
+            f"id={photo_id}, source={source_collection}, "
+            f"timestamp={created_at.isoformat()}, timestamp_field={timestamp_field}, "
+            f"url_field={url_field}"
+        )
         candidates.append((created_at, photo))
 
     if not candidates:
+        logger.bind(tag=TAG).info(
+            "Recent photo selection found no usable candidates: "
+            f"lookback_hours={lookback_hours}, cutoff={cutoff.isoformat() if cutoff else None}"
+        )
         return None
     candidates.sort(key=lambda item: item[0], reverse=True)
-    return candidates[0][1]
+    selected_at, selected_photo = candidates[0]
+    logger.bind(tag=TAG).info(
+        "Recent photo selected: "
+        f"id={selected_photo.get('id')}, "
+        f"source={selected_photo.get('source_collection')}, "
+        f"timestamp={selected_at.isoformat()}, "
+        f"timestamp_field={_select_photo_timestamp_field(selected_photo)}, "
+        f"url_field={_select_photo_url_field(selected_photo)}, "
+        f"accepted_candidates={len(candidates)}"
+    )
+    return selected_photo
 
 
 def _load_collection_items(
@@ -268,6 +337,10 @@ def _load_collection_items(
         data.setdefault("id", getattr(snap, "id", None))
         data.setdefault("source_collection", collection_name)
         photos.append(data)
+    logger.bind(tag=TAG).info(
+        "Recent photo collection loaded: "
+        f"uid={uid}, collection={collection_name}, count={len(photos)}, limit={limit}"
+    )
     return photos
 
 
@@ -275,6 +348,10 @@ def _load_candidate_photos(uid: str, *, limit: int = PHOTO_QUERY_LIMIT) -> List[
     photos: List[Dict[str, Any]] = []
     for collection_name in PHOTO_SOURCE_COLLECTIONS:
         photos.extend(_load_collection_items(uid, collection_name, limit=limit))
+    logger.bind(tag=TAG).info(
+        "Recent photo candidates loaded: "
+        f"uid={uid}, total={len(photos)}, collections={list(PHOTO_SOURCE_COLLECTIONS)}"
+    )
     return photos
 
 
