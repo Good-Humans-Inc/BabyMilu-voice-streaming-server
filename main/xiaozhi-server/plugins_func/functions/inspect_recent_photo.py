@@ -6,6 +6,7 @@ grounded visual context for the main character model.
 from __future__ import annotations
 
 import json
+import hashlib
 import mimetypes
 import os
 from datetime import datetime, timedelta, timezone
@@ -206,6 +207,13 @@ def _select_photo_url(photo: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _truncate_log_value(value: Any, *, max_length: int = 180) -> str:
+    text = str(value or "").replace("\n", " ").strip()
+    if len(text) <= max_length:
+        return text
+    return text[: max_length - 3] + "..."
+
+
 def _select_photo_url_field(photo: Dict[str, Any]) -> Optional[str]:
     for key in PHOTO_URL_FIELDS:
         value = str(photo.get(key) or "").strip()
@@ -357,9 +365,20 @@ def _load_candidate_photos(uid: str, *, limit: int = PHOTO_QUERY_LIMIT) -> List[
 
 def _download_image_as_data_url(photo_url: str) -> str:
     if photo_url.startswith("data:"):
+        logger.bind(tag=TAG).info(
+            "Recent photo image input is already a data URL: "
+            f"length={len(photo_url)}"
+        )
         return photo_url
 
-    response = requests.get(photo_url, timeout=20)
+    response = requests.get(
+        photo_url,
+        timeout=20,
+        headers={
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        },
+    )
     response.raise_for_status()
 
     content_type = response.headers.get("Content-Type", "").split(";")[0].strip()
@@ -368,6 +387,13 @@ def _download_image_as_data_url(photo_url: str) -> str:
         content_type = guessed_type or "image/png"
 
     import base64
+
+    image_sha256 = hashlib.sha256(response.content).hexdigest()
+    logger.bind(tag=TAG).info(
+        "Recent photo image downloaded: "
+        f"status={response.status_code}, content_type={content_type}, "
+        f"bytes={len(response.content)}, sha256={image_sha256[:16]}"
+    )
 
     encoded = base64.b64encode(response.content).decode("utf-8")
     return f"data:{content_type};base64,{encoded}"
@@ -507,6 +533,8 @@ def _analyze_recent_photo(photo_url: str, conn: Any | None = None) -> Dict[str, 
 def _build_tool_result(payload: Dict[str, Any]) -> str:
     guidance = (
         "Recent photo inspection result. "
+        "Treat this tool output as the authoritative fresh photo context, even "
+        "if earlier conversation summaries mention a different image. "
         "If status is 'found', respond in character like a warm companion who "
         "actually looked at what the user shared: notice 1-2 specific visible "
         "details and respond in a way that fits the subject. If the photo feels "
@@ -565,6 +593,13 @@ def inspect_recent_photo(conn) -> ActionResponse:
 
         analysis = _analyze_recent_photo(photo_url, conn)
         created_at = _normalize_datetime(photo.get("createdAt"))
+        logger.bind(tag=TAG).info(
+            "Recent photo analysis completed: "
+            f"id={photo.get('id')}, source={photo.get('source_collection')}, "
+            f"createdAt={created_at.isoformat() if created_at else None}, "
+            f"summary={_truncate_log_value(analysis.get('summary'))}, "
+            f"notable_objects={_truncate_log_value(analysis.get('notable_objects'))}"
+        )
         payload = {
             "status": "found",
             "photo_found": True,
