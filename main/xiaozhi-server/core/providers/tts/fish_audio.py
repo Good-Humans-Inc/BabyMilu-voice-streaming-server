@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import queue
 import threading
@@ -8,6 +9,7 @@ import traceback
 import aiohttp
 import numpy as np
 import ormsgpack
+import websockets
 from config.logger import setup_logging
 from core.providers.tts.base import TTSProviderBase
 from core.providers.tts.dto.dto import ContentType, InterfaceType, SentenceType
@@ -195,8 +197,17 @@ class TTSProvider(TTSProviderBase):
 
         self.api_key = config.get("api_key", "YOUR_API_KEY")
         self.api_url = config.get("api_url", "https://api.fish.audio/v1/tts")
+        self.websocket_url = config.get("websocket_url") or self._derive_websocket_url(
+            self.api_url
+        )
+        self.model = config.get("model", "s2-pro")
         self.default_reference_id = config.get("reference_id")
         self.latency = config.get("latency", "normal")
+        self.input_streaming = str(config.get("input_streaming", False)).lower() in (
+            "true",
+            "1",
+            "yes",
+        )
         self.normalize = str(config.get("normalize", True)).lower() in (
             "true",
             "1",
@@ -207,6 +218,9 @@ class TTSProvider(TTSProviderBase):
         top_p = config.get("top_p", "0.7")
         temperature = config.get("temperature", "0.7")
         repetition_penalty = config.get("repetition_penalty", "1.2")
+        max_new_tokens = config.get("max_new_tokens", "1024")
+        min_chunk_length = config.get("min_chunk_length", "50")
+        early_stop_threshold = config.get("early_stop_threshold", "1")
 
         self.chunk_length = int(chunk_length) if chunk_length else 200
         self.top_p = float(top_p) if top_p else 0.7
@@ -214,6 +228,14 @@ class TTSProvider(TTSProviderBase):
         self.repetition_penalty = (
             float(repetition_penalty) if repetition_penalty else 1.2
         )
+        self.max_new_tokens = int(max_new_tokens) if max_new_tokens else 1024
+        self.min_chunk_length = int(min_chunk_length) if min_chunk_length else 50
+        self.early_stop_threshold = (
+            float(early_stop_threshold) if early_stop_threshold else 1
+        )
+        self.condition_on_previous_chunks = str(
+            config.get("condition_on_previous_chunks", True)
+        ).lower() in ("true", "1", "yes")
         self.max_concurrent_requests = max(
             1,
             int(
@@ -264,6 +286,7 @@ class TTSProvider(TTSProviderBase):
             input_rate=FISH_AUDIO_SAMPLE_RATE,
             output_rate=OPUS_SAMPLE_RATE,
         )
+        self._ws_first_audio_sent = False
 
     def play_interstitial(self, conn, text: str):
         if not text or not text.strip():
@@ -314,19 +337,38 @@ class TTSProvider(TTSProviderBase):
             f"reference_id={reference_id}, source={reference_source}"
         )
 
+    @staticmethod
+    def _derive_websocket_url(api_url: str) -> str:
+        url = (api_url or "https://api.fish.audio/v1/tts").rstrip("/")
+        if not url.endswith("/live"):
+            url = f"{url}/live"
+        if url.startswith("https://"):
+            return "wss://" + url[len("https://") :]
+        if url.startswith("http://"):
+            return "ws://" + url[len("http://") :]
+        return url
+
+    def _reset_response_state(self):
+        self.conn.client_abort = False
+        self.tts_stop_request = False
+        self.tts_text_buff = []
+        self.tts_audio_first_sentence = True
+        self.before_stop_play_files.clear()
+        self.processed_chars = 0
+        self.is_first_sentence = True
+        self._ws_first_audio_sent = False
+
     def tts_text_priority_thread(self):
+        if self.input_streaming:
+            self._tts_text_priority_thread_websocket()
+            return
+
         while not self.conn.stop_event.is_set():
             try:
                 message = self.tts_text_queue.get(timeout=1)
 
                 if message.sentence_type == SentenceType.FIRST:
-                    self.conn.client_abort = False
-                    self.tts_stop_request = False
-                    self.tts_text_buff = []
-                    self.tts_audio_first_sentence = True
-                    self.before_stop_play_files.clear()
-                    self.processed_chars = 0
-                    self.is_first_sentence = True
+                    self._reset_response_state()
                 elif self.conn.client_abort:
                     continue
 
@@ -378,6 +420,285 @@ class TTSProvider(TTSProviderBase):
                     f"TTS text thread error: {e}\n{traceback.format_exc()}"
                 )
 
+    def _tts_text_priority_thread_websocket(self):
+        while not self.conn.stop_event.is_set():
+            try:
+                message = self.tts_text_queue.get(timeout=1)
+                if message.sentence_type == SentenceType.FIRST:
+                    self._reset_response_state()
+                    asyncio.run(self._stream_response_to_fish())
+                elif not self.conn.client_abort:
+                    self._reset_response_state()
+                    asyncio.run(self._stream_response_to_fish(initial_message=message))
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.bind(tag=TAG).error(
+                    f"Fish Audio WebSocket TTS failed: {e}\n{traceback.format_exc()}"
+                )
+                self.tts_audio_queue.put((SentenceType.LAST, [], None))
+
+    def _build_websocket_request(self, reference_id: str) -> dict:
+        return {
+            "text": "",
+            "reference_id": reference_id,
+            "format": "pcm",
+            "sample_rate": FISH_AUDIO_SAMPLE_RATE,
+            "normalize": self.normalize,
+            "chunk_length": self.chunk_length,
+            "top_p": self.top_p,
+            "temperature": self.temperature,
+            "repetition_penalty": self.repetition_penalty,
+            "latency": self.latency,
+            "max_new_tokens": self.max_new_tokens,
+            "min_chunk_length": self.min_chunk_length,
+            "condition_on_previous_chunks": self.condition_on_previous_chunks,
+            "early_stop_threshold": self.early_stop_threshold,
+        }
+
+    def _pack_websocket_event(self, event: dict) -> bytes:
+        return ormsgpack.packb(event, option=ormsgpack.OPT_SERIALIZE_PYDANTIC)
+
+    def _unpack_websocket_message(self, message):
+        if isinstance(message, bytes):
+            try:
+                return ormsgpack.unpackb(message)
+            except Exception:
+                return {"event": "audio", "audio": message}
+        if isinstance(message, str):
+            try:
+                return json.loads(message)
+            except json.JSONDecodeError:
+                return {"event": "error", "message": message}
+        return {}
+
+    def _clean_stream_text_chunk(self, text: str) -> str:
+        if not text:
+            return ""
+        leading_ws = text[: len(text) - len(text.lstrip())]
+        trailing_ws = text[len(text.rstrip()) :]
+        had_leading_emoji = False
+        stripped = text.lstrip()
+        if stripped:
+            had_leading_emoji = (
+                textUtils.is_emoji(stripped[0])
+                or stripped[0] in textUtils.EMOJI_JOINERS
+                or textUtils._is_skin_tone_modifier(stripped[0])
+            )
+
+        text = MarkdownCleaner.clean_markdown(text)
+        if leading_ws and not text.startswith(leading_ws):
+            text = f"{leading_ws}{text}"
+        if trailing_ws and not text.endswith(trailing_ws):
+            text = f"{text}{trailing_ws}"
+        had_leading_emoji = bool(
+            text
+            and (
+                textUtils.is_emoji(text[0])
+                or text[0] in textUtils.EMOJI_JOINERS
+                or textUtils._is_skin_tone_modifier(text[0])
+            )
+        ) or had_leading_emoji
+        cleaned = []
+        for char in text:
+            if char == "\n":
+                cleaned.append(" ")
+                continue
+            if (
+                textUtils.is_emoji(char)
+                or char in textUtils.EMOJI_JOINERS
+                or textUtils._is_skin_tone_modifier(char)
+            ):
+                continue
+            cleaned.append(char)
+        cleaned_text = "".join(cleaned)
+        return cleaned_text.lstrip() if had_leading_emoji else cleaned_text
+
+    async def _next_tts_queue_message(self):
+        return await asyncio.to_thread(self.tts_text_queue.get, True, 1)
+
+    async def _send_stream_text_message(self, ws, message) -> bool:
+        if ContentType.TEXT != message.content_type or not message.content_detail:
+            return False
+
+        self.tts_text_buff.append(message.content_detail)
+        text = self._clean_stream_text_chunk(message.content_detail)
+        if not text:
+            return False
+
+        await ws.send(self._pack_websocket_event({"event": "text", "text": text}))
+        logger.bind(tag=TAG).debug(f"Fish Audio WS text event: {text[:80]}")
+        return True
+
+    async def _receive_websocket_audio(self, ws):
+        pcm_carry = b""
+        async for message in ws:
+            if self.conn and self.conn.client_abort:
+                logger.bind(tag=TAG).info("Fish Audio WebSocket interrupted by client")
+                return
+
+            payload = self._unpack_websocket_message(message)
+            event = payload.get("event")
+
+            if event == "audio":
+                audio = payload.get("audio") or b""
+                if not isinstance(audio, bytes):
+                    continue
+                if not self._ws_first_audio_sent:
+                    first_text = self._clean_stream_text_chunk(
+                        "".join(self.tts_text_buff)
+                    )
+                    self.tts_audio_queue.put(
+                        (SentenceType.FIRST, [], first_text or None)
+                    )
+                    self._ws_first_audio_sent = True
+
+                pcm_carry = self._process_pcm_audio_chunk(audio, pcm_carry)
+            elif event == "finish":
+                reason = payload.get("reason", "stop")
+                if reason == "error":
+                    raise Exception(
+                        payload.get("message")
+                        or "Fish Audio WebSocket finished with error"
+                    )
+                break
+            elif event == "error":
+                raise Exception(payload.get("message") or "Fish Audio WebSocket error")
+
+        self.opus_encoder.encode_pcm_to_opus_stream(
+            b"", end_of_stream=True, callback=self.handle_opus
+        )
+
+    def _process_pcm_audio_chunk(self, chunk: bytes, pcm_carry: bytes) -> bytes:
+        if not chunk:
+            return pcm_carry
+
+        chunk = pcm_carry + chunk
+        if len(chunk) % 2:
+            pcm_carry = chunk[-1:]
+            chunk = chunk[:-1]
+        else:
+            pcm_carry = b""
+
+        resampled = self.resampler.process(chunk)
+        if resampled:
+            self.opus_encoder.encode_pcm_to_opus_stream(
+                resampled,
+                end_of_stream=False,
+                callback=self.handle_opus,
+            )
+        return pcm_carry
+
+    async def _stream_response_to_fish(self, initial_message=None):
+        reference_id, reference_source = self._resolve_usable_reference_id()
+        if not reference_id:
+            raise Exception(
+                "No Fish Audio reference_id configured. "
+                "Set 'reference_id' in FishAudio config or the character's 'voice' field in Firestore."
+            )
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "model": self.model,
+        }
+        wait_ms, in_flight = await asyncio.to_thread(self.request_limiter.acquire)
+        if wait_ms >= 25:
+            logger.bind(tag=TAG).info(
+                f"Fish Audio WebSocket request queued for {wait_ms:.1f}ms "
+                f"(in_flight={in_flight}/{self.max_concurrent_requests})"
+            )
+
+        stop_sent = False
+        try:
+            self.opus_encoder.reset_state()
+            self.resampler.reset()
+            async with websockets.connect(
+                self.websocket_url,
+                additional_headers=headers,
+                open_timeout=self.connect_timeout_seconds,
+                ping_interval=None,
+            ) as ws:
+                await ws.send(
+                    self._pack_websocket_event(
+                        {
+                            "event": "start",
+                            "request": self._build_websocket_request(reference_id),
+                        }
+                    )
+                )
+                logger.bind(tag=TAG).debug(
+                    f"Fish Audio WebSocket started: model={self.model}, "
+                    f"reference_source={reference_source}, chunk_length={self.chunk_length}"
+                )
+                receiver_task = asyncio.create_task(self._receive_websocket_audio(ws))
+
+                try:
+                    if initial_message is not None:
+                        await self._send_stream_text_message(ws, initial_message)
+                        if initial_message.sentence_type == SentenceType.LAST:
+                            await ws.send(self._pack_websocket_event({"event": "stop"}))
+                            stop_sent = True
+
+                    while not stop_sent and not self.conn.stop_event.is_set():
+                        if self.conn.client_abort:
+                            await ws.send(self._pack_websocket_event({"event": "stop"}))
+                            stop_sent = True
+                            break
+
+                        try:
+                            message = await self._next_tts_queue_message()
+                        except queue.Empty:
+                            continue
+
+                        if message.sentence_type == SentenceType.FIRST:
+                            continue
+
+                        if ContentType.FILE == message.content_type:
+                            await ws.send(self._pack_websocket_event({"event": "flush"}))
+                            if message.content_file and os.path.exists(message.content_file):
+                                self._process_audio_file_stream(
+                                    message.content_file,
+                                    callback=lambda audio_data: self.handle_audio_file(
+                                        audio_data, message.content_detail
+                                    ),
+                                )
+                        else:
+                            await self._send_stream_text_message(ws, message)
+
+                        if message.sentence_type == SentenceType.LAST:
+                            await ws.send(self._pack_websocket_event({"event": "stop"}))
+                            stop_sent = True
+
+                    if not stop_sent:
+                        await ws.send(self._pack_websocket_event({"event": "stop"}))
+                        stop_sent = True
+
+                    await receiver_task
+                except Exception:
+                    receiver_task.cancel()
+                    raise
+        except Exception as exc:
+            if "Reference not found" in str(exc) and _mark_invalid_reference(
+                reference_id, self.invalid_reference_ttl_seconds
+            ):
+                logger.bind(tag=TAG).warning(
+                    f"Fish Audio WebSocket reference not found; cached invalid for "
+                    f"{self.invalid_reference_ttl_seconds}s: "
+                    f"reference_id={reference_id}, source={reference_source}"
+                )
+            raise
+        finally:
+            remaining_in_flight = self.request_limiter.release()
+            logger.bind(tag=TAG).debug(
+                f"Fish Audio WebSocket request finished; "
+                f"in_flight={remaining_in_flight}/{self.max_concurrent_requests}"
+            )
+            self._process_before_stop_play_files()
+
+        logger.bind(tag=TAG).info(
+            f"Fish Audio WebSocket TTS success: {''.join(self.tts_text_buff)[:60]}"
+        )
+
     async def text_to_speak(self, text, _output_file=None, is_last_segment=True):
         reference_id, reference_source = self._resolve_usable_reference_id()
         if not reference_id:
@@ -403,6 +724,7 @@ class TTSProvider(TTSProviderBase):
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/msgpack",
+            "model": self.model,
         }
 
         self.opus_encoder.reset_state()
@@ -470,22 +792,7 @@ class TTSProvider(TTSProviderBase):
                                 if not chunk:
                                     continue
 
-                                chunk = pcm_carry + chunk
-                                if len(chunk) % 2:
-                                    pcm_carry = chunk[-1:]
-                                    chunk = chunk[:-1]
-                                else:
-                                    pcm_carry = b""
-
-                                resampled = self.resampler.process(chunk)
-                                if not resampled:
-                                    continue
-
-                                self.opus_encoder.encode_pcm_to_opus_stream(
-                                    resampled,
-                                    end_of_stream=False,
-                                    callback=self.handle_opus,
-                                )
+                                pcm_carry = self._process_pcm_audio_chunk(chunk, pcm_carry)
                             succeeded = True
             except Exception as exc:
                 last_error = exc

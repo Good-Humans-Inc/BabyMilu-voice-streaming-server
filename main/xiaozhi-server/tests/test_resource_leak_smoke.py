@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import pathlib
+import queue
 import sys
 import threading
 import types
@@ -95,6 +96,7 @@ util_stub.parse_string_to_list = lambda value: [] if value in (None, "") else [v
 sys.modules.setdefault("core.utils.util", util_stub)
 
 from core.providers.tts import fish_audio
+from core.providers.tts.dto.dto import ContentType, SentenceType, TTSMessageDTO
 
 
 class _FakeResampler:
@@ -230,6 +232,15 @@ def _make_provider(config=None, voice_id="voice-ref"):
     return provider
 
 
+def _drain_audio_queue(provider):
+    items = []
+    while True:
+        try:
+            items.append(provider.tts_audio_queue.get_nowait())
+        except queue.Empty:
+            return items
+
+
 def _assert_owned_sessions(factory):
     assert factory.session_enter_count == factory.session_exit_count
     assert factory.response_enter_count == factory.response_exit_count
@@ -360,3 +371,166 @@ def test_cached_invalid_conn_voice_id_without_fallback_skips_fish(monkeypatch):
     assert factory.post_count == 1
     assert responses[0].closed is True
     _assert_owned_sessions(factory)
+
+
+class _FakeFishWebSocket:
+    def __init__(self):
+        self.sent = []
+        self.closed = False
+        self._audio_sent = False
+        self._finish_sent = False
+        self._stop_event = asyncio.Event()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+        self.closed = True
+        return False
+
+    async def send(self, payload):
+        event = fish_audio.ormsgpack.unpackb(payload)
+        self.sent.append(event)
+        if event.get("event") == "stop":
+            self._stop_event.set()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._audio_sent:
+            await self._stop_event.wait()
+            self._audio_sent = True
+            return fish_audio.ormsgpack.packb(
+                {"event": "audio", "audio": b"\x00\x00" * 16}
+            )
+        if not self._finish_sent:
+            self._finish_sent = True
+            return fish_audio.ormsgpack.packb(
+                {"event": "finish", "reason": "stop"}
+            )
+        raise StopAsyncIteration
+
+
+class _FakeFishWebSocketConnect:
+    def __init__(self, ws):
+        self.ws = ws
+        self.calls = []
+
+    def __call__(self, url, **kwargs):
+        self.calls.append({"url": url, "kwargs": kwargs})
+        return self.ws
+
+
+def test_fish_websocket_streams_llm_text_without_local_sentence_chunking(monkeypatch):
+    ws = _FakeFishWebSocket()
+    connect = _FakeFishWebSocketConnect(ws)
+    monkeypatch.setattr(fish_audio.websockets, "connect", connect)
+
+    provider = _make_provider(
+        {
+            "input_streaming": True,
+            "websocket_url": "wss://fish.test/v1/tts/live",
+            "model": "s2-pro",
+            "chunk_length": 300,
+            "temperature": 0.9,
+            "top_p": 0.85,
+        }
+    )
+    provider._reset_response_state()
+    provider.tts_text_queue.put(
+        TTSMessageDTO(
+            sentence_id="sentence-1",
+            sentence_type=SentenceType.MIDDLE,
+            content_type=ContentType.TEXT,
+            content_detail=(
+                "😤 [shouting] Alright, listen up, lolo! "
+                "You've got greatness in you, "
+            ),
+        )
+    )
+    provider.tts_text_queue.put(
+        TTSMessageDTO(
+            sentence_id="sentence-1",
+            sentence_type=SentenceType.MIDDLE,
+            content_type=ContentType.TEXT,
+            content_detail="so no more slacking! Let's unleash that power!",
+        )
+    )
+    provider.tts_text_queue.put(
+        TTSMessageDTO(
+            sentence_id="sentence-1",
+            sentence_type=SentenceType.LAST,
+            content_type=ContentType.ACTION,
+        )
+    )
+
+    asyncio.run(provider._stream_response_to_fish())
+
+    assert connect.calls == [
+        {
+            "url": "wss://fish.test/v1/tts/live",
+            "kwargs": {
+                "additional_headers": {
+                    "Authorization": "Bearer test-key",
+                    "model": "s2-pro",
+                },
+                "open_timeout": 1,
+                "ping_interval": None,
+            },
+        }
+    ]
+    assert ws.closed is True
+    assert ws.sent[0] == {
+        "event": "start",
+        "request": {
+            "text": "",
+            "reference_id": "voice-ref",
+            "format": "pcm",
+            "sample_rate": 44100,
+            "normalize": True,
+            "chunk_length": 300,
+            "top_p": 0.85,
+            "temperature": 0.9,
+            "repetition_penalty": 1.2,
+            "latency": "normal",
+            "max_new_tokens": 1024,
+            "min_chunk_length": 50,
+            "condition_on_previous_chunks": True,
+            "early_stop_threshold": 1.0,
+        },
+    }
+    assert [event for event in ws.sent if event["event"] == "text"] == [
+        {
+            "event": "text",
+            "text": (
+                "[shouting] Alright, listen up, lolo! "
+                "You've got greatness in you, "
+            ),
+        },
+        {
+            "event": "text",
+            "text": "so no more slacking! Let's unleash that power!",
+        },
+    ]
+    assert ws.sent[-1] == {"event": "stop"}
+
+    audio_items = _drain_audio_queue(provider)
+    assert audio_items[0] == (
+        SentenceType.FIRST,
+        [],
+        (
+            "[shouting] Alright, listen up, lolo! You've got greatness in you, "
+            "so no more slacking! Let's unleash that power!"
+        ),
+    )
+    assert (SentenceType.MIDDLE, b"opus", None) in audio_items
+    assert audio_items[-1] == (SentenceType.LAST, [], None)
+
+
+def test_fish_websocket_text_cleaner_preserves_streaming_token_spaces():
+    provider = _make_provider({"input_streaming": True})
+
+    assert provider._clean_stream_text_chunk("The ") == "The "
+    assert provider._clean_stream_text_chunk("weather") == "weather"
+    assert provider._clean_stream_text_chunk(" 😤 [shouting] Go!") == "[shouting] Go!"
