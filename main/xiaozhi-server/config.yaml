@@ -744,19 +744,26 @@ TTS:
     api_key: "你的api_key"
     api_url: "http://127.0.0.1:8080/v1/tts"
   FishAudio:
-    # Fish Audio HTTP streaming TTS.
+    # Fish Audio TTS. Set input_streaming=true to stream LLM text into Fish
+    # over WebSocket and let Fish decide chunk boundaries.
     # Voice cloning happens app-side; write the resulting Fish model id to
     # characters/{characterId}.voice and the server will pick it up via conn.voice_id.
     type: fish_audio
     api_url: https://api.fish.audio/v1/tts
+    websocket_url: wss://api.fish.audio/v1/tts/live
+    model: s2-pro
+    input_streaming: false
     api_key: 你的fish audio api key
     reference_id: 7328ffb8a94b41fe860e3992cb25a282
     latency: normal
     normalize: true
-    chunk_length: 100
+    chunk_length: 300
     top_p: 0.7
     temperature: 0.7
     repetition_penalty: 1.2
+    min_chunk_length: 50
+    condition_on_previous_chunks: true
+    early_stop_threshold: 1
     max_concurrent_requests: 3
     retry_429_attempts: 1
     retry_429_backoff_ms: 500
