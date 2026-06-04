@@ -86,6 +86,7 @@ delete_audio: true
 # ASR音频文件保留策略：
 # - delete: 识别后删除临时WAV（推荐线上默认）
 # - archive: 识别后移动到 archive_dir，避免 tmp/ 无限增长
+# - gcs: 识别后上传到 GCS bucket，上传成功后默认删除本地WAV
 # - keep: 保留在 output_dir，不推荐线上使用
 # 如果 provider 没有显式配置 audio_retention_mode，则会自动推导：
 # - delete_audio=true  -> delete
@@ -304,6 +305,13 @@ ASR:
     type: fun_local
     model_dir: models/SenseVoiceSmall
     output_dir: tmp/
+    # 可选：覆盖默认保留策略
+    # audio_retention_mode: gcs
+    # audio_gcs_bucket: milu-user
+    # audio_gcs_prefix: asr-audio/staging
+    # audio_gcs_delete_local: true
+    # audio_archive_dir: data/asr_archive
+    # audio_manifest_file: manifest.jsonl
   FunASRServer:
     # 独立部署FunASR，使用FunASR的API服务，只需要五句话
     # 第一句：mkdir -p ./funasr-runtime-resources/models
@@ -319,6 +327,13 @@ ASR:
     is_ssl: true
     api_key: none
     output_dir: tmp/
+    # 可选：覆盖默认保留策略
+    # audio_retention_mode: gcs
+    # audio_gcs_bucket: milu-user
+    # audio_gcs_prefix: asr-audio/staging
+    # audio_gcs_delete_local: true
+    # audio_archive_dir: data/asr_archive
+    # audio_manifest_file: manifest.jsonl
   SherpaASR:
     # Sherpa-ONNX 本地语音识别（需手动下载模型）
     type: sherpa_onnx_local
@@ -429,6 +444,9 @@ ASR:
     output_dir: tmp/
     # 可选：覆盖默认保留策略
     # audio_retention_mode: delete
+    # audio_gcs_bucket: milu-user
+    # audio_gcs_prefix: asr-audio/staging
+    # audio_gcs_delete_local: true
     # audio_archive_dir: data/asr_archive
     # audio_manifest_file: manifest.jsonl
   GroqASR:

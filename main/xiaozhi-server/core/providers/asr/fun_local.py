@@ -48,7 +48,7 @@ class ASRProvider(ASRProviderBase):
         self.interface_type = InterfaceType.LOCAL
         self.model_dir = config.get("model_dir")
         self.output_dir = config.get("output_dir")  # 修正配置键名
-        self.delete_audio_file = delete_audio_file
+        self.configure_audio_retention(config, delete_audio_file)
 
         # 确保输出目录存在
         os.makedirs(self.output_dir, exist_ok=True)
@@ -79,15 +79,13 @@ class ASRProvider(ASRProviderBase):
                 combined_pcm_data = b"".join(pcm_data)
 
                 # 检查磁盘空间
-                if not self.delete_audio_file:
+                if self.should_persist_audio_file():
                     free_space = shutil.disk_usage(self.output_dir).free
                     if free_space < len(combined_pcm_data) * 2:  # 预留2倍空间
                         raise OSError("磁盘空间不足")
 
                 # 判断是否保存为WAV文件
-                if self.delete_audio_file:
-                    pass
-                else:
+                if self.should_persist_audio_file():
                     file_path = self.save_audio_to_file(pcm_data, session_id)
 
                 # 语音识别
@@ -123,12 +121,4 @@ class ASRProvider(ASRProviderBase):
                 return "", file_path
 
             finally:
-                # 文件清理逻辑
-                if self.delete_audio_file and file_path and os.path.exists(file_path):
-                    try:
-                        os.remove(file_path)
-                        logger.bind(tag=TAG).debug(f"已删除临时音频文件: {file_path}")
-                    except Exception as e:
-                        logger.bind(tag=TAG).error(
-                            f"文件删除失败: {file_path} | 错误: {e}"
-                        )
+                self.finalize_audio_file(file_path, session_id)

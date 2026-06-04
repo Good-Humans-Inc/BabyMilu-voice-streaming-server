@@ -6,6 +6,7 @@ import json
 import websockets
 from config.logger import setup_logging
 import asyncio
+import os
 import re
 
 TAG = __name__
@@ -30,7 +31,7 @@ class ASRProvider(ASRProviderBase):
             "yes",
         )
         self.output_dir = config.get("output_dir")
-        self.delete_audio_file = delete_audio_file
+        self.configure_audio_retention(config, delete_audio_file)
         self.uri = (
             f"wss://{self.host}:{self.port}"
             if self.is_ssl
@@ -40,6 +41,7 @@ class ASRProvider(ASRProviderBase):
         if self.ssl_context:
             self.ssl_context.check_hostname = False
             self.ssl_context.verify_mode = ssl.CERT_NONE
+        os.makedirs(self.output_dir, exist_ok=True)
 
     async def _receive_responses(self, ws) -> None:
         """
@@ -116,19 +118,17 @@ class ASRProvider(ASRProviderBase):
         combined_pcm_data = b"".join(pcm_data)
 
         # 判断是否保存为WAV文件
-        if self.delete_audio_file:
-            pass
-        else:
+        if self.should_persist_audio_file():
             file_path = self.save_audio_to_file(pcm_data, session_id)
         auth_header = {"Authorization": "Bearer; {}".format(self.api_key)}
-        async with websockets.connect(
-            self.uri,
-            additional_headers=auth_header,
-            subprotocols=["binary"],
-            ping_interval=None,
-            ssl=self.ssl_context,
-        ) as ws:
-            try:
+        try:
+            async with websockets.connect(
+                self.uri,
+                additional_headers=auth_header,
+                subprotocols=["binary"],
+                ping_interval=None,
+                ssl=self.ssl_context,
+            ) as ws:
                 # Use asyncio to handle WebSocket communication
                 send_task = asyncio.create_task(
                     self._send_data(ws, combined_pcm_data, session_id)
@@ -159,11 +159,13 @@ class ASRProvider(ASRProviderBase):
                     file_path,
                 )  # Return the recognized text and timestamp (if any)
 
-            except websockets.exceptions.ConnectionClosed as e:
-                logger.bind(tag=TAG).error(f"WebSocket connection closed: {e}")
-                return "", file_path
-            except Exception as e:
-                logger.bind(tag=TAG).error(
-                    f"Error during speech-to-text conversion: {e}", exc_info=True
-                )
-                return "", file_path
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.bind(tag=TAG).error(f"WebSocket connection closed: {e}")
+            return "", file_path
+        except Exception as e:
+            logger.bind(tag=TAG).error(
+                f"Error during speech-to-text conversion: {e}", exc_info=True
+            )
+            return "", file_path
+        finally:
+            self.finalize_audio_file(file_path, session_id)

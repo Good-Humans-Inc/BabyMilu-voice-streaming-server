@@ -24,10 +24,24 @@ from services import log_context
 TAG = __name__
 logger = setup_logging()
 
+try:
+    from google.cloud import storage
+except Exception:
+    storage = None
+
+GCS_AUDIO_RETENTION_MODES = {"gcs", "upload", "cloud"}
+PERSIST_AUDIO_RETENTION_MODES = {"archive", "keep"} | GCS_AUDIO_RETENTION_MODES
+
 
 class ASRProviderBase(ABC):
     def __init__(self):
-        pass
+        self.delete_audio_file = True
+        self.audio_retention_mode = "delete"
+        self.audio_archive_dir = "data/asr_archive"
+        self.audio_manifest_file = "manifest.jsonl"
+        self.audio_gcs_bucket = ""
+        self.audio_gcs_prefix = "asr_audio"
+        self.audio_gcs_delete_local = True
 
     def configure_audio_retention(
         self,
@@ -47,6 +61,22 @@ class ASRProviderBase(ABC):
         self.audio_manifest_file = str(
             config.get("audio_manifest_file") or "manifest.jsonl"
         ).strip()
+        self.audio_gcs_bucket = str(
+            config.get("audio_gcs_bucket")
+            or os.getenv("BABYMILU_ASR_AUDIO_BUCKET")
+            or ""
+        ).strip()
+        self.audio_gcs_prefix = str(
+            config.get("audio_gcs_prefix")
+            or os.getenv("BABYMILU_ASR_AUDIO_PREFIX")
+            or "asr_audio"
+        ).strip().strip("/")
+        self.audio_gcs_delete_local = self._as_bool(
+            config.get("audio_gcs_delete_local"), True
+        )
+
+    def should_persist_audio_file(self) -> bool:
+        return self.audio_retention_mode in PERSIST_AUDIO_RETENTION_MODES
 
     def finalize_audio_file(self, file_path: Optional[str], session_id: str) -> Optional[str]:
         if not file_path or not os.path.exists(file_path):
@@ -65,21 +95,25 @@ class ASRProviderBase(ABC):
             logger.bind(tag=TAG).info(f"保留ASR音频文件: {file_path}")
             return file_path
 
+        if mode in GCS_AUDIO_RETENTION_MODES:
+            return self._upload_audio_file_to_gcs(file_path, session_id)
+
         if mode != "archive":
             logger.bind(tag=TAG).warning(
                 f"未知 audio_retention_mode={mode}，保留原文件: {file_path}"
             )
             return file_path
 
+        return self._archive_audio_file(file_path, session_id)
+
+    def _archive_audio_file(self, file_path: str, session_id: str) -> Optional[str]:
         archive_root = os.path.abspath(self.audio_archive_dir or "data/asr_archive")
         date_part = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        archive_dir = os.path.join(archive_root, date_part, session_id)
+        archive_dir = os.path.join(archive_root, date_part, self._safe_path_part(session_id))
         os.makedirs(archive_dir, exist_ok=True)
         archived_path = os.path.join(archive_dir, os.path.basename(file_path))
         try:
             shutil.move(file_path, archived_path)
-            manifest_path = os.path.join(archive_root, self.audio_manifest_file)
-            os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
             record = {
                 "archivedAt": datetime.now(timezone.utc).isoformat(),
                 "sessionId": session_id,
@@ -87,13 +121,92 @@ class ASRProviderBase(ABC):
                 "archivedPath": archived_path,
                 "sizeBytes": os.path.getsize(archived_path),
             }
-            with open(manifest_path, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            self._append_audio_manifest(record)
             logger.bind(tag=TAG).info(f"已归档ASR音频文件: {archived_path}")
             return archived_path
         except Exception as e:
             logger.bind(tag=TAG).error(f"文件归档失败: {file_path} | 错误: {e}")
             return file_path
+
+    def _upload_audio_file_to_gcs(self, file_path: str, session_id: str) -> Optional[str]:
+        if not self.audio_gcs_bucket:
+            logger.bind(tag=TAG).warning(
+                f"audio_retention_mode={self.audio_retention_mode} 但未配置 audio_gcs_bucket，保留原文件: {file_path}"
+            )
+            return file_path
+
+        if storage is None:
+            logger.bind(tag=TAG).error(
+                f"google-cloud-storage 不可用，无法上传ASR音频，保留原文件: {file_path}"
+            )
+            return file_path
+
+        date_part = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        object_name = self._gcs_object_name(file_path, session_id, date_part)
+        gcs_uri = f"gs://{self.audio_gcs_bucket}/{object_name}"
+        size_bytes = os.path.getsize(file_path)
+
+        try:
+            client = storage.Client()
+            bucket = client.bucket(self.audio_gcs_bucket)
+            blob = bucket.blob(object_name)
+            blob.upload_from_filename(file_path, content_type="audio/wav")
+            record = {
+                "archivedAt": datetime.now(timezone.utc).isoformat(),
+                "sessionId": session_id,
+                "sourcePath": file_path,
+                "gcsUri": gcs_uri,
+                "sizeBytes": size_bytes,
+                "localDeleted": False,
+            }
+            if self.audio_gcs_delete_local:
+                os.remove(file_path)
+                record["localDeleted"] = True
+                logger.bind(tag=TAG).info(f"已上传并删除本地ASR音频文件: {gcs_uri}")
+            else:
+                logger.bind(tag=TAG).info(f"已上传ASR音频文件并保留本地副本: {gcs_uri}")
+            self._append_audio_manifest(record)
+            return gcs_uri
+        except Exception as e:
+            logger.bind(tag=TAG).error(
+                f"ASR音频上传GCS失败，保留原文件: {file_path} | 错误: {e}"
+            )
+            return file_path
+
+    def _append_audio_manifest(self, record: dict) -> None:
+        if not self.audio_manifest_file:
+            return
+
+        archive_root = os.path.abspath(self.audio_archive_dir or "data/asr_archive")
+        manifest_path = os.path.join(archive_root, self.audio_manifest_file)
+        os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
+        with open(manifest_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _gcs_object_name(self, file_path: str, session_id: str, date_part: str) -> str:
+        parts = [
+            self.audio_gcs_prefix,
+            date_part,
+            self._safe_path_part(session_id),
+            os.path.basename(file_path),
+        ]
+        return "/".join(part.strip("/") for part in parts if part)
+
+    @staticmethod
+    def _safe_path_part(value: Optional[str]) -> str:
+        safe = "".join(
+            char if char.isalnum() or char in ("-", "_", ".") else "_"
+            for char in str(value or "unknown")
+        )
+        return safe.strip("._") or "unknown"
+
+    @staticmethod
+    def _as_bool(value, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
     # 打开音频通道
     async def open_audio_channels(self, conn):
