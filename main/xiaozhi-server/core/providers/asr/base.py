@@ -1,12 +1,15 @@
 import os
 import io
 import re
+import sys
+import math
 import wave
 import uuid
 import json
 import time
 import shutil
 import queue
+import array
 import asyncio
 import traceback
 import threading
@@ -33,6 +36,12 @@ except Exception:
 GCS_AUDIO_RETENTION_MODES = {"gcs", "upload", "cloud"}
 PERSIST_AUDIO_RETENTION_MODES = {"archive", "keep"} | GCS_AUDIO_RETENTION_MODES
 ASCII_LETTER_PATTERN = re.compile(r"[A-Za-z]")
+ASR_SAMPLE_RATE = 16000
+ASR_AUDIO_WINDOW_MS = 20
+DEFAULT_MIN_ASR_AUDIO_DURATION_MS = 700
+DEFAULT_MIN_ASR_AUDIO_RMS_DBFS = -45.0
+DEFAULT_MIN_ASR_AUDIO_ACTIVE_MS = 400
+DEFAULT_ASR_ACTIVE_AUDIO_DBFS = -45.0
 
 
 class ASRProviderBase(ABC):
@@ -45,6 +54,10 @@ class ASRProviderBase(ABC):
         self.audio_gcs_prefix = "asr_audio"
         self.audio_gcs_delete_local = True
         self.reject_non_english_fragments = True
+        self.min_asr_audio_duration_ms = DEFAULT_MIN_ASR_AUDIO_DURATION_MS
+        self.min_asr_audio_rms_dbfs = DEFAULT_MIN_ASR_AUDIO_RMS_DBFS
+        self.min_asr_audio_active_ms = DEFAULT_MIN_ASR_AUDIO_ACTIVE_MS
+        self.asr_active_audio_dbfs = DEFAULT_ASR_ACTIVE_AUDIO_DBFS
 
     def configure_audio_retention(
         self,
@@ -80,6 +93,25 @@ class ASRProviderBase(ABC):
         self.reject_non_english_fragments = self._as_bool(
             config.get("reject_non_english_fragments"),
             self.reject_non_english_fragments,
+        )
+        self.min_asr_audio_duration_ms = max(
+            0,
+            int(
+                config.get(
+                    "min_asr_audio_duration_ms",
+                    self.min_asr_audio_duration_ms,
+                )
+            ),
+        )
+        self.min_asr_audio_rms_dbfs = float(
+            config.get("min_asr_audio_rms_dbfs", self.min_asr_audio_rms_dbfs)
+        )
+        self.min_asr_audio_active_ms = max(
+            0,
+            int(config.get("min_asr_audio_active_ms", self.min_asr_audio_active_ms)),
+        )
+        self.asr_active_audio_dbfs = float(
+            config.get("asr_active_audio_dbfs", self.asr_active_audio_dbfs)
         )
 
     def should_persist_audio_file(self) -> bool:
@@ -290,6 +322,21 @@ class ASRProviderBase(ABC):
                 pcm_data = await asyncio.to_thread(self.decode_opus, asr_audio_task)
 
             combined_pcm_data = b"".join(pcm_data)
+            audio_allowed, audio_stats, audio_reject_reason = (
+                self._should_process_asr_audio(combined_pcm_data)
+            )
+            if not audio_allowed:
+                self.stop_ws_connection()
+                persisted_audio = self._persist_rejected_asr_audio(
+                    pcm_data,
+                    conn.session_id,
+                )
+                logger.bind(tag=TAG).info(
+                    "忽略ASR音频片段: "
+                    f"reason={audio_reject_reason} stats={audio_stats} "
+                    f"persisted_audio={persisted_audio}"
+                )
+                return
 
             # 预先准备WAV数据
             wav_data = None
@@ -453,6 +500,92 @@ class ASRProviderBase(ABC):
             return False, filtered_text, "no_ascii_letters"
 
         return True, filtered_text, "ok"
+
+    def _should_process_asr_audio(self, pcm_bytes: bytes) -> tuple[bool, dict, str]:
+        stats = self._pcm_audio_stats(pcm_bytes)
+        duration_ms = stats["duration_ms"]
+        rms_dbfs = stats["rms_dbfs"]
+        active_ms = stats["active_ms"]
+
+        if (
+            self.min_asr_audio_duration_ms > 0
+            and duration_ms < self.min_asr_audio_duration_ms
+        ):
+            return False, stats, "too_short"
+
+        if rms_dbfs is None:
+            return False, stats, "empty_audio"
+
+        if (
+            self.min_asr_audio_rms_dbfs > -120
+            and rms_dbfs < self.min_asr_audio_rms_dbfs
+        ):
+            return False, stats, "too_quiet"
+
+        if self.min_asr_audio_active_ms > 0 and active_ms < self.min_asr_audio_active_ms:
+            return False, stats, "too_little_active_audio"
+
+        return True, stats, "ok"
+
+    def _pcm_audio_stats(self, pcm_bytes: bytes) -> dict:
+        sample_count = len(pcm_bytes or b"") // 2
+        if sample_count <= 0:
+            return {
+                "duration_ms": 0,
+                "rms_dbfs": None,
+                "peak_dbfs": None,
+                "active_ms": 0,
+            }
+
+        samples = array.array("h")
+        samples.frombytes(pcm_bytes[: sample_count * 2])
+        if sys.byteorder != "little":
+            samples.byteswap()
+
+        values = [int(sample) for sample in samples]
+        rms = math.sqrt(sum(sample * sample for sample in values) / len(values))
+        peak = max(abs(sample) for sample in values)
+        duration_ms = int(round(len(values) / ASR_SAMPLE_RATE * 1000))
+        rms_dbfs = 20 * math.log10(rms / 32768) if rms > 0 else -120.0
+        peak_dbfs = 20 * math.log10(peak / 32768) if peak > 0 else -120.0
+
+        window_samples = max(1, int(ASR_SAMPLE_RATE * ASR_AUDIO_WINDOW_MS / 1000))
+        active_threshold = 32768 * (10 ** (self.asr_active_audio_dbfs / 20))
+        active_ms = 0
+        for start in range(0, len(values), window_samples):
+            window = values[start : start + window_samples]
+            if not window:
+                continue
+            window_rms = math.sqrt(
+                sum(sample * sample for sample in window) / len(window)
+            )
+            if window_rms >= active_threshold:
+                active_ms += int(round(len(window) / ASR_SAMPLE_RATE * 1000))
+
+        return {
+            "duration_ms": duration_ms,
+            "rms_dbfs": round(rms_dbfs, 1),
+            "peak_dbfs": round(peak_dbfs, 1),
+            "active_ms": active_ms,
+        }
+
+    def _persist_rejected_asr_audio(
+        self,
+        pcm_data: List[bytes],
+        session_id: str,
+    ) -> Optional[str]:
+        if not self.should_persist_audio_file():
+            return None
+
+        file_path = None
+        try:
+            file_path = self.save_audio_to_file(pcm_data, session_id)
+            return self.finalize_audio_file(file_path, session_id)
+        except Exception as e:
+            logger.bind(tag=TAG).error(
+                f"忽略的ASR音频片段保留失败: {file_path} | 错误: {e}"
+            )
+            return file_path
 
     def _pcm_to_wav(self, pcm_data: bytes) -> bytes:
         """将PCM数据转换为WAV格式"""
