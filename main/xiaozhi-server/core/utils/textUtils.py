@@ -1,6 +1,8 @@
 import json
+import re
 
 TAG = __name__
+FISH_AUDIO_TAG_PATTERN = re.compile(r"\[[^\[\]\n]{1,80}\]")
 EMOJI_RANGES = [
     (0x1F600, 0x1F64F),
     (0x1F300, 0x1F5FF),
@@ -54,6 +56,13 @@ def get_allowed_emoji_list_string() -> str:
 
 def get_string_no_punctuation_or_emoji(s):
     """去除字符串首尾的空格、标点符号和表情符号"""
+    fish_tags, start = extract_leading_fish_audio_tags(s)
+    if fish_tags:
+        spoken_text = get_string_no_punctuation_or_emoji(s[start:])
+        if spoken_text:
+            return f"{fish_tags} {spoken_text}"
+        return fish_tags
+
     chars = list(s)
     # 处理开头的字符
     start = 0
@@ -64,6 +73,36 @@ def get_string_no_punctuation_or_emoji(s):
     while end >= start and is_punctuation_or_emoji(chars[end]):
         end -= 1
     return "".join(chars[start : end + 1])
+
+
+def _skip_boundary_noise_except_open_bracket(chars, start):
+    while (
+        start < len(chars)
+        and chars[start] != "["
+        and is_punctuation_or_emoji(chars[start])
+    ):
+        start += 1
+    return start
+
+
+def extract_leading_fish_audio_tags(s):
+    """Return leading Fish Audio tags and the index where spoken text begins."""
+    chars = list(s)
+    start = _skip_boundary_noise_except_open_bracket(chars, 0)
+    tags = []
+
+    while start < len(s):
+        while start < len(s) and s[start].isspace():
+            start += 1
+
+        match = FISH_AUDIO_TAG_PATTERN.match(s, start)
+        if not match:
+            break
+
+        tags.append(match.group(0))
+        start = _skip_boundary_noise_except_open_bracket(chars, match.end())
+
+    return "".join(tags), start
 
 
 def is_punctuation_or_emoji(char):
