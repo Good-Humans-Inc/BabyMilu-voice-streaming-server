@@ -5,3 +5,5 @@ __pycache__
 Dockerfile
 tmp/
 data/
+main/xiaozhi-server/tmp/
+main/xiaozhi-server/data/asr_archive/
