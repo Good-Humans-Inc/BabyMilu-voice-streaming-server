@@ -20,6 +20,7 @@ class ASRProvider(ASRProviderBase):
         self.model = config.get("model_name")        
         self.output_dir = config.get("output_dir")
         self.language = config.get("language")  # Optional: ISO-639-1 format (e.g., "en")
+        self.prompt = (config.get("prompt") or "").strip()
         self.timeout_seconds = float(config.get("timeout_seconds", 20))
         self.configure_audio_retention(config, delete_audio_file)
 
@@ -53,6 +54,8 @@ class ASRProvider(ASRProviderBase):
             # 如果配置了语言参数，添加到请求中
             if self.language:
                 data["language"] = self.language
+            if self.prompt:
+                data["prompt"] = self.prompt
 
 
             with open(file_path, "rb") as audio_file:  # 使用with语句确保文件关闭
