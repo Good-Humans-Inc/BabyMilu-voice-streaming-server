@@ -1,5 +1,6 @@
 import os
 import io
+import re
 import wave
 import uuid
 import json
@@ -31,6 +32,7 @@ except Exception:
 
 GCS_AUDIO_RETENTION_MODES = {"gcs", "upload", "cloud"}
 PERSIST_AUDIO_RETENTION_MODES = {"archive", "keep"} | GCS_AUDIO_RETENTION_MODES
+ASCII_LETTER_PATTERN = re.compile(r"[A-Za-z]")
 
 
 class ASRProviderBase(ABC):
@@ -42,6 +44,7 @@ class ASRProviderBase(ABC):
         self.audio_gcs_bucket = ""
         self.audio_gcs_prefix = "asr_audio"
         self.audio_gcs_delete_local = True
+        self.reject_non_english_fragments = True
 
     def configure_audio_retention(
         self,
@@ -73,6 +76,10 @@ class ASRProviderBase(ABC):
         ).strip().strip("/")
         self.audio_gcs_delete_local = self._as_bool(
             config.get("audio_gcs_delete_local"), True
+        )
+        self.reject_non_english_fragments = self._as_bool(
+            config.get("reject_non_english_fragments"),
+            self.reject_non_english_fragments,
         )
 
     def should_persist_audio_file(self) -> bool:
@@ -397,17 +404,23 @@ class ASRProviderBase(ABC):
             total_time = time.monotonic() - total_start_time
             logger.bind(tag=TAG).info(f"总处理耗时: {total_time:.3f}s")
 
-            # 检查文本长度
-            text_len, _ = remove_punctuation_and_length(raw_text)
+            should_forward, filtered_text, reject_reason = (
+                self._should_forward_asr_text(raw_text)
+            )
             self.stop_ws_connection()
 
-            if text_len > 0:
+            if should_forward:
                 # 构建包含说话人信息的JSON字符串
                 enhanced_text = self._build_enhanced_text(raw_text, speaker_name)
 
                 # 使用自定义模块进行上报
                 await startToChat(conn, enhanced_text)
                 enqueue_asr_report(conn, enhanced_text, asr_audio_task)
+            elif raw_text:
+                logger.bind(tag=TAG).info(
+                    "忽略ASR识别片段: "
+                    f"reason={reject_reason} filtered={filtered_text!r} raw={raw_text!r}"
+                )
 
         except Exception as e:
             logger.bind(tag=TAG).error(f"处理语音停止失败: {e}")
@@ -423,6 +436,23 @@ class ASRProviderBase(ABC):
             }, ensure_ascii=False)
         else:
             return text
+
+    def _should_forward_asr_text(self, raw_text: Optional[str]) -> tuple[bool, str, str]:
+        text_len, filtered_text = remove_punctuation_and_length(raw_text or "")
+        filtered_text = (filtered_text or "").strip()
+        if text_len <= 0 or not filtered_text:
+            return False, filtered_text, "empty_after_punctuation"
+
+        if len(filtered_text) == 1:
+            return False, filtered_text, "single_character_fragment"
+
+        if (
+            self.reject_non_english_fragments
+            and not ASCII_LETTER_PATTERN.search(filtered_text)
+        ):
+            return False, filtered_text, "no_ascii_letters"
+
+        return True, filtered_text, "ok"
 
     def _pcm_to_wav(self, pcm_data: bytes) -> bytes:
         """将PCM数据转换为WAV格式"""

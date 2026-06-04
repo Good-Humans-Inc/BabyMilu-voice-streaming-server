@@ -98,6 +98,14 @@ sys.modules.setdefault("core.utils.util", util_stub)
 from core.providers.tts import fish_audio
 from core.providers.tts.dto.dto import ContentType, SentenceType, TTSMessageDTO
 
+for _module_name, _stub in (
+    ("core.handle.reportHandle", report_stub),
+    ("core.handle.sendAudioHandle", send_audio_stub),
+    ("core.utils.util", util_stub),
+):
+    if sys.modules.get(_module_name) is _stub:
+        sys.modules.pop(_module_name)
+
 
 class _FakeResampler:
     def __init__(self, *_args, **_kwargs):
@@ -526,6 +534,42 @@ def test_fish_websocket_streams_llm_text_without_local_sentence_chunking(monkeyp
     )
     assert (SentenceType.MIDDLE, b"opus", None) in audio_items
     assert audio_items[-1] == (SentenceType.LAST, [], None)
+
+
+def test_fish_websocket_adds_fallback_tag_when_llm_omits_one(monkeypatch):
+    ws = _FakeFishWebSocket()
+    connect = _FakeFishWebSocketConnect(ws)
+    monkeypatch.setattr(fish_audio.websockets, "connect", connect)
+
+    provider = _make_provider(
+        {
+            "input_streaming": True,
+            "websocket_url": "wss://fish.test/v1/tts/live",
+            "model": "s2-pro",
+        }
+    )
+    provider._reset_response_state()
+    provider.tts_text_queue.put(
+        TTSMessageDTO(
+            sentence_id="sentence-1",
+            sentence_type=SentenceType.MIDDLE,
+            content_type=ContentType.TEXT,
+            content_detail="😤 Alright, listen up, lolo!",
+        )
+    )
+    provider.tts_text_queue.put(
+        TTSMessageDTO(
+            sentence_id="sentence-1",
+            sentence_type=SentenceType.LAST,
+            content_type=ContentType.ACTION,
+        )
+    )
+
+    asyncio.run(provider._stream_response_to_fish())
+
+    assert [event for event in ws.sent if event["event"] == "text"] == [
+        {"event": "text", "text": "[angry] Alright, listen up, lolo!"}
+    ]
 
 
 def test_fish_websocket_text_cleaner_preserves_streaming_token_spaces():

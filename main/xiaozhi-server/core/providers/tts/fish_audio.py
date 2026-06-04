@@ -29,6 +29,19 @@ DEFAULT_RETRY_429_BACKOFF_MS = 500
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 8
 DEFAULT_TOTAL_TIMEOUT_SECONDS = 60
 DEFAULT_INVALID_REFERENCE_TTL_SECONDS = 300
+DEFAULT_FALLBACK_FISH_TAG = "[friendly]"
+FALLBACK_FISH_TAG_BY_EMOTION = {
+    "smirk": "[curious]",
+    "heart": "[warm]",
+    "cheerful": "[friendly]",
+    "blush": "[embarrassed]",
+    "sad": "[sad]",
+    "laugh": "[cheerful]",
+    "sleep": "[sleepy]",
+    "starry": "[excited]",
+    "cry": "[sad]",
+    "angry": "[angry]",
+}
 
 _REQUEST_LIMITER = None
 _REQUEST_LIMITER_CAPACITY = None
@@ -208,6 +221,13 @@ class TTSProvider(TTSProviderBase):
             "1",
             "yes",
         )
+        self.ensure_emotion_tag = str(
+            config.get("ensure_emotion_tag", True)
+        ).lower() in (
+            "true",
+            "1",
+            "yes",
+        )
         self.normalize = str(config.get("normalize", True)).lower() in (
             "true",
             "1",
@@ -357,6 +377,7 @@ class TTSProvider(TTSProviderBase):
         self.processed_chars = 0
         self.is_first_sentence = True
         self._ws_first_audio_sent = False
+        self._ws_sent_text = False
 
     def tts_text_priority_thread(self):
         if self.input_streaming:
@@ -514,6 +535,75 @@ class TTSProvider(TTSProviderBase):
         cleaned_text = "".join(cleaned)
         return cleaned_text.lstrip() if had_leading_emoji else cleaned_text
 
+    def _fallback_fish_tag_for_text(self, text: str) -> str:
+        leading_token = self._leading_emoji_token(text)
+        emotion = textUtils.EMOJI_MAP.get(leading_token or "", "")
+        return FALLBACK_FISH_TAG_BY_EMOTION.get(emotion, DEFAULT_FALLBACK_FISH_TAG)
+
+    @staticmethod
+    def _leading_emoji_token(text: str) -> str:
+        stripped_text = (text or "").lstrip()
+        if not stripped_text or not textUtils.is_emoji(stripped_text[0]):
+            return ""
+
+        leading_token = stripped_text[0]
+        i = 1
+        max_scan = min(len(stripped_text), 8)
+        while i < max_scan:
+            nxt = stripped_text[i]
+            if nxt == "\u200d" and i + 1 < max_scan:
+                leading_token += nxt + stripped_text[i + 1]
+                i += 2
+                continue
+            if nxt in textUtils.EMOJI_JOINERS or textUtils._is_skin_tone_modifier(nxt):
+                leading_token += nxt
+                i += 1
+                continue
+            break
+        return leading_token
+
+    @staticmethod
+    def _strip_leading_emoji(text: str) -> str:
+        stripped = (text or "").lstrip()
+        while stripped and (
+            textUtils.is_emoji(stripped[0])
+            or stripped[0] in textUtils.EMOJI_JOINERS
+            or textUtils._is_skin_tone_modifier(stripped[0])
+        ):
+            stripped = stripped[1:].lstrip()
+        return stripped
+
+    def _ensure_fish_emotion_tag(self, text: str, source_text: str | None = None) -> str:
+        if not self.ensure_emotion_tag or not text:
+            return text
+
+        if textUtils.extract_leading_fish_audio_tags(text)[0]:
+            return text
+
+        leading_ws = text[: len(text) - len(text.lstrip())]
+        body = text.lstrip()
+        if not body:
+            return text
+
+        tag = self._fallback_fish_tag_for_text(source_text or text)
+        body = self._strip_leading_emoji(body)
+        if not body:
+            return ""
+        return f"{leading_ws}{tag} {body}"
+
+    def _ensure_initial_stream_fish_emotion_tag(self, text: str) -> str:
+        if self._ws_sent_text:
+            return text
+
+        # If the first text token begins a tag, let the LLM-provided tag pass through.
+        if text.lstrip().startswith("["):
+            return text
+
+        return self._ensure_fish_emotion_tag(
+            text,
+            source_text="".join(self.tts_text_buff),
+        )
+
     async def _next_tts_queue_message(self):
         return await asyncio.to_thread(self.tts_text_queue.get, True, 1)
 
@@ -525,8 +615,12 @@ class TTSProvider(TTSProviderBase):
         text = self._clean_stream_text_chunk(message.content_detail)
         if not text:
             return False
+        text = self._ensure_initial_stream_fish_emotion_tag(text)
+        if not text:
+            return False
 
         await ws.send(self._pack_websocket_event({"event": "text", "text": text}))
+        self._ws_sent_text = True
         logger.bind(tag=TAG).debug(f"Fish Audio WS text event: {text[:80]}")
         return True
 
@@ -707,7 +801,7 @@ class TTSProvider(TTSProviderBase):
                 "Set 'reference_id' in FishAudio config or the character's 'voice' field in Firestore."
             )
 
-        text = MarkdownCleaner.clean_markdown(text)
+        text = self._ensure_fish_emotion_tag(MarkdownCleaner.clean_markdown(text))
 
         request_data = ServeTTSRequest(
             text=text,

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sys
 from types import SimpleNamespace
@@ -163,3 +164,83 @@ def test_openai_asr_gcs_mode_keeps_local_file_without_bucket(tmp_path):
 
     assert result == str(file_path)
     assert file_path.exists()
+
+
+def test_asr_gate_rejects_noise_fragments_and_accepts_short_english(tmp_path):
+    from core.providers.asr.openai import ASRProvider
+
+    output_dir = tmp_path / "tmp"
+    output_dir.mkdir()
+    provider = ASRProvider(
+        {
+            "api_key": "test",
+            "base_url": "https://example.com/asr",
+            "model_name": "gpt-4o-mini-transcribe",
+            "output_dir": str(output_dir),
+        },
+        delete_audio_file=True,
+    )
+
+    assert provider._should_forward_asr_text(".")[0] is False
+    assert provider._should_forward_asr_text(",")[0] is False
+    assert provider._should_forward_asr_text("۵۔")[0] is False
+    assert provider._should_forward_asr_text("общими")[0] is False
+    assert provider._should_forward_asr_text("谢谢。")[0] is False
+    assert provider._should_forward_asr_text("I want you to be more emotional.")[0]
+    assert provider._should_forward_asr_text("Hi!")[0]
+    assert provider._should_forward_asr_text("Ok.")[0]
+
+
+def test_openai_asr_sends_language_and_prompt(tmp_path, monkeypatch):
+    from core.providers.asr import openai as openai_module
+    from core.providers.asr.openai import ASRProvider
+
+    output_dir = tmp_path / "tmp"
+    output_dir.mkdir()
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"text":"hello"}'
+
+        def json(self):
+            return {"text": "hello"}
+
+    def fake_post(url, files=None, data=None, headers=None, timeout=None):
+        captured["url"] = url
+        captured["data"] = dict(data or {})
+        captured["headers"] = dict(headers or {})
+        captured["timeout"] = timeout
+        assert "file" in files
+        return FakeResponse()
+
+    monkeypatch.setattr(openai_module.requests, "post", fake_post)
+
+    provider = ASRProvider(
+        {
+            "api_key": "test-key",
+            "base_url": "https://example.com/asr",
+            "model_name": "gpt-4o-transcribe",
+            "language": "en",
+            "prompt": "Only transcribe intentional nearby English speech.",
+            "output_dir": str(output_dir),
+            "timeout_seconds": 7,
+        },
+        delete_audio_file=True,
+    )
+
+    text, file_path = asyncio.run(
+        provider.speech_to_text([b"\x00\x00" * 960], "session-abc", "pcm")
+    )
+
+    assert text == "hello"
+    assert file_path is not None
+    assert not Path(file_path).exists()
+    assert captured["url"] == "https://example.com/asr"
+    assert captured["data"] == {
+        "model": "gpt-4o-transcribe",
+        "language": "en",
+        "prompt": "Only transcribe intentional nearby English speech.",
+    }
+    assert captured["headers"]["Authorization"] == "Bearer test-key"
+    assert captured["timeout"] == 7
