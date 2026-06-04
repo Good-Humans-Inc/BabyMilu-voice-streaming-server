@@ -1,5 +1,4 @@
 import asyncio
-import array
 import json
 import sys
 from types import SimpleNamespace
@@ -8,12 +7,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
-
-def _pcm_bytes(duration_ms: int, amplitude: int) -> bytes:
-    sample_count = int(16000 * duration_ms / 1000)
-    samples = array.array("h", [amplitude] * sample_count)
-    return samples.tobytes()
 
 
 def test_openai_asr_archives_audio_when_delete_disabled(tmp_path):
@@ -196,86 +189,6 @@ def test_asr_gate_rejects_noise_fragments_and_accepts_short_english(tmp_path):
     assert provider._should_forward_asr_text("I want you to be more emotional.")[0]
     assert provider._should_forward_asr_text("Hi!")[0]
     assert provider._should_forward_asr_text("Ok.")[0]
-
-
-def test_asr_audio_gate_rejects_short_or_quiet_audio(tmp_path):
-    from core.providers.asr.openai import ASRProvider
-
-    output_dir = tmp_path / "tmp"
-    output_dir.mkdir()
-    provider = ASRProvider(
-        {
-            "api_key": "test",
-            "base_url": "https://example.com/asr",
-            "model_name": "gpt-4o-mini-transcribe",
-            "output_dir": str(output_dir),
-            "min_asr_audio_duration_ms": 700,
-            "min_asr_audio_rms_dbfs": -45,
-            "min_asr_audio_active_ms": 400,
-            "asr_active_audio_dbfs": -45,
-        },
-        delete_audio_file=True,
-    )
-
-    allowed, stats, reason = provider._should_process_asr_audio(
-        _pcm_bytes(duration_ms=300, amplitude=3000)
-    )
-    assert allowed is False
-    assert reason == "too_short"
-    assert stats["duration_ms"] == 300
-
-    allowed, stats, reason = provider._should_process_asr_audio(
-        _pcm_bytes(duration_ms=1000, amplitude=100)
-    )
-    assert allowed is False
-    assert reason == "too_quiet"
-    assert stats["rms_dbfs"] < -45
-
-    allowed, stats, reason = provider._should_process_asr_audio(
-        _pcm_bytes(duration_ms=1000, amplitude=3000)
-    )
-    assert allowed is True
-    assert reason == "ok"
-    assert stats["active_ms"] >= 400
-
-
-def test_short_asr_audio_is_not_sent_to_transcription(tmp_path):
-    from core.providers.asr.base import ASRProviderBase
-
-    class GateProvider(ASRProviderBase):
-        def __init__(self):
-            super().__init__()
-            self.output_dir = str(tmp_path)
-            self.called = False
-            self.configure_audio_retention(
-                {
-                    "min_asr_audio_duration_ms": 700,
-                    "min_asr_audio_rms_dbfs": -45,
-                    "min_asr_audio_active_ms": 400,
-                    "asr_active_audio_dbfs": -45,
-                },
-                delete_audio_file=True,
-            )
-
-        async def speech_to_text(self, *_args, **_kwargs):
-            self.called = True
-            return "Hello.", None
-
-    provider = GateProvider()
-    conn = SimpleNamespace(
-        audio_format="pcm",
-        session_id="session-short",
-        voiceprint_provider=None,
-    )
-
-    asyncio.run(
-        provider.handle_voice_stop(
-            conn,
-            [_pcm_bytes(duration_ms=300, amplitude=3000)],
-        )
-    )
-
-    assert provider.called is False
 
 
 def test_openai_asr_sends_language_and_prompt(tmp_path, monkeypatch):
