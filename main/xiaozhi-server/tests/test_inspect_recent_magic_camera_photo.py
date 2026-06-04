@@ -28,12 +28,12 @@ def _extract_payload(result) -> dict:
     return json.loads(lines[-1])
 
 
-def test_select_recent_magic_photo_prefers_recent_non_deleted_photo():
+def test_select_recent_magic_photo_prefers_latest_non_deleted_photo():
     now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
     photos = [
         {
-            "id": "old-photo",
-            "processedPhotoUrl": "https://example.com/old.png",
+            "id": "older-photo",
+            "processedPhotoUrl": "https://example.com/older.png",
             "createdAt": now - timedelta(hours=30),
         },
         {
@@ -46,6 +46,21 @@ def test_select_recent_magic_photo_prefers_recent_non_deleted_photo():
     selected = inspect_module._select_recent_magic_photo(photos, now=now)
 
     assert selected["id"] == "fresh-photo"
+
+
+def test_select_recent_magic_photo_can_apply_optional_recency_window():
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    photos = [
+        {
+            "id": "old-photo",
+            "processedPhotoUrl": "https://example.com/old.png",
+            "createdAt": now - timedelta(hours=30),
+        }
+    ]
+
+    selected = inspect_module._select_recent_magic_photo(photos, now=now)
+
+    assert selected is None
 
 
 def test_select_recent_magic_photo_skips_deleted_or_url_less_entries():
@@ -78,6 +93,42 @@ def test_select_photo_url_prefers_original_photo_url_over_processed_url():
     )
 
     assert selected_url == "https://example.com/original.png"
+
+
+def test_select_photo_url_supports_photo_collection_url_fields():
+    selected_url = inspect_module._select_photo_url(
+        {
+            "downloadUrl": "https://example.com/download.jpeg",
+            "gcsPath": "raw_photos/example.jpeg",
+        }
+    )
+
+    assert selected_url == "https://example.com/download.jpeg"
+
+
+def test_load_candidate_photos_merges_moments_and_photos(monkeypatch):
+    calls = []
+
+    def fake_load_collection_items(uid, collection_name, *, limit):
+        calls.append((uid, collection_name, limit))
+        return [{"id": collection_name, "source_collection": collection_name}]
+
+    monkeypatch.setattr(
+        inspect_module,
+        "_load_collection_items",
+        fake_load_collection_items,
+    )
+
+    candidates = inspect_module._load_candidate_photos("+15551234567", limit=3)
+
+    assert candidates == [
+        {"id": "moments", "source_collection": "moments"},
+        {"id": "photos", "source_collection": "photos"},
+    ]
+    assert calls == [
+        ("+15551234567", "moments", 3),
+        ("+15551234567", "photos", 3),
+    ]
 
 
 def test_get_openai_client_falls_back_to_selected_llm_config(monkeypatch):
@@ -148,15 +199,14 @@ def test_tool_returns_no_match_when_uid_is_missing(monkeypatch):
     assert payload["recency_window_hours"] == inspect_module.RECENCY_WINDOW_HOURS
 
 
-def test_tool_returns_no_match_when_recent_photo_is_missing(monkeypatch):
+def test_tool_returns_no_match_when_usable_image_is_missing(monkeypatch):
     monkeypatch.setattr(inspect_module, "get_owner_phone_for_device", lambda _: "+15551234567")
     monkeypatch.setattr(
         inspect_module,
         "_load_candidate_photos",
         lambda uid: [
             {
-                "id": "old-photo",
-                "processedPhotoUrl": "https://example.com/old.png",
+                "id": "url-less-photo",
                 "createdAt": "2026-05-04T12:00:00+00:00",
             }
         ],
@@ -181,10 +231,18 @@ def test_tool_returns_analysis_payload_for_recent_photo(monkeypatch):
         "_load_candidate_photos",
         lambda uid: [
             {
-                "id": "photo-123",
-                "processedPhotoUrl": "https://example.com/fresh.png",
+                "id": "moment-123",
+                "photoUrl": "https://example.com/moment.png",
                 "caption": "look at this",
+                "text": "Not just a workspace",
                 "createdAt": "2026-05-06T10:30:00+00:00",
+                "source_collection": "moments",
+            },
+            {
+                "id": "photo-456",
+                "downloadUrl": "https://example.com/photo.png",
+                "createdAt": "2026-05-06T09:30:00+00:00",
+                "source_collection": "photos",
             }
         ],
     )
@@ -216,6 +274,8 @@ def test_tool_returns_analysis_payload_for_recent_photo(monkeypatch):
 
     assert result.action == Action.REQLLM
     assert payload["status"] == "found"
-    assert payload["photo_id"] == "photo-123"
+    assert payload["photo_id"] == "moment-123"
+    assert payload["source_collection"] == "moments"
     assert payload["caption"] == "look at this"
+    assert payload["text"] == "Not just a workspace"
     assert payload["analysis"]["summary"] == "A painted figurine sits on a desk."

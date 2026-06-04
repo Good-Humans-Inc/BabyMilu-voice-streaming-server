@@ -1,15 +1,17 @@
-"""LLM tool: inspect_recent_magic_camera_photo
+"""LLM tool: inspect_recent_photo
 
-Inspect the user's most recent Magic Camera photo within a recent time window
-and return grounded visual context for the main character model.
+Inspect the user's most recent photo within a recent time window and return
+grounded visual context for the main character model.
 """
 from __future__ import annotations
 
 import json
+import hashlib
 import mimetypes
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 from google.cloud import firestore
@@ -25,25 +27,35 @@ from plugins_func.register import Action, ActionResponse, ToolType, register_fun
 TAG = __name__
 logger = setup_logging()
 
-RECENCY_WINDOW_HOURS = int(os.environ.get("MAGIC_CAMERA_LOOKBACK_HOURS", "24"))
-PHOTO_QUERY_LIMIT = int(os.environ.get("MAGIC_CAMERA_QUERY_LIMIT", "5"))
-OPENAI_MODEL = os.environ.get("MAGIC_CAMERA_INSPECT_MODEL", "gpt-4o-mini").strip()
+RECENCY_WINDOW_HOURS = int(os.environ.get("RECENT_PHOTO_LOOKBACK_HOURS", "24"))
+PHOTO_QUERY_LIMIT = int(os.environ.get("RECENT_PHOTO_QUERY_LIMIT", "20"))
+OPENAI_MODEL = os.environ.get("RECENT_PHOTO_INSPECT_MODEL", "gpt-4o-mini").strip()
+PHOTO_SOURCE_COLLECTIONS = ("moments", "photos")
+PHOTO_URL_FIELDS = (
+    "photoUrl",
+    "processedPhotoUrl",
+    "cardUrl",
+    "imageUrl",
+    "image_url",
+    "url",
+    "downloadUrl",
+    "publicUrl",
+    "mediaUrl",
+    "thumbnailUrl",
+)
+PHOTO_DATE_FIELDS = ("createdAt", "displayAt", "updatedAt")
 
-INSPECT_MAGIC_CAMERA_PHOTO_FUNCTION_DESC = {
+INSPECT_RECENT_PHOTO_FUNCTION_DESC = {
     "type": "function",
     "function": {
-        "name": "inspect_recent_magic_camera_photo",
+        "name": "inspect_recent_photo",
         "description": (
-            "Use this whenever the user wants you to inspect, react to, discuss, "
-            "or interpret a recent photo taken with Magic Camera in the app. "
-            "Also use it when the user refers to a photo, picture, image, "
-            "painting, drawing, artwork, selfie, or screenshot they just took, "
-            "sent, shared, uploaded, or want you to check, even if they do not "
-            "repeat the words Magic Camera in their latest sentence. "
-            "The tool finds the most recent qualifying Magic Camera photo in the "
-            "allowed recency window, analyzes it, and returns a rich grounded "
-            "description for your in-character response. If no qualifying photo "
-            "is found, it returns a no-match result instead of guessing."
+            "Use this tool when the user wants you to inspect, react to, "
+            "discuss, or interpret a recent photo in the app. The tool finds "
+            "the most recent photo in the allowed recency window, analyzes it, "
+            "and returns a rich grounded description for you to use in your "
+            "in-character response. If no qualifying photo is found, it returns "
+            "a no-match result."
         ),
         "parameters": {
             "type": "object",
@@ -54,18 +66,18 @@ INSPECT_MAGIC_CAMERA_PHOTO_FUNCTION_DESC = {
 }
 
 VISION_ANALYSIS_PROMPT = """
-You are analyzing a user's recent Magic Camera photo for BabyMilu's voice
-interaction system. Your job is to inspect the image and return structured,
-grounded visual context for another LLM that will speak to the user in
-character. Do not address the user directly. Do not praise, critique, or give
-advice. Do not invent details that are not visible. If something is uncertain,
-ambiguous, partially obscured, stylized, or hard to identify, say so clearly.
-Prefer concrete observations over vague adjectives. If the image contains art,
-craft, cosplay, handwriting, design work, or other creative output, pay close
-attention to medium, texture, detail choices, and presentation. If little
-meaningful content is visible, say so instead of guessing.
+You are analyzing a user's recent photo for BabyMilu's voice interaction
+system. Your job is to inspect the image and return structured, grounded visual
+context for another LLM that will speak to the user in character. Do not address
+the user directly. Do not praise, critique, or give advice. Do not invent
+details that are not visible. If something is uncertain, ambiguous, partially
+obscured, stylized, or hard to identify, say so clearly. Prefer concrete
+observations over vague adjectives. If the image contains art, craft, cosplay,
+handwriting, design work, or other creative output, pay close attention to
+medium, texture, detail choices, and presentation. If little meaningful content
+is visible, say so instead of guessing.
 
-Return valid JSON matching this exact shape:
+Return valid structured output matching this shape:
 {
   "summary": "string",
   "detailed_description": "string",
@@ -97,12 +109,12 @@ def _utc_now() -> datetime:
 
 def _resolve_openai_client_config(conn: Any | None = None) -> Dict[str, str]:
     env_api_key = (
-        os.environ.get("MAGIC_CAMERA_OPENAI_API_KEY")
+        os.environ.get("RECENT_PHOTO_OPENAI_API_KEY")
         or os.environ.get("OPENAI_API_KEY")
         or ""
     ).strip()
     env_base_url = (
-        os.environ.get("MAGIC_CAMERA_OPENAI_BASE_URL")
+        os.environ.get("RECENT_PHOTO_OPENAI_BASE_URL")
         or os.environ.get("OPENAI_BASE_URL")
         or ""
     ).strip()
@@ -142,7 +154,7 @@ def _resolve_openai_client_config(conn: Any | None = None) -> Dict[str, str]:
         return resolved
 
     raise RuntimeError(
-        "Missing Magic Camera OpenAI credentials in environment and selected LLM config"
+        "Missing recent photo OpenAI credentials in environment and selected LLM config"
     )
 
 
@@ -180,39 +192,167 @@ def _normalize_datetime(value: Any) -> Optional[datetime]:
 
 
 def _select_photo_url(photo: Dict[str, Any]) -> Optional[str]:
-    for key in ("photoUrl", "processedPhotoUrl", "cardUrl"):
+    for key in PHOTO_URL_FIELDS:
         value = str(photo.get(key) or "").strip()
         if value:
             return value
+    gcs_path = str(photo.get("gcsPath") or "").strip()
+    bucket = (
+        os.environ.get("RECENT_PHOTO_GCS_BUCKET")
+        or os.environ.get("FIREBASE_STORAGE_BUCKET")
+        or os.environ.get("GCS_BUCKET")
+        or ""
+    ).strip()
+    if gcs_path and bucket:
+        return f"https://storage.googleapis.com/{bucket}/{gcs_path.lstrip('/')}"
     return None
 
 
-def _select_recent_magic_photo(
+def _truncate_log_value(value: Any, *, max_length: int = 180) -> str:
+    text = str(value or "").replace("\n", " ").strip()
+    if len(text) <= max_length:
+        return text
+    return text[: max_length - 3] + "..."
+
+
+def _select_photo_url_field(photo: Dict[str, Any]) -> Optional[str]:
+    for key in PHOTO_URL_FIELDS:
+        value = str(photo.get(key) or "").strip()
+        if value:
+            return key
+    gcs_path = str(photo.get("gcsPath") or "").strip()
+    bucket = (
+        os.environ.get("RECENT_PHOTO_GCS_BUCKET")
+        or os.environ.get("FIREBASE_STORAGE_BUCKET")
+        or os.environ.get("GCS_BUCKET")
+        or ""
+    ).strip()
+    if gcs_path and bucket:
+        return "gcsPath"
+    return None
+
+
+def _select_photo_timestamp(photo: Dict[str, Any]) -> Optional[datetime]:
+    for key in PHOTO_DATE_FIELDS:
+        timestamp = _normalize_datetime(photo.get(key))
+        if timestamp is not None:
+            return timestamp
+    return None
+
+
+def _select_photo_timestamp_field(photo: Dict[str, Any]) -> Optional[str]:
+    for key in PHOTO_DATE_FIELDS:
+        if _normalize_datetime(photo.get(key)) is not None:
+            return key
+    return None
+
+
+def _cache_busted_photo_url(photo_url: str) -> str:
+    parts = urlsplit(photo_url)
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    query.append(
+        (
+            "_recent_photo_cache_bust",
+            str(int(_utc_now().timestamp() * 1000)),
+        )
+    )
+    return urlunsplit(
+        (
+            parts.scheme,
+            parts.netloc,
+            parts.path,
+            urlencode(query),
+            parts.fragment,
+        )
+    )
+
+
+def _select_recent_photo(
     photos: Iterable[Dict[str, Any]],
     *,
     lookback_hours: int = RECENCY_WINDOW_HOURS,
     now: Optional[datetime] = None,
 ) -> Optional[Dict[str, Any]]:
     now = now or _utc_now()
-    cutoff = now - timedelta(hours=max(1, lookback_hours))
+    cutoff = None
+    if lookback_hours and lookback_hours > 0:
+        cutoff = now - timedelta(hours=lookback_hours)
+
+    candidates: List[tuple[datetime, Dict[str, Any]]] = []
     for photo in photos:
+        photo_id = photo.get("id")
+        source_collection = photo.get("source_collection")
         if photo.get("deletedAt"):
+            logger.bind(tag=TAG).info(
+                "Recent photo candidate skipped: "
+                f"id={photo_id}, source={source_collection}, reason=deletedAt_present"
+            )
             continue
-        created_at = _normalize_datetime(photo.get("createdAt"))
-        if created_at is None or created_at < cutoff:
+        created_at = _select_photo_timestamp(photo)
+        if created_at is None:
+            logger.bind(tag=TAG).info(
+                "Recent photo candidate skipped: "
+                f"id={photo_id}, source={source_collection}, reason=missing_timestamp"
+            )
             continue
-        if not _select_photo_url(photo):
+        timestamp_field = _select_photo_timestamp_field(photo)
+        url_field = _select_photo_url_field(photo)
+        if not url_field:
+            logger.bind(tag=TAG).info(
+                "Recent photo candidate skipped: "
+                f"id={photo_id}, source={source_collection}, "
+                f"timestamp={created_at.isoformat()}, timestamp_field={timestamp_field}, "
+                "reason=missing_url"
+            )
             continue
-        return photo
-    return None
+        if cutoff is not None and created_at < cutoff:
+            logger.bind(tag=TAG).info(
+                "Recent photo candidate skipped: "
+                f"id={photo_id}, source={source_collection}, "
+                f"timestamp={created_at.isoformat()}, timestamp_field={timestamp_field}, "
+                f"url_field={url_field}, cutoff={cutoff.isoformat()}, "
+                "reason=outside_recency_window"
+            )
+            continue
+        logger.bind(tag=TAG).info(
+            "Recent photo candidate accepted: "
+            f"id={photo_id}, source={source_collection}, "
+            f"timestamp={created_at.isoformat()}, timestamp_field={timestamp_field}, "
+            f"url_field={url_field}"
+        )
+        candidates.append((created_at, photo))
+
+    if not candidates:
+        logger.bind(tag=TAG).info(
+            "Recent photo selection found no usable candidates: "
+            f"lookback_hours={lookback_hours}, cutoff={cutoff.isoformat() if cutoff else None}"
+        )
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    selected_at, selected_photo = candidates[0]
+    logger.bind(tag=TAG).info(
+        "Recent photo selected: "
+        f"id={selected_photo.get('id')}, "
+        f"source={selected_photo.get('source_collection')}, "
+        f"timestamp={selected_at.isoformat()}, "
+        f"timestamp_field={_select_photo_timestamp_field(selected_photo)}, "
+        f"url_field={_select_photo_url_field(selected_photo)}, "
+        f"accepted_candidates={len(candidates)}"
+    )
+    return selected_photo
 
 
-def _load_candidate_photos(uid: str, *, limit: int = PHOTO_QUERY_LIMIT) -> List[Dict[str, Any]]:
+def _load_collection_items(
+    uid: str,
+    collection_name: str,
+    *,
+    limit: int = PHOTO_QUERY_LIMIT,
+) -> List[Dict[str, Any]]:
     client = get_firestore_client()
     snaps = (
         client.collection("users")
         .document(uid)
-        .collection("magicPhotos")
+        .collection(collection_name)
         .order_by("createdAt", direction=firestore.Query.DESCENDING)
         .limit(max(1, limit))
         .stream()
@@ -224,15 +364,43 @@ def _load_candidate_photos(uid: str, *, limit: int = PHOTO_QUERY_LIMIT) -> List[
             continue
         data = snap.to_dict() or {}
         data.setdefault("id", getattr(snap, "id", None))
+        data.setdefault("source_collection", collection_name)
         photos.append(data)
+    logger.bind(tag=TAG).info(
+        "Recent photo collection loaded: "
+        f"uid={uid}, collection={collection_name}, count={len(photos)}, limit={limit}"
+    )
+    return photos
+
+
+def _load_candidate_photos(uid: str, *, limit: int = PHOTO_QUERY_LIMIT) -> List[Dict[str, Any]]:
+    photos: List[Dict[str, Any]] = []
+    for collection_name in PHOTO_SOURCE_COLLECTIONS:
+        photos.extend(_load_collection_items(uid, collection_name, limit=limit))
+    logger.bind(tag=TAG).info(
+        "Recent photo candidates loaded: "
+        f"uid={uid}, total={len(photos)}, collections={list(PHOTO_SOURCE_COLLECTIONS)}"
+    )
     return photos
 
 
 def _download_image_as_data_url(photo_url: str) -> str:
     if photo_url.startswith("data:"):
+        logger.bind(tag=TAG).info(
+            "Recent photo image input is already a data URL: "
+            f"length={len(photo_url)}"
+        )
         return photo_url
 
-    response = requests.get(photo_url, timeout=20)
+    request_url = _cache_busted_photo_url(photo_url)
+    response = requests.get(
+        request_url,
+        timeout=20,
+        headers={
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        },
+    )
     response.raise_for_status()
 
     content_type = response.headers.get("Content-Type", "").split(";")[0].strip()
@@ -241,6 +409,13 @@ def _download_image_as_data_url(photo_url: str) -> str:
         content_type = guessed_type or "image/png"
 
     import base64
+
+    image_sha256 = hashlib.sha256(response.content).hexdigest()
+    logger.bind(tag=TAG).info(
+        "Recent photo image downloaded: "
+        f"status={response.status_code}, content_type={content_type}, "
+        f"bytes={len(response.content)}, sha256={image_sha256[:16]}"
+    )
 
     encoded = base64.b64encode(response.content).decode("utf-8")
     return f"data:{content_type};base64,{encoded}"
@@ -355,7 +530,7 @@ def _parse_analysis_json(text: str) -> Dict[str, Any]:
         raise ValueError(f"Vision model returned invalid JSON: {exc}") from exc
 
 
-def _analyze_magic_camera_photo(photo_url: str, conn: Any | None = None) -> Dict[str, Any]:
+def _analyze_recent_photo(photo_url: str, conn: Any | None = None) -> Dict[str, Any]:
     client = _get_openai_client(conn)
     image_input = _download_image_as_data_url(photo_url)
     response = client.responses.create(
@@ -379,13 +554,18 @@ def _analyze_magic_camera_photo(photo_url: str, conn: Any | None = None) -> Dict
 
 def _build_tool_result(payload: Dict[str, Any]) -> str:
     guidance = (
-        "Magic Camera inspection result. "
-        "If status is 'found', respond in character as a creative companion: "
-        "mention specific visible details, react with genuine feeling, add only "
-        "light grounded interpretation, and invite the user's story when natural. "
-        "If status is 'no_match', clearly say you couldn't find a recent Magic "
-        "Camera photo to inspect, ask the user to take one in the app, and say "
-        "you can patiently wait for them to come back with their masterpiece. "
+        "Recent photo inspection result. "
+        "Treat this tool output as the authoritative fresh photo context, even "
+        "if earlier conversation summaries mention a different image. "
+        "If status is 'found', respond in character like a warm companion who "
+        "actually looked at what the user shared: notice 1-2 specific visible "
+        "details and respond in a way that fits the subject. If the photo feels "
+        "personal, expressive, aesthetic, emotional, or creative, you can be "
+        "more interpretive. If it is ordinary or practical, keep the response "
+        "grounded and casual. Do not over-romanticize it, sound like a critic, "
+        "captioning system, teacher, productivity coach, or use child-directed "
+        "language. If status is 'no_match', clearly say you couldn't find a "
+        "recent photo to inspect and ask the user to share one in the app. "
         "If status is 'error', briefly say you couldn't look at the photo just now "
         "and invite them to try again."
     )
@@ -393,11 +573,11 @@ def _build_tool_result(payload: Dict[str, Any]) -> str:
 
 
 @register_function(
-    "inspect_recent_magic_camera_photo",
-    INSPECT_MAGIC_CAMERA_PHOTO_FUNCTION_DESC,
+    "inspect_recent_photo",
+    INSPECT_RECENT_PHOTO_FUNCTION_DESC,
     ToolType.SYSTEM_CTL,
 )
-def inspect_recent_magic_camera_photo(conn) -> ActionResponse:
+def inspect_recent_photo(conn) -> ActionResponse:
     uid = get_owner_phone_for_device(conn.device_id)
     if not uid:
         payload = {
@@ -405,18 +585,20 @@ def inspect_recent_magic_camera_photo(conn) -> ActionResponse:
             "photo_found": False,
             "reason": "No linked user was found for this device.",
             "recency_window_hours": RECENCY_WINDOW_HOURS,
+            "source_collections": list(PHOTO_SOURCE_COLLECTIONS),
         }
         return ActionResponse(action=Action.REQLLM, result=_build_tool_result(payload))
 
     try:
         photos = _load_candidate_photos(uid)
-        photo = _select_recent_magic_photo(photos)
+        photo = _select_recent_photo(photos)
         if not photo:
             payload = {
                 "status": "no_match",
                 "photo_found": False,
-                "reason": "No recent Magic Camera photo was found in the allowed recency window.",
+                "reason": "No usable recent photo was found.",
                 "recency_window_hours": RECENCY_WINDOW_HOURS,
+                "source_collections": list(PHOTO_SOURCE_COLLECTIONS),
             }
             return ActionResponse(action=Action.REQLLM, result=_build_tool_result(payload))
 
@@ -425,39 +607,51 @@ def inspect_recent_magic_camera_photo(conn) -> ActionResponse:
             payload = {
                 "status": "no_match",
                 "photo_found": False,
-                "reason": "A recent Magic Camera photo exists, but no usable image URL was found.",
+                "reason": "A recent photo exists, but no usable image URL was found.",
                 "recency_window_hours": RECENCY_WINDOW_HOURS,
+                "source_collections": list(PHOTO_SOURCE_COLLECTIONS),
             }
             return ActionResponse(action=Action.REQLLM, result=_build_tool_result(payload))
 
-        analysis = _analyze_magic_camera_photo(photo_url, conn)
+        analysis = _analyze_recent_photo(photo_url, conn)
         created_at = _normalize_datetime(photo.get("createdAt"))
+        logger.bind(tag=TAG).info(
+            "Recent photo analysis completed: "
+            f"id={photo.get('id')}, source={photo.get('source_collection')}, "
+            f"createdAt={created_at.isoformat() if created_at else None}, "
+            f"summary={_truncate_log_value(analysis.get('summary'))}, "
+            f"notable_objects={_truncate_log_value(analysis.get('notable_objects'))}"
+        )
         payload = {
             "status": "found",
             "photo_found": True,
             "photo_id": photo.get("id"),
             "capture_timestamp": created_at.isoformat() if created_at else None,
             "recency_window_hours": RECENCY_WINDOW_HOURS,
+            "source_collection": photo.get("source_collection"),
             "caption": photo.get("caption") or "",
+            "text": photo.get("text") or "",
             "analysis": analysis,
         }
         return ActionResponse(action=Action.REQLLM, result=_build_tool_result(payload))
 
     except (APIError, requests.RequestException, ValueError, RuntimeError) as exc:
-        logger.bind(tag=TAG).error(f"Magic Camera inspection failed for {uid}: {exc}")
+        logger.bind(tag=TAG).error(f"Recent photo inspection failed for {uid}: {exc}")
         payload = {
             "status": "error",
             "photo_found": False,
             "reason": str(exc),
             "recency_window_hours": RECENCY_WINDOW_HOURS,
+            "source_collections": list(PHOTO_SOURCE_COLLECTIONS),
         }
         return ActionResponse(action=Action.REQLLM, result=_build_tool_result(payload))
     except Exception as exc:  # pragma: no cover - defensive catch for prod safety
-        logger.bind(tag=TAG).error(f"Unexpected Magic Camera inspection failure: {exc}")
+        logger.bind(tag=TAG).error(f"Unexpected recent photo inspection failure: {exc}")
         payload = {
             "status": "error",
             "photo_found": False,
-            "reason": "Unexpected error while inspecting the recent Magic Camera photo.",
+            "reason": "Unexpected error while inspecting the recent photo.",
             "recency_window_hours": RECENCY_WINDOW_HOURS,
+            "source_collections": list(PHOTO_SOURCE_COLLECTIONS),
         }
         return ActionResponse(action=Action.REQLLM, result=_build_tool_result(payload))
