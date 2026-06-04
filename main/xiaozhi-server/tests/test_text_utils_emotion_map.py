@@ -74,3 +74,19 @@ def test_blush_and_default_emotions_still_work():
     payload = _llm_emotion_payload("plain response")
     assert payload["text"] == "😄"
     assert payload["emotion"] == "normal"
+
+
+def test_tts_text_cleanup_preserves_leading_fish_audio_tags():
+    cleaned = textUtils.get_string_no_punctuation_or_emoji(
+        "😄 [brave] I'll defeat the dragon!"
+    )
+
+    assert cleaned == "[brave] I'll defeat the dragon"
+
+
+def test_tts_text_cleanup_preserves_stacked_fish_audio_tags():
+    cleaned = textUtils.get_string_no_punctuation_or_emoji(
+        "[struggling][panting] 😟 This is... harder than... I thought!"
+    )
+
+    assert cleaned == "[struggling][panting] This is... harder than... I thought"
