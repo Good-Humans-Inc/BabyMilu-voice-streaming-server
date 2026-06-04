@@ -60,7 +60,6 @@ from services import log_context
 
 from core.utils.api_client import query_task, get_assigned_tasks_for_user, process_user_action
 TAG = __name__
-TEST_DEVICE_ID = "90:e5:b1:a8:ac:dc"
 TOOL_WAIT_PLACEHOLDERS = {
     "inspect_recent_photo": "hmmm",
 }
@@ -698,8 +697,9 @@ class ConnectionHandler:
             # 认证通过,继续处理
             self.websocket = ws
 
-            # Hardcode device-id for local testing. Do not keep this in staging/production.
-            self.device_id = TEST_DEVICE_ID
+            # Normalize device-id to lower-case so it matches sessionContexts doc IDs
+            raw_device_id = self.headers.get("device-id")
+            self.device_id = raw_device_id.lower() if isinstance(raw_device_id, str) else raw_device_id
 
             # Attach device-id to *all* logs emitted within this connection.
             # - Bind it onto the per-connection logger (covers executor threads too)
