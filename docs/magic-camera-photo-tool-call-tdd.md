@@ -3,7 +3,7 @@
 ## Purpose
 
 This document defines the V1 behavior, conversation contract, and evaluation
-plan for the `inspect_recent_magic_camera_photo` tool call.
+plan for the `inspect_recent_photo` tool call.
 
 The goals are:
 
@@ -46,18 +46,18 @@ user toward the next step in a warm, concrete way.
 
 ### Tool Name
 
-- `inspect_recent_magic_camera_photo`
+- `inspect_recent_photo`
 
 ### Current implementation files
 
 - Tool implementation:
-  [inspect_recent_magic_camera_photo.py](/Users/yan/Desktop/BabyMilu/.worktrees/magic-camera-photo-lookup/main/xiaozhi-server/plugins_func/functions/inspect_recent_magic_camera_photo.py)
+  [inspect_recent_photo.py](/Users/yan/Desktop/BabyMilu/BabyMilu-voice-streaming-server/main/xiaozhi-server/plugins_func/functions/inspect_recent_photo.py)
 - Prompt wiring:
-  [agent-base-prompt.txt](/Users/yan/Desktop/BabyMilu/.worktrees/magic-camera-photo-lookup/main/xiaozhi-server/agent-base-prompt.txt)
+  [agent-base-prompt.txt](/Users/yan/Desktop/BabyMilu/BabyMilu-voice-streaming-server/main/xiaozhi-server/agent-base-prompt.txt)
 - Focused tests:
-  [test_inspect_recent_magic_camera_photo.py](/Users/yan/Desktop/BabyMilu/.worktrees/magic-camera-photo-lookup/main/xiaozhi-server/tests/test_inspect_recent_magic_camera_photo.py)
+  [test_inspect_recent_photo.py](/Users/yan/Desktop/BabyMilu/BabyMilu-voice-streaming-server/main/xiaozhi-server/tests/test_inspect_recent_photo.py)
 - Shared smoke scenario:
-  [interaction.py](/Users/yan/Desktop/BabyMilu/.worktrees/magic-camera-photo-lookup/tools/smoke/harness/scenarios/interaction.py)
+  [interaction.py](/Users/yan/Desktop/BabyMilu/BabyMilu-voice-streaming-server/tools/smoke/harness/scenarios/interaction.py)
 
 ### Data lookup model
 
@@ -65,10 +65,12 @@ For staging and current dev testing, the tool resolves:
 
 - `device_id -> ownerPhone`
 - `uid = ownerPhone`
-- Firestore path: `users/{uid}/magicPhotos/{photoId}`
+- Firestore paths:
+  - `users/{uid}/moments/{momentId}` for Magic Camera moments
+  - `users/{uid}/photos/{photoId}` for peek captures and uploads
 
-The Firestore document stores metadata plus image URLs. The image itself is not
-stored inline in Firestore.
+The Firestore document stores metadata plus either direct image URLs or a
+private `gcsPath`. The image itself is not stored inline in Firestore.
 
 ### Recent-photo selection rules
 
@@ -83,6 +85,28 @@ Current URL preference order:
 1. `photoUrl`
 2. `processedPhotoUrl`
 3. `cardUrl`
+4. `imageUrl`
+5. `image_url`
+6. `url`
+7. `downloadUrl`
+8. `publicUrl`
+9. `mediaUrl`
+10. `thumbnailUrl`
+11. `gcsPath`, signed with a short-lived GCS URL when a bucket env is configured
+
+The `gcsPath` bucket can be provided through one of:
+
+- `RECENT_PHOTO_GCS_BUCKET`
+- `PRIVATE_PHOTOS_BUCKET`
+- `PEEK_PHOTOS_BUCKET`
+- `FIREBASE_STORAGE_BUCKET`
+- `GCS_BUCKET`
+- `OUTPUT_BUCKET`
+
+Signed URLs default to a `15 minute` TTL and can be tuned with
+`RECENT_PHOTO_SIGNED_URL_TTL_MINUTES` or `PEEK_SIGNED_URL_TTL_MINUTES`.
+Signed URLs must be fetched exactly as generated; the downloader must not append
+cache-busting query params because that invalidates the GCS V4 signature.
 
 Current recency window:
 
@@ -98,7 +122,7 @@ The conversation behavior should be evaluated in three buckets:
 
 ### 1. Tool Routing
 
-BabyMilu should call `inspect_recent_magic_camera_photo` when the user is
+BabyMilu should call `inspect_recent_photo` when the user is
 clearly asking about a recent Magic Camera photo, including direct and indirect
 follow-ups.
 
@@ -227,13 +251,14 @@ Expected minimum reply qualities:
 
 Focused unit coverage lives in:
 
-- [test_inspect_recent_magic_camera_photo.py](/Users/yan/Desktop/BabyMilu/.worktrees/magic-camera-photo-lookup/main/xiaozhi-server/tests/test_inspect_recent_magic_camera_photo.py)
+- [test_inspect_recent_photo.py](/Users/yan/Desktop/BabyMilu/BabyMilu-voice-streaming-server/main/xiaozhi-server/tests/test_inspect_recent_photo.py)
 
 Current unit-test areas include:
 
 - recent photo selection
 - deleted / missing-URL filtering
 - URL preference order
+- private `gcsPath` signed-URL selection for peek photos
 - OpenAI client config fallback
 - recovery from malformed JSON escape sequences
 - `no_match` responses
@@ -248,7 +273,7 @@ Additional unit coverage to add if needed:
 
 Shared smoke coverage should validate:
 
-- the live runtime advertises `inspect_recent_magic_camera_photo`
+- the live runtime advertises `inspect_recent_photo`
 - the LLM emits the tool call for a direct photo-check request
 - the tool executes and returns one of `found`, `no_match`, or `error`
 - the assistant does not fall back to “I can only imagine it” when the tool was
