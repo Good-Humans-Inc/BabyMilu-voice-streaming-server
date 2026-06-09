@@ -43,11 +43,17 @@ def test_cheerful_emojis_are_hardcoded_and_allowed():
     assert set(textUtils.CANONICAL_EMOTION_MAP["cheerful"]) == cheerful_emojis
     assert textUtils.CANONICAL_EMOTION_MAP["blush"] == ["😳"]
     assert "🫥" in textUtils.CANONICAL_EMOTION_MAP["smirk"]
+    assert "😑" not in textUtils.CANONICAL_EMOTION_MAP["smirk"]
+    assert {"😑", "😅", "😓", "😶", "😯", "🤦", "🙄", "😮‍💨", "💀"} == set(
+        textUtils.CANONICAL_EMOTION_MAP["speechless"]
+    )
     assert {"🥲", "🫠", "😔"}.issubset(textUtils.CANONICAL_EMOTION_MAP["sad"])
+    assert "😮‍💨" not in textUtils.CANONICAL_EMOTION_MAP["sad"]
+    assert "😯" not in textUtils.CANONICAL_EMOTION_MAP["starry"]
 
     allowed_emojis = set(textUtils.get_allowed_emoji_list_string().split())
     assert cheerful_emojis.issubset(allowed_emojis)
-    assert {"🫥", "🥲", "🫠", "😔"}.issubset(allowed_emojis)
+    assert {"🫥", "🥲", "🫠", "😔", "😑", "😅", "😓", "😶", "😯", "🤦", "🙄", "😮‍💨", "💀"}.issubset(allowed_emojis)
 
 
 def test_cheerful_leading_emoji_sends_cheerful_llm_emotion():
@@ -74,6 +80,14 @@ def test_blush_and_default_emotions_still_work():
     payload = _llm_emotion_payload("plain response")
     assert payload["text"] == "😄"
     assert payload["emotion"] == "normal"
+
+
+def test_speechless_emojis_map_to_speechless():
+    for emoji in ["😑", "😅", "😓", "😶", "😯", "🤦", "🙄", "😮‍💨", "💀"]:
+        payload = _llm_emotion_payload(f"{emoji} I put my phone in the fridge")
+
+        assert payload["text"] == emoji
+        assert payload["emotion"] == "speechless"
 
 
 def test_tts_text_cleanup_preserves_leading_fish_audio_tags():
