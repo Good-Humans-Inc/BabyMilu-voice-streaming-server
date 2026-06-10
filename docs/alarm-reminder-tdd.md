@@ -162,6 +162,21 @@ Reminder recurrence timezone rule:
 - if a recurring reminder has no usable `users/{uid}.timezone`, skip it rather
   than silently advancing in `UTC` or another fallback zone
 
+### Voice check-in reminder intake
+
+For staging prompt behavior, BabyMilu should proactively offer a check-in
+reminder when the user mentions stress, uncertainty, an upcoming event, an
+avoidable task, a habit they are trying to keep, or a moment where later support
+would help.
+
+- The offer should be concrete, preferably with a suggested time when context
+  supports one.
+- The LLM should not wait for the exact words `remind me` before offering.
+- The LLM must still have clear user consent and a specific time before calling
+  `schedule_conversation`.
+- If the user accepts and the time is already specific, the LLM should call
+  `schedule_conversation` immediately.
+
 ## Latest Schema
 
 ### Alarm
