@@ -27,6 +27,9 @@ SCHEDULE_CONVERSATION_FUNCTION_DESC = {
         "description": (
             "Schedule a future conversation or reminder. "
             "Use this for ALL reminders, check-ins, habits, emotional support, and wake-up calls. "
+            "Be proactive about offering a check-in when the user mentions stress, a future event, "
+            "a task they may avoid, a habit, or a moment where later support would help. "
+            "Once the user accepts and the time is specific, call this tool immediately. "
             "You MUST have: (1) a clear intent, (2) a specific time, and (3) user consent — "
             "ask for any missing piece before calling. "
             "Pass the time as the user expressed it; the server resolves it to UTC. "

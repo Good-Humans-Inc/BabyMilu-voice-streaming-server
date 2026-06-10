@@ -170,3 +170,11 @@ def test_schedule_conversation_optional_params_default_to_none(monkeypatch):
 
     assert result.action == Action.REQLLM
     assert recorded["delivery_preference"] is None
+
+
+def test_schedule_conversation_tool_description_encourages_proactive_checkins():
+    description = sc_module.SCHEDULE_CONVERSATION_FUNCTION_DESC["function"]["description"]
+
+    assert "Be proactive about offering a check-in" in description
+    assert "Once the user accepts and the time is specific" in description
+    assert "user consent" in description
