@@ -269,6 +269,39 @@ def test_successful_fish_request_closes_session_and_response(monkeypatch):
     _assert_owned_sessions(factory)
 
 
+def test_fish_request_sends_low_latency_audio_options(monkeypatch):
+    response = _FakeResponse(status=200)
+    factory = _FakeSessionFactory([response])
+    monkeypatch.setattr(fish_audio.aiohttp, "ClientSession", factory)
+
+    provider = _make_provider(
+        {
+            "model": "s2-pro",
+            "latency": "low",
+            "sample_rate": 16000,
+            "chunk_length": 100,
+        }
+    )
+    asyncio.run(provider.text_to_speak("hello"))
+
+    request = fish_audio.ormsgpack.unpackb(factory.post_payloads[0]["data"])
+    assert request == {
+        "text": "[friendly] hello",
+        "reference_id": "voice-ref",
+        "format": "pcm",
+        "sample_rate": 16000,
+        "normalize": True,
+        "chunk_length": 100,
+        "top_p": 0.7,
+        "temperature": 0.7,
+        "repetition_penalty": 1.2,
+        "streaming": True,
+        "latency": "low",
+    }
+    assert factory.post_payloads[0]["headers"]["model"] == "s2-pro"
+    _assert_owned_sessions(factory)
+
+
 def test_400_reference_not_found_closes_response_and_is_not_retried(monkeypatch):
     response = _FakeResponse(status=400, body="Reference not found")
     factory = _FakeSessionFactory([response])
@@ -340,7 +373,7 @@ def test_cached_invalid_conn_voice_id_falls_back_to_default_reference(monkeypatc
     captured_reference_ids = []
 
     def fake_packb(request_data, option=None):
-        captured_reference_ids.append(request_data.reference_id)
+        captured_reference_ids.append(request_data["reference_id"])
         return b"payload"
 
     responses = [
@@ -501,7 +534,7 @@ def test_fish_websocket_streams_llm_text_without_local_sentence_chunking(monkeyp
             "top_p": 0.85,
             "temperature": 0.9,
             "repetition_penalty": 1.2,
-            "latency": "normal",
+            "latency": "balanced",
             "max_new_tokens": 1024,
             "min_chunk_length": 50,
             "condition_on_previous_chunks": True,
