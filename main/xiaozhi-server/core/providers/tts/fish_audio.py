@@ -13,7 +13,6 @@ import websockets
 from config.logger import setup_logging
 from core.providers.tts.base import TTSProviderBase
 from core.providers.tts.dto.dto import ContentType, InterfaceType, SentenceType
-from core.providers.tts.fishspeech import ServeTTSRequest
 from core.utils import opus_encoder_utils, textUtils
 from core.utils.tts import MarkdownCleaner
 from core.utils.util import check_model_key
@@ -23,6 +22,7 @@ logger = setup_logging()
 
 FISH_AUDIO_SAMPLE_RATE = 44100
 OPUS_SAMPLE_RATE = 16000
+DEFAULT_FISH_AUDIO_MODEL = "s2-pro"
 DEFAULT_MAX_CONCURRENT_REQUESTS = 3
 DEFAULT_RETRY_429_ATTEMPTS = 1
 DEFAULT_RETRY_429_BACKOFF_MS = 500
@@ -30,6 +30,7 @@ DEFAULT_CONNECT_TIMEOUT_SECONDS = 8
 DEFAULT_TOTAL_TIMEOUT_SECONDS = 60
 DEFAULT_INVALID_REFERENCE_TTL_SECONDS = 300
 DEFAULT_FALLBACK_FISH_TAG = "[friendly]"
+SUPPORTED_LATENCY_MODES = {"low", "normal", "balanced"}
 FALLBACK_FISH_TAG_BY_EMOTION = {
     "smirk": "[curious]",
     "heart": "[warm]",
@@ -148,6 +149,16 @@ class _FishAudioHTTPError(Exception):
         super().__init__(f"Fish Audio TTS failed: {status} - {body}")
 
 
+def _coerce_int(value, default: int, *, minimum: int | None = None) -> int:
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        result = default
+    if minimum is not None:
+        result = max(minimum, result)
+    return result
+
+
 async def close_shared_resources():
     # Compatibility shim for older smoke scripts. Fish Audio sessions now own
     # their connectors, so there is no module-level connector cache to close.
@@ -213,9 +224,10 @@ class TTSProvider(TTSProviderBase):
         self.websocket_url = config.get("websocket_url") or self._derive_websocket_url(
             self.api_url
         )
-        self.model = config.get("model", "s2-pro")
+        self.model = config.get("model", DEFAULT_FISH_AUDIO_MODEL)
         self.default_reference_id = config.get("reference_id")
-        self.latency = config.get("latency", "normal")
+        latency = str(config.get("latency", "balanced")).lower()
+        self.latency = latency if latency in SUPPORTED_LATENCY_MODES else "balanced"
         self.input_streaming = str(config.get("input_streaming", False)).lower() in (
             "true",
             "1",
@@ -232,6 +244,11 @@ class TTSProvider(TTSProviderBase):
             "true",
             "1",
             "yes",
+        )
+        self.sample_rate = _coerce_int(
+            config.get("sample_rate", config.get("rate", FISH_AUDIO_SAMPLE_RATE)),
+            FISH_AUDIO_SAMPLE_RATE,
+            minimum=8000,
         )
 
         chunk_length = config.get("chunk_length", "200")
@@ -303,7 +320,7 @@ class TTSProvider(TTSProviderBase):
             sample_rate=OPUS_SAMPLE_RATE, channels=1, frame_size_ms=60
         )
         self.resampler = _StreamingPcmResampler(
-            input_rate=FISH_AUDIO_SAMPLE_RATE,
+            input_rate=self.sample_rate,
             output_rate=OPUS_SAMPLE_RATE,
         )
         self._ws_first_audio_sent = False
@@ -464,7 +481,7 @@ class TTSProvider(TTSProviderBase):
             "text": "",
             "reference_id": reference_id,
             "format": "pcm",
-            "sample_rate": FISH_AUDIO_SAMPLE_RATE,
+            "sample_rate": self.sample_rate,
             "normalize": self.normalize,
             "chunk_length": self.chunk_length,
             "top_p": self.top_p,
@@ -803,17 +820,19 @@ class TTSProvider(TTSProviderBase):
 
         text = self._ensure_fish_emotion_tag(MarkdownCleaner.clean_markdown(text))
 
-        request_data = ServeTTSRequest(
-            text=text,
-            reference_id=reference_id,
-            format="pcm",
-            normalize=self.normalize,
-            chunk_length=self.chunk_length,
-            top_p=self.top_p,
-            temperature=self.temperature,
-            repetition_penalty=self.repetition_penalty,
-            streaming=True,
-        )
+        request_data = {
+            "text": text,
+            "reference_id": reference_id,
+            "format": "pcm",
+            "sample_rate": self.sample_rate,
+            "normalize": self.normalize,
+            "chunk_length": self.chunk_length,
+            "top_p": self.top_p,
+            "temperature": self.temperature,
+            "repetition_penalty": self.repetition_penalty,
+            "streaming": True,
+            "latency": self.latency,
+        }
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -847,9 +866,7 @@ class TTSProvider(TTSProviderBase):
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.post(
                         self.api_url,
-                        data=ormsgpack.packb(
-                            request_data, option=ormsgpack.OPT_SERIALIZE_PYDANTIC
-                        ),
+                        data=ormsgpack.packb(request_data),
                         headers=headers,
                     ) as resp:
                         if resp.status == 429 and attempt < max_attempts:
