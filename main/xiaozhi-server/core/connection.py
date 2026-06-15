@@ -281,6 +281,14 @@ class ConnectionHandler:
         self.next_starter_payload: Optional[Dict[str, Any]] = None
         self.next_starter_scheduled = False
 
+        # School "文化课" MVP: optional per-session lesson injected by the frontend
+        # via the hello payload. When set, the lesson block is appended to every
+        # rendered system prompt (so it survives quick/enhanced re-renders), and
+        # the opener is spoken proactively. See core/handle/helloHandle.py.
+        self.lesson_prompt_block: Optional[str] = None
+        self.lesson_opener_query: Optional[str] = None
+        self._lesson_opener_scheduled = False
+
         # IOT/MCP
         self.iot_descriptors = {}
         self.func_handler: Optional[UnifiedToolHandler] = None
@@ -2299,6 +2307,11 @@ Return ONLY the JSON array, no other explanation."""
                 )
 
     def change_system_prompt(self, prompt, prompt_label: Optional[str] = None):
+        # School MVP: keep the injected lesson block attached across every
+        # re-render (quick_init / enhanced / character switch). Callers always
+        # pass the clean base/enhanced prompt; appending here is idempotent.
+        if self.lesson_prompt_block and self.lesson_prompt_block not in (prompt or ""):
+            prompt = f"{prompt}\n\n{self.lesson_prompt_block}"
         self.prompt = prompt
         self.dialogue.update_system_message(self.prompt)
         label = prompt_label or "system"

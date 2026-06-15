@@ -146,6 +146,16 @@
                 <button id="connectButton">连接</button>
                 <button id="authTestButton">测试认证</button>
             </div>
+            <div style="margin-top:10px;">
+                <label for="lessonJson" style="display:block;font-weight:bold;margin-bottom:4px;">
+                    🏫 School 文化课 (A/B)：留空 = 普通对话(control)；填 topic = deep talk(treatment)
+                </label>
+                <div style="font-size:12px;color:#888;margin-bottom:4px;">
+                    只填一个泛 topic，服务器会自己"上学"生成内容。例：<code>{"topic":"biology"}</code>
+                </div>
+                <textarea id="lessonJson" rows="3" style="width:100%;box-sizing:border-box;font-family:monospace;"
+                    placeholder='{"topic":"biology"}　或　{"topic":"BTS"}'></textarea>
+            </div>
         </div>
 
         <div class="section">
@@ -802,6 +812,10 @@
 
                             if (message.type === 'hello') {
                                 log(`服务器回应：${JSON.stringify(message, null, 2)}`, 'success');
+                            } else if (message.type === 'lesson_ready') {
+                                // 宝学完回来了，可以开始聊
+                                log(`🏫 宝学完「${message.topic}」回来了，可以开始聊了！`, 'success');
+                                addMessage(`🏫 宝学完「${message.topic}」回来啦，问我吧～`);
                             } else if (message.type === 'tts') {
                                 // TTS状态消息
                                 if (message.state === 'start') {
@@ -953,6 +967,18 @@
                         mcp: true
                     }
                 };
+
+                // School 文化课 A/B: 如果填了 lesson JSON，作为 treatment arm 注入
+                if (config.lessonJson) {
+                    try {
+                        helloMessage.lesson = JSON.parse(config.lessonJson);
+                        log(`注入 School lesson (treatment): topic=${helloMessage.lesson.topic}`, 'info');
+                    } catch (e) {
+                        log(`lesson JSON 解析失败，按普通对话(control)处理: ${e.message}`, 'error');
+                    }
+                } else {
+                    log('未填 lesson，普通对话(control arm)', 'info');
+                }
 
                 log('发送hello握手消息', 'info');
                 websocket.send(JSON.stringify(helloMessage));
@@ -1700,7 +1726,8 @@
                 deviceName: document.getElementById('deviceName').value.trim(),
                 deviceMac: deviceMac,
                 clientId: document.getElementById('clientId').value.trim(),
-                token: document.getElementById('token').value.trim()
+                token: document.getElementById('token').value.trim(),
+                lessonJson: document.getElementById('lessonJson').value.trim()
             };
         }
 
