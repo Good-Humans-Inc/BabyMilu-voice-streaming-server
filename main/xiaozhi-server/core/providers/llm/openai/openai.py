@@ -111,6 +111,13 @@ class LLMProvider(LLMProviderBase):
             except Exception:
                 pass
 
+    def reset_conversation(self, session_id: str, system_text: str = None):
+        """Create a fresh provider conversation after server-side state drift."""
+        self.release_conversation(session_id)
+        if system_text:
+            return self.ensure_conversation_with_system(session_id, system_text)
+        return self.ensure_conversation(session_id)
+
     def ensure_conversation_with_system(self, session_id, system_text: str):
         """Create conversation and seed a system message as the first item."""
         state = self._conversations.get(session_id)
@@ -222,6 +229,8 @@ class LLMProvider(LLMProviderBase):
                 force_stateless = kwargs.get("stateless", self.stateless_default)
                 conv_id = None if force_stateless else self.ensure_conversation(session_id)
                 instructions = kwargs.get("instructions")
+                system_text = kwargs.get("system_text")
+                on_conversation_reset = kwargs.get("on_conversation_reset")
                 extra_inputs = kwargs.get("extra_inputs", [])
                 
                 final_input = list(dialogue) + list(extra_inputs) if extra_inputs else dialogue
@@ -331,7 +340,14 @@ class LLMProvider(LLMProviderBase):
                         f"Dangling tool call detected for session {session_id} "
                         f"(aborted mid-function-call). Resetting conversation."
                     )
-                    self._conversations.pop(session_id, None)
+                    new_conv_id = self.reset_conversation(session_id, system_text)
+                    if new_conv_id and callable(on_conversation_reset):
+                        try:
+                            on_conversation_reset(new_conv_id)
+                        except Exception as callback_error:
+                            logger.bind(tag=TAG).warning(
+                                f"Conversation reset callback failed: {callback_error}"
+                            )
                 else:
                     logger.bind(tag=TAG).error(f"Error in function call streaming: {e}")
 
