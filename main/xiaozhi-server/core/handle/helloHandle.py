@@ -114,6 +114,12 @@ def build_lesson_injection(lesson):
     )
     if facts:
         sections.append(facts)
+    latest = _lesson_lines(
+        "Latest updates (proactively bring these up — 'did you hear…' — don't wait to be asked):",
+        lesson.get("latest_updates"),
+    )
+    if latest:
+        sections.append(latest)
     likes = _lesson_lines(
         "What you LOVE about it (gush about these specific favorites; you are NOT a neutral narrator):",
         lesson.get("milu_likes"),
@@ -181,12 +187,18 @@ LESSON_STUDY_SYSTEM = (
     "The goal is a real conversation with an enthusiastic friend who is INTO the topic — "
     "not an encyclopedia. So the notes need specific material, strong personal taste "
     "(favorites it genuinely loves), and insider flavor.\n"
+    "Make the notes RICH and DETAILED — give the character plenty to draw on across a whole "
+    "conversation, not just one or two lines. Every item must be a full, specific sentence with "
+    "concrete detail (real names, dates, titles, numbers), never a vague phrase.\n"
     "Return STRICT JSON only (no markdown, no prose) with exactly these keys:\n"
-    '  "key_facts": array of 4-6 specific, non-obvious facts (skip textbook basics everyone already knows)\n'
-    '  "milu_likes": array of 2-3 FIRST-PERSON things the character genuinely LOVES or its favorites — specific picks, not vague\n'
-    '  "insider_bits": array of 2-3 insider/deep-cut details, fandom in-jokes, or recent-ish news a '
+    '  "key_facts": array of 6-10 specific, non-obvious facts (skip textbook basics everyone already knows)\n'
+    '  "latest_updates": array of 3-5 of the MOST RECENT notable updates/releases/news/events about '
+    "the topic, each with a rough date — the stuff a fan would bring up as 'did you hear about…'. "
+    "This is for fast-moving topics (K-pop, games, anime); if nothing recent is verifiable, return []\n"
+    '  "milu_likes": array of 3-5 FIRST-PERSON things the character genuinely LOVES or its favorites — specific picks, not vague\n'
+    '  "insider_bits": array of 4-6 insider/deep-cut details or fandom in-jokes a '
     "superfan would know — the stuff that signals real enthusiasm, not Wikipedia\n"
-    '  "questions_for_user": array of 2-3 FIRST-PERSON questions to ask the owner about the topic\n'
+    '  "questions_for_user": array of 3-5 FIRST-PERSON questions to ask the owner about the topic\n'
     '  "opener": one short first-person sentence to START the conversation, full of excitement\n'
     "Be concrete and specific; no generic filler, no hedging. Opinions must be real preferences.\n"
     "ACCURACY: only include facts you are confident are true. If you are unsure of a specific "
@@ -340,6 +352,7 @@ async def _run_lesson(conn, lesson):
         except Exception as e:
             conn.logger.bind(tag=TAG).warning(f"Failed to send lesson_ready: {e}")
 
+        # Proactive opener: Milu speaks first about the topic it just studied.
         if opener_query and conn.llm_finish_task:
             conn.logger.bind(tag=TAG).info("Triggering proactive lesson opener (School MVP)")
             # Server-initiated opening; not fresh user input.

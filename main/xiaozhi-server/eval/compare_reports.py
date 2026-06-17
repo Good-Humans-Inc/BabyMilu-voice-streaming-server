@@ -23,7 +23,7 @@ from pathlib import Path
 
 RESULTS_DIR = Path(__file__).parent / "results"
 SCORE_DIMS = ["volunteers_new_info", "subjectivity", "insider_flavor", "asks_user",
-              "conversation_not_encyclopedia", "factual_accuracy"]
+              "conversation_not_encyclopedia", "brings_latest_updates", "factual_accuracy"]
 COUNT_DIMS = ["new_things_volunteered", "likes_expressed", "questions_to_user",
               "insider_bits", "likely_false_claims"]
 # dims where LOWER is better (so a higher number is worse)

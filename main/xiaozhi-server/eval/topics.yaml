@@ -1,18 +1,7 @@
-# Topic set for the School 文化课 deep-talk eval.
-# Focused on our user base: anime / K-pop / gacha games. Fast-moving, fandom-heavy topics
-# that stress factual_accuracy, insider_flavor, and the value of web-search grounding.
-# The FIRST 4 are the smoke-test preview set (run with `--limit 4`): 原神 / 咒术回战 / BTS / BLACKPINK.
-- {topic: Genshin Impact, category: game}        # 原神
-- {topic: Jujutsu Kaisen, category: anime}       # 咒术回战
+# Topic set for the School 文化课 deep-talk eval — our user base (fandom / lifestyle).
+# Fast-moving, fandom-heavy topics that stress factual_accuracy, insider_flavor, and the
+# value of web-search grounding.
 - {topic: BTS, category: kpop}
-- {topic: BLACKPINK, category: kpop}
-# --- rest of the set ---
-- {topic: NewJeans, category: kpop}
-- {topic: Stray Kids, category: kpop}
-- {topic: SEVENTEEN, category: kpop}
-- {topic: aespa, category: kpop}
-- {topic: Demon Slayer, category: anime}
-- {topic: "Frieren: Beyond Journey's End", category: anime}
-- {topic: One Piece, category: anime}
-- {topic: Chainsaw Man, category: anime}
-- {topic: Oshi no Ko, category: anime}
+- {topic: "Love and Deepspace (LADS)", category: otome-game}
+- {topic: Horoscope, category: lifestyle}
+- {topic: "Sunday (Honkai: Star Rail)", category: game-character}

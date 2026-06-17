@@ -119,33 +119,33 @@ def character_messages(system_prompt, transcript):
     return msgs
 
 
-USER_PERSONAS = {
-    "curious": (
-        "You are role-playing a real person chatting with their plush-toy companion about a "
-        "topic you care about. You're warm, curious, casual, sometimes brief. React naturally — "
-        "agree, push back, ask a follow-up, or share a bit about yourself. 1-2 sentences. Never "
-        "break character. Output only your spoken message, no quotes."
-    ),
-    "passive": (
-        "You are role-playing a tired, low-energy person half-listening to your plush-toy "
-        "companion. You reply in very short, low-effort ways ('hmm', 'yeah', 'cool', 'idk', "
-        "'not really', 'sure', 'oh'). You almost never ask questions or volunteer anything — "
-        "you make the companion do the work of carrying the conversation. You are not rude, "
-        "just quiet and passive. Keep replies to a few words. Output only your message."
-    ),
+# FIXED user scripts — the same user turns are replayed in BOTH arms, so the only
+# variable is the lesson (control vs treatment). Deterministic + reproducible, and it
+# fixes the "the two arms were asked different questions" confound. The `curious` script
+# deliberately includes a "what's the latest?" probe (K-pop / games / anime move fast),
+# and leaves room for Milu to volunteer beyond what was asked. The `passive` script gives
+# almost nothing, so any substance has to come from Milu (the real proactivity test).
+USER_SCRIPTS = {
+    "curious": [
+        "Ooh, can we talk about {topic}? What got you into it?",
+        "Nice! What's your favorite part of it?",
+        "Is there anything new — any recent update or news with {topic} lately?",
+        "Oh interesting, tell me more about that!",
+        "Haha, what else are you into about it?",
+    ],
+    "passive": [
+        "i guess we can talk about {topic}",
+        "hmm",
+        "oh ok",
+        "not really",
+        "sure",
+    ],
 }
 
 
-def user_turn(client, model, topic, transcript, archetype, opening=False):
-    convo = render_transcript(transcript) or "(conversation just started)"
-    instr = f'The topic is "{topic}".'
-    if opening:
-        instr += " Open the conversation by bringing up this topic with your companion."
-    msgs = [
-        {"role": "system", "content": USER_PERSONAS[archetype]},
-        {"role": "user", "content": f"{instr}\n\nConversation so far:\n{convo}\n\nYour next message:"},
-    ]
-    return chat(client, model, msgs, temperature=0.9, max_tokens=120)
+def build_user_script(topic, archetype, n_turns):
+    base = USER_SCRIPTS[archetype]
+    return [(base[i] if i < len(base) else base[-1]).format(topic=topic) for i in range(n_turns)]
 
 
 def study(client, model, topic, fallback="gpt-4o-mini"):
@@ -159,12 +159,12 @@ def study(client, model, topic, fallback="gpt-4o-mini"):
         {"role": "user", "content": f"Topic to study: {topic}\nReturn the JSON study notes now."},
     ]
     try:
-        kwargs = {} if "search" in model else {"temperature": 0.7, "max_tokens": 800}
+        kwargs = {} if "search" in model else {"temperature": 0.7, "max_tokens": 1500}
         resp = client.chat.completions.create(model=model, messages=msgs, **kwargs)
         raw = (resp.choices[0].message.content or "").strip()
     except Exception as e:
         print(f"    (study via {model} failed: {e}; falling back to {fallback})")
-        resp = client.chat.completions.create(model=fallback, messages=msgs, temperature=0.7, max_tokens=800)
+        resp = client.chat.completions.create(model=fallback, messages=msgs, temperature=0.7, max_tokens=1500)
         raw = (resp.choices[0].message.content or "").strip()
     artifact = _parse_lesson_json(raw) or {}
     artifact.setdefault("topic", topic)
@@ -187,6 +187,9 @@ JUDGE_SYSTEM = (
     "5 = naturally curious about the user's take.\n"
     "- conversation_not_encyclopedia: gestalt — mutual, Milu-driven chat vs user-asks/Milu-answers. "
     "1 = pure Q&A. 5 = real two-way conversation.\n"
+    "- brings_latest_updates: Does Milu proactively surface RECENT/latest developments (new "
+    "releases, events, news) and insights the user did NOT ask about? 1 = only evergreen basics / "
+    "only answers what's asked. 5 = volunteers specific recent updates and fresh angles.\n"
     "- factual_accuracy: Are Milu's factual claims accurate and not fabricated? 1 = several "
     "likely-false/made-up specifics (names, dates, titles). 5 = claims look accurate, or Milu "
     "honestly avoids guessing. Judge by your own knowledge; if you're unsure, don't penalize.\n\n"
@@ -198,9 +201,9 @@ JUDGE_SYSTEM = (
     "- likely_false_claims: specific claims by Milu that are probably false/fabricated (lower is better)\n\n"
     "Return STRICT JSON only with ALL keys: "
     '{"volunteers_new_info":N,"subjectivity":N,"insider_flavor":N,"asks_user":N,'
-    '"conversation_not_encyclopedia":N,"factual_accuracy":N,"new_things_volunteered":N,'
-    '"likes_expressed":N,"questions_to_user":N,"insider_bits":N,"likely_false_claims":N,'
-    '"reason":"1-2 sentences"}'
+    '"conversation_not_encyclopedia":N,"brings_latest_updates":N,"factual_accuracy":N,'
+    '"new_things_volunteered":N,"likes_expressed":N,"questions_to_user":N,"insider_bits":N,'
+    '"likely_false_claims":N,"reason":"1-2 sentences"}'
 )
 
 PAIRWISE_SYSTEM = (
@@ -250,34 +253,27 @@ def judge_pairwise(client, model, topic, t_control, t_treatment):
 # ----------------------------------------------------------------------------
 # One conversation; always yields n_turns Milu turns
 # ----------------------------------------------------------------------------
-SCORE_DIMS = ["volunteers_new_info", "subjectivity", "insider_flavor", "asks_user", "conversation_not_encyclopedia", "factual_accuracy"]
+SCORE_DIMS = ["volunteers_new_info", "subjectivity", "insider_flavor", "asks_user", "conversation_not_encyclopedia", "brings_latest_updates", "factual_accuracy"]
 # likely_false_claims: lower is better, so a NEGATIVE Δ is good there.
 COUNT_DIMS = ["new_things_volunteered", "likes_expressed", "questions_to_user", "insider_bits", "likely_false_claims"]
 DIMS = SCORE_DIMS + COUNT_DIMS
 
 
-def run_dialogue(client, cfg, topic, base_prompt, artifact, archetype, n_turns=4):
-    """artifact=None -> control (user opens); artifact=dict -> treatment (Milu opens)."""
-    transcript = []
+def run_dialogue(client, cfg, base_prompt, artifact, user_script):
+    """artifact=None -> control; artifact=dict -> treatment (lesson injected).
+
+    Replays the SAME fixed user_script in both arms (no proactive opener, matches
+    production) so the only difference between arms is the lesson block.
+    """
     system_prompt = base_prompt
     if artifact is not None:
-        block, opener_query = build_lesson_injection(artifact)
+        block, _opener = build_lesson_injection(artifact)
         if block:
             system_prompt = f"{base_prompt}\n\n{block}"
-        opening = chat(client, cfg["char_model"], [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": opener_query or f"Open a conversation about {topic}."},
-        ], cfg["temperature"])
-        transcript.append(("milu", opening))
-        for _ in range(n_turns - 1):
-            transcript.append(("user", user_turn(client, cfg["char_model"], topic, transcript, archetype)))
-            transcript.append(("milu", chat(client, cfg["char_model"], character_messages(system_prompt, transcript), cfg["temperature"])))
-    else:
-        transcript.append(("user", user_turn(client, cfg["char_model"], topic, transcript, archetype, opening=True)))
-        for _ in range(n_turns):
-            transcript.append(("milu", chat(client, cfg["char_model"], character_messages(system_prompt, transcript), cfg["temperature"])))
-            if sum(1 for s, _t in transcript if s == "milu") < n_turns:
-                transcript.append(("user", user_turn(client, cfg["char_model"], topic, transcript, archetype)))
+    transcript = []
+    for uturn in user_script:
+        transcript.append(("user", uturn))
+        transcript.append(("milu", chat(client, cfg["char_model"], character_messages(system_prompt, transcript), cfg["temperature"])))
     return transcript
 
 
@@ -299,7 +295,7 @@ def main():
                     help="model for 小宝学习 (web-search model grounds it; falls back to char model on error)")
     ap.add_argument("--turns", type=int, default=4, help="Milu turns per conversation")
     ap.add_argument("--reps", type=int, default=3, help="repetitions per (topic, archetype, arm)")
-    ap.add_argument("--archetypes", nargs="+", default=["curious", "passive"], choices=list(USER_PERSONAS))
+    ap.add_argument("--archetypes", nargs="+", default=["curious", "passive"], choices=list(USER_SCRIPTS))
     ap.add_argument("--limit", type=int, default=0, help="only first N topics (0 = all)")
     ap.add_argument("--out", default=str(Path(__file__).parent / "results"))
     args = ap.parse_args()
@@ -323,17 +319,27 @@ def main():
     wins = {a: {"control": 0, "treatment": 0, "tie": 0} for a in args.archetypes}
     full = []
 
+    # Human-readable transcript log for manual inspection (every utterance printed
+    # to console AND saved), so you can eyeball Milu's lines against a human.
+    tlog = ["# School deep-talk — transcripts (manual check)", ""]
+
     for i, t in enumerate(topics, 1):
         topic, category = t["topic"], t.get("category", "")
-        print(f"\n[{i}/{len(topics)}] {topic} ({category})")
+        print(f"\n{'='*70}\n[{i}/{len(topics)}] {topic} ({category})\n{'='*70}")
         artifact = study(client, args.study_model, topic, fallback=cfg["char_model"])  # one lesson per topic
+        # Show the studied lesson JSON (this is what gets injected — see SCHOOL_DEEPTALK_MVP.md).
+        art_str = json.dumps(artifact, ensure_ascii=False, indent=2)
+        print(f"\n--- studied lesson JSON ({args.study_model}) ---\n{art_str}\n")
+        tlog += [f"## {i}. {topic} ({category})", "", "**Studied lesson JSON:**",
+                 "```json", art_str, "```", ""]
         topic_dump = {"topic": topic, "category": category, "artifact": artifact, "convos": []}
         for arch in args.archetypes:
+            user_script = build_user_script(topic, arch, args.turns)  # SAME turns for both arms
             ctrl_runs, treat_runs = [], []
             for arm, runs_list in (("control", ctrl_runs), ("treatment", treat_runs)):
                 for rep in range(args.reps):
                     art = artifact if arm == "treatment" else None
-                    tr = run_dialogue(client, cfg, topic, base_prompt, art, arch, args.turns)
+                    tr = run_dialogue(client, cfg, base_prompt, art, user_script)
                     sc = judge_scores(client, args.judge_model, topic, tr)
                     runs_list.append({"transcript": tr, "scores": sc})
                     for d in DIMS:
@@ -343,6 +349,17 @@ def main():
                         {"archetype": arch, "arm": arm, "rep": rep,
                          "scores": sc, "transcript": [{"speaker": s, "text": x} for s, x in tr]}
                     )
+                    # print + log every line of this conversation
+                    hdr = f"[{topic}] {arch} / {arm} / rep{rep}"
+                    print(f"\n----- {hdr} -----")
+                    for s, x in tr:
+                        who = "🧸 Milu" if s == "milu" else "👤 User"
+                        print(f"{who}: {x}")
+                    print(f"  ↳ scores: " + ", ".join(f"{d}={sc.get(d)}" for d in DIMS))
+                    tlog.append(f"### {hdr}")
+                    tlog += [f"- **{'Milu' if s=='milu' else 'User'}:** {x}" for s, x in tr]
+                    tlog.append(f"_scores: " + ", ".join(f"{d}={sc.get(d)}" for d in DIMS) + "_")
+                    tlog.append("")
             # blind pairwise per rep
             for rep in range(args.reps):
                 w = judge_pairwise(client, args.judge_model, topic, ctrl_runs[rep]["transcript"], treat_runs[rep]["transcript"])
@@ -363,6 +380,7 @@ def main():
                     "archetypes": args.archetypes, "wins": wins, "results": full},
                    ensure_ascii=False, indent=2)
     )
+    (out_dir / f"transcripts_{stamp}.md").write_text("\n".join(tlog))
 
     n = len(topics) * args.reps
     lines = [
@@ -404,7 +422,7 @@ def main():
     report = "\n".join(lines)
     (out_dir / f"report_{stamp}.md").write_text(report)
     print("\n" + report)
-    print(f"\nSaved: {out_dir}/report_{stamp}.md  and  results_{stamp}.json")
+    print(f"\nSaved: report_{stamp}.md · results_{stamp}.json · transcripts_{stamp}.md  (in {out_dir})")
 
 
 if __name__ == "__main__":

@@ -49,10 +49,14 @@ The core design question. The answer is **context injection, not a tool**:
 | | Regular chat | Deep talk (after a lesson) |
 |---|---|---|
 | Knowledge | model training memory only | **+ a web-searched lesson artifact** injected into the system prompt |
-| Initiative | reactive (waits for user) | **proactive opener**, leads the topic |
+| Initiative | reactive (waits for user) | **proactive opener** — after `lesson_ready`, Milu speaks first about what it studied, then keeps leading with substance |
 | Mode | always-on companion (brief, leaves space) | **bounded "deep-talk mode" override**: lead more, bring substance every turn |
-| Persistence | none | lesson is in-session (write-through deferred) |
+| Persistence | none | lesson lives in the session's system prompt only (write-through deferred) |
 | Honesty | — | **guardrail**: don't state guessed specifics; don't blindly agree when corrected |
+
+> **Proactive opener:** after the lesson is injected, the server sends a `lesson_ready` signal and
+> Milu **speaks first** about the topic (using the artifact's `opener`). The eval, by contrast,
+> keeps both arms user-opened (see §4) — a deliberate choice so the A/B is controlled.
 
 Why context-injection over a dedicated `recall_lesson` tool: zero per-turn latency, guaranteed
 grounding, simpler. A tool is the V1 upgrade only if conversations exhaust the fixed artifact.
@@ -64,12 +68,32 @@ grounding, simpler. A tool is the V1 upgrade only if conversations exhaust the f
 ```
 frontend hello payload  {"lesson": {"topic": "BLACKPINK"}}
    → server: 小宝学习 study (web-search model)  ── once per lesson
-   → artifact { key_facts, milu_likes, insider_bits, questions_for_user, opener }
-   → inject "# Today's lesson" block into the system prompt (idempotent; survives re-renders)
+   → artifact JSON { key_facts, milu_likes, insider_bits, questions_for_user, opener }
+   → render artifact → "# Today's lesson" text block → inject into the session system prompt
+     (idempotent; survives re-renders)
    → send {"type":"lesson_ready"} to frontend  ("🏫 宝学完回来了")
-   → proactive opener (Milu speaks first about the topic)
-   → deep-talk turns on gpt-4o-mini, artifact in context (NO per-turn search)
+   → proactive opener: Milu speaks first about the topic (artifact's `opener`)
+   → deep-talk turns on gpt-4o-mini, lesson block in the system prompt (NO per-turn search)
 ```
+
+### How the returned JSON is used (is it stored in per-session memory verbatim?)
+
+Short answer: it's injected into the **session's system prompt**, **not** stored verbatim and
+**not** persisted to any memory store.
+
+1. **Study output is JSON** — the web-search model returns a JSON artifact
+   (`key_facts` / `milu_likes` / `insider_bits` / `questions_for_user` / `opener`), parsed by
+   `_parse_lesson_json`.
+2. **It is reformatted, not stored verbatim** — `build_lesson_injection` renders that JSON into a
+   human-readable `# Today's lesson` text block (labeled bullet lists + "how to use this lesson"
+   instructions). The raw JSON itself is never put in the prompt.
+3. **It lives in the system prompt, in-memory, per-session** — the block is held on
+   `conn.lesson_prompt_block` and appended to the dialogue's **system message** via
+   `change_system_prompt` (re-appended on every prompt re-render so caching can't drop it). Every
+   deep-talk turn sees it as part of the system prompt.
+4. **No persistence** — it is **not** written to a DB or character memory, and it disappears when
+   the websocket session ends. Persisting a lesson into character memory (the PRD `school_lesson`
+   event) is **deferred** (see §8). So today the lesson only affects the session it was sent in.
 
 Key files:
 - [main/xiaozhi-server/core/handle/helloHandle.py](main/xiaozhi-server/core/handle/helloHandle.py)
@@ -90,27 +114,39 @@ empty disables search and falls back to the configured LLM).
 [main/xiaozhi-server/eval/](main/xiaozhi-server/eval/) — reuses the **production** prompt,
 study prompt, and lesson-block builder, so it reflects the live server.
 
-- **Arms:** control (no lesson) vs treatment (studied lesson).
+- **Arms:** control (no lesson) vs treatment (studied lesson). **Both arms replay the SAME fixed
+  user script** (the user opens; no proactive opener *in the eval*) so the only variable is the
+  lesson block — a deliberate deviation from production (which does open proactively) to keep the
+  A/B controlled and reproducible. The `curious` script includes a "what's the latest?" probe.
 - **User archetypes:** `curious` (chatty) and `passive` ("hmm", "idk" — forces Milu to carry it).
 - **Reps + variance**, **blind pairwise win-rate** (order randomized, length-bias ignored).
 - **Dimensions:** behavioral 1-5 (`volunteers_new_info`, `subjectivity`, `insider_flavor`,
-  `asks_user`, `conversation_not_encyclopedia`, `factual_accuracy`) + ceiling-free counts
-  (`new_things_volunteered`, `likes_expressed`, `questions_to_user`, `insider_bits`,
-  `likely_false_claims`).
-- **Topics:** our user base — K-pop / anime / gacha (Genshin, Jujutsu Kaisen, BTS, BLACKPINK, …).
+  `asks_user`, `conversation_not_encyclopedia`, `brings_latest_updates`, `factual_accuracy`) +
+  ceiling-free counts (`new_things_volunteered`, `likes_expressed`, `questions_to_user`,
+  `insider_bits`, `likely_false_claims`).
+- **Manual check:** every conversation (and the studied lesson JSON) is printed to console and
+  saved to `transcripts_<ts>.md`, so you can eyeball Milu's lines against a human.
+- **Topics:** our user base — `eval/topics.yaml` (BTS, Love and Deepspace, Horoscope, Sunday/Honkai Star Rail).
 - **Compare tool:** `compare_reports.py` turns two runs into a side-by-side doc.
 
-Run:
+Run (2 study models, 1 rep, 4 topics):
 ```bash
 conda activate babymilu-local && cd main/xiaozhi-server
-python eval/school_deeptalk_eval.py --limit 4 --reps 3                                  # mini-search (default)
-python eval/school_deeptalk_eval.py --limit 4 --reps 3 --study-model gpt-4o-search-preview
+python eval/school_deeptalk_eval.py --reps 1                                       # mini-search (default)
+python eval/school_deeptalk_eval.py --reps 1 --study-model gpt-4o-search-preview   # big search model
 python eval/compare_reports.py results_<A>.json results_<B>.json --labels 4o-mini-search 4o-search
 ```
 
 ---
 
 ## 5. Results
+
+> ⚠️ Numbers below are from an **earlier eval setup** (topics Genshin / Jujutsu Kaisen / BTS /
+> BLACKPINK; the eval then let the user-sim react, so the two arms got different questions). The
+> eval has since changed: **fixed user script replayed identically in both arms** (controlled A/B),
+> new topics (BTS / Love and Deepspace / Horoscope / Sunday), a `brings_latest_updates` dimension,
+> and richer study notes. Directional conclusions still hold; **regenerate this section** from a
+> fresh `compare_reports.py` run for current numbers.
 
 From [eval/results/comparison_20260615_155213.md](main/xiaozhi-server/eval/results/comparison_20260615_155213.md)
 — 4 topics (Genshin / Jujutsu Kaisen / BTS / BLACKPINK) × 3 reps, judge `gpt-4o`, responder `gpt-4o-mini`.
