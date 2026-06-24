@@ -13,8 +13,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+import google.auth
 import requests
-from google.cloud import firestore
+from google.auth.transport.requests import Request as GoogleAuthRequest
+from google.cloud import firestore, storage
 from openai import APIError, OpenAI
 
 from config.logger import setup_logging
@@ -31,6 +33,20 @@ RECENCY_WINDOW_HOURS = int(os.environ.get("RECENT_PHOTO_LOOKBACK_HOURS", "24"))
 PHOTO_QUERY_LIMIT = int(os.environ.get("RECENT_PHOTO_QUERY_LIMIT", "20"))
 OPENAI_MODEL = os.environ.get("RECENT_PHOTO_INSPECT_MODEL", "gpt-4o-mini").strip()
 PHOTO_SOURCE_COLLECTIONS = ("moments", "photos")
+SIGNED_URL_TTL_MINUTES = int(
+    os.environ.get(
+        "RECENT_PHOTO_SIGNED_URL_TTL_MINUTES",
+        os.environ.get("PEEK_SIGNED_URL_TTL_MINUTES", "15"),
+    )
+)
+GCS_BUCKET_ENV_KEYS = (
+    "RECENT_PHOTO_GCS_BUCKET",
+    "PRIVATE_PHOTOS_BUCKET",
+    "PEEK_PHOTOS_BUCKET",
+    "FIREBASE_STORAGE_BUCKET",
+    "GCS_BUCKET",
+    "OUTPUT_BUCKET",
+)
 PHOTO_URL_FIELDS = (
     "photoUrl",
     "processedPhotoUrl",
@@ -44,6 +60,8 @@ PHOTO_URL_FIELDS = (
     "thumbnailUrl",
 )
 PHOTO_DATE_FIELDS = ("createdAt", "displayAt", "updatedAt")
+_IAM_SIGNING_SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
+_storage_client: Optional[storage.Client] = None
 
 INSPECT_RECENT_PHOTO_FUNCTION_DESC = {
     "type": "function",
@@ -191,20 +209,130 @@ def _normalize_datetime(value: Any) -> Optional[datetime]:
     return None
 
 
+def _configured_gcs_bucket() -> str:
+    for key in GCS_BUCKET_ENV_KEYS:
+        value = str(os.environ.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _resolve_gcs_reference(gcs_path: str) -> Optional[tuple[str, str]]:
+    cleaned = str(gcs_path or "").strip()
+    if not cleaned:
+        return None
+
+    if cleaned.startswith("gs://"):
+        remainder = cleaned[len("gs://") :]
+        bucket_name, _, blob_path = remainder.partition("/")
+        bucket_name = bucket_name.strip()
+        blob_path = blob_path.lstrip("/")
+        if bucket_name and blob_path:
+            return bucket_name, blob_path
+        return None
+
+    bucket_name = _configured_gcs_bucket()
+    blob_path = cleaned.lstrip("/")
+    if bucket_name and blob_path:
+        return bucket_name, blob_path
+    return None
+
+
+def _get_storage_client() -> storage.Client:
+    global _storage_client
+    if _storage_client is None:
+        _storage_client = storage.Client()
+    return _storage_client
+
+
+def _runtime_signing_identity() -> tuple[Optional[str], Optional[str]]:
+    try:
+        credentials, _ = google.auth.default(scopes=_IAM_SIGNING_SCOPES)
+    except Exception:
+        client = _get_storage_client()
+        credentials = getattr(client, "_credentials", None) or getattr(
+            client,
+            "credentials",
+            None,
+        )
+        if credentials is None:
+            return None, None
+
+        if getattr(credentials, "requires_scopes", False) and hasattr(
+            credentials,
+            "with_scopes",
+        ):
+            try:
+                credentials = credentials.with_scopes(_IAM_SIGNING_SCOPES)
+            except Exception:
+                return None, None
+
+    try:
+        if not getattr(credentials, "token", None) or not getattr(credentials, "valid", False):
+            credentials.refresh(GoogleAuthRequest())
+    except Exception:
+        return None, None
+
+    service_account_email = (
+        getattr(credentials, "service_account_email", None)
+        or getattr(credentials, "signer_email", None)
+    )
+    if service_account_email == "default":
+        return None, None
+
+    access_token = getattr(credentials, "token", None)
+    if not service_account_email or not access_token:
+        return None, None
+
+    return service_account_email, access_token
+
+
+def _build_gcs_signed_url(gcs_path: str) -> Optional[str]:
+    resolved = _resolve_gcs_reference(gcs_path)
+    if resolved is None:
+        return None
+
+    bucket_name, blob_path = resolved
+    blob = _get_storage_client().bucket(bucket_name).blob(blob_path)
+    kwargs = {
+        "version": "v4",
+        "method": "GET",
+        "expiration": timedelta(minutes=max(1, SIGNED_URL_TTL_MINUTES)),
+    }
+    try:
+        signed_url = blob.generate_signed_url(**kwargs)
+    except AttributeError as exc:
+        if "private key to sign credentials" not in str(exc).lower():
+            raise
+
+        service_account_email, access_token = _runtime_signing_identity()
+        if not service_account_email or not access_token:
+            raise RuntimeError(
+                "GCS signed URL generation requires service account signing credentials"
+            ) from exc
+
+        signed_url = blob.generate_signed_url(
+            **kwargs,
+            service_account_email=service_account_email,
+            access_token=access_token,
+        )
+
+    logger.bind(tag=TAG).info(
+        "Recent photo GCS signed URL generated: "
+        f"bucket={bucket_name}, path={_truncate_log_value(blob_path)}, "
+        f"ttl_minutes={max(1, SIGNED_URL_TTL_MINUTES)}"
+    )
+    return signed_url
+
+
 def _select_photo_url(photo: Dict[str, Any]) -> Optional[str]:
     for key in PHOTO_URL_FIELDS:
         value = str(photo.get(key) or "").strip()
         if value:
             return value
     gcs_path = str(photo.get("gcsPath") or "").strip()
-    bucket = (
-        os.environ.get("RECENT_PHOTO_GCS_BUCKET")
-        or os.environ.get("FIREBASE_STORAGE_BUCKET")
-        or os.environ.get("GCS_BUCKET")
-        or ""
-    ).strip()
-    if gcs_path and bucket:
-        return f"https://storage.googleapis.com/{bucket}/{gcs_path.lstrip('/')}"
+    if gcs_path:
+        return _build_gcs_signed_url(gcs_path)
     return None
 
 
@@ -221,13 +349,7 @@ def _select_photo_url_field(photo: Dict[str, Any]) -> Optional[str]:
         if value:
             return key
     gcs_path = str(photo.get("gcsPath") or "").strip()
-    bucket = (
-        os.environ.get("RECENT_PHOTO_GCS_BUCKET")
-        or os.environ.get("FIREBASE_STORAGE_BUCKET")
-        or os.environ.get("GCS_BUCKET")
-        or ""
-    ).strip()
-    if gcs_path and bucket:
+    if gcs_path and _resolve_gcs_reference(gcs_path):
         return "gcsPath"
     return None
 
@@ -249,6 +371,13 @@ def _select_photo_timestamp_field(photo: Dict[str, Any]) -> Optional[str]:
 
 def _cache_busted_photo_url(photo_url: str) -> str:
     parts = urlsplit(photo_url)
+    query_keys = {key.lower() for key, _ in parse_qsl(parts.query, keep_blank_values=True)}
+    if any(
+        key in query_keys
+        for key in ("x-goog-signature", "x-amz-signature", "signature")
+    ):
+        return photo_url
+
     query = parse_qsl(parts.query, keep_blank_values=True)
     query.append(
         (
@@ -614,11 +743,13 @@ def inspect_recent_photo(conn) -> ActionResponse:
             return ActionResponse(action=Action.REQLLM, result=_build_tool_result(payload))
 
         analysis = _analyze_recent_photo(photo_url, conn)
-        created_at = _normalize_datetime(photo.get("createdAt"))
+        selected_at = _select_photo_timestamp(photo)
+        timestamp_field = _select_photo_timestamp_field(photo)
         logger.bind(tag=TAG).info(
             "Recent photo analysis completed: "
             f"id={photo.get('id')}, source={photo.get('source_collection')}, "
-            f"createdAt={created_at.isoformat() if created_at else None}, "
+            f"timestamp={selected_at.isoformat() if selected_at else None}, "
+            f"timestamp_field={timestamp_field}, "
             f"summary={_truncate_log_value(analysis.get('summary'))}, "
             f"notable_objects={_truncate_log_value(analysis.get('notable_objects'))}"
         )
@@ -626,7 +757,8 @@ def inspect_recent_photo(conn) -> ActionResponse:
             "status": "found",
             "photo_found": True,
             "photo_id": photo.get("id"),
-            "capture_timestamp": created_at.isoformat() if created_at else None,
+            "capture_timestamp": selected_at.isoformat() if selected_at else None,
+            "capture_timestamp_field": timestamp_field,
             "recency_window_hours": RECENCY_WINDOW_HOURS,
             "source_collection": photo.get("source_collection"),
             "caption": photo.get("caption") or "",

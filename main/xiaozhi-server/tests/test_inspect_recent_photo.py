@@ -5,6 +5,7 @@ import pathlib
 import sys
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
@@ -15,7 +16,7 @@ if not CONFIG_PATH.exists():
 
 sys.path.insert(0, str(ROOT))
 
-from plugins_func.functions import inspect_recent_magic_camera_photo as inspect_module
+from plugins_func.functions import inspect_recent_photo as inspect_module
 from plugins_func.register import Action
 
 
@@ -28,7 +29,7 @@ def _extract_payload(result) -> dict:
     return json.loads(lines[-1])
 
 
-def test_select_recent_magic_photo_prefers_latest_non_deleted_photo():
+def test_select_recent_photo_prefers_latest_non_deleted_photo():
     now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
     photos = [
         {
@@ -43,12 +44,12 @@ def test_select_recent_magic_photo_prefers_latest_non_deleted_photo():
         },
     ]
 
-    selected = inspect_module._select_recent_magic_photo(photos, now=now)
+    selected = inspect_module._select_recent_photo(photos, now=now)
 
     assert selected["id"] == "fresh-photo"
 
 
-def test_select_recent_magic_photo_can_apply_optional_recency_window():
+def test_select_recent_photo_can_apply_optional_recency_window():
     now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
     photos = [
         {
@@ -58,12 +59,12 @@ def test_select_recent_magic_photo_can_apply_optional_recency_window():
         }
     ]
 
-    selected = inspect_module._select_recent_magic_photo(photos, now=now)
+    selected = inspect_module._select_recent_photo(photos, now=now)
 
     assert selected is None
 
 
-def test_select_recent_magic_photo_skips_deleted_or_url_less_entries():
+def test_select_recent_photo_skips_deleted_or_url_less_entries():
     now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
     photos = [
         {
@@ -78,7 +79,7 @@ def test_select_recent_magic_photo_skips_deleted_or_url_less_entries():
         },
     ]
 
-    selected = inspect_module._select_recent_magic_photo(photos, now=now)
+    selected = inspect_module._select_recent_photo(photos, now=now)
 
     assert selected is None
 
@@ -104,6 +105,93 @@ def test_select_photo_url_supports_photo_collection_url_fields():
     )
 
     assert selected_url == "https://example.com/download.jpeg"
+
+
+def test_select_photo_url_supports_signed_gcs_path(monkeypatch):
+    monkeypatch.setenv("PRIVATE_PHOTOS_BUCKET", "private-bucket")
+    monkeypatch.setattr(
+        inspect_module,
+        "_build_gcs_signed_url",
+        lambda gcs_path: f"https://signed.example/{gcs_path}",
+    )
+
+    photo = {"gcsPath": "raw_photos/example.jpeg"}
+
+    assert inspect_module._select_photo_url_field(photo) == "gcsPath"
+    assert (
+        inspect_module._select_photo_url(photo)
+        == "https://signed.example/raw_photos/example.jpeg"
+    )
+
+
+def test_build_gcs_signed_url_uses_configured_private_bucket(monkeypatch):
+    captured = {}
+
+    class FakeBlob:
+        def generate_signed_url(self, **kwargs):
+            captured["signed_kwargs"] = kwargs
+            return "https://signed.example/photo.jpeg"
+
+    class FakeBucket:
+        def __init__(self, name):
+            captured["bucket"] = name
+
+        def blob(self, path):
+            captured["path"] = path
+            return FakeBlob()
+
+    class FakeStorageClient:
+        def bucket(self, name):
+            return FakeBucket(name)
+
+    monkeypatch.setenv("PRIVATE_PHOTOS_BUCKET", "private-bucket")
+    monkeypatch.setattr(
+        inspect_module,
+        "_get_storage_client",
+        lambda: FakeStorageClient(),
+    )
+    monkeypatch.setattr(inspect_module, "SIGNED_URL_TTL_MINUTES", 7)
+
+    signed_url = inspect_module._build_gcs_signed_url("raw_photos/example.jpeg")
+
+    assert signed_url == "https://signed.example/photo.jpeg"
+    assert captured["bucket"] == "private-bucket"
+    assert captured["path"] == "raw_photos/example.jpeg"
+    assert captured["signed_kwargs"]["version"] == "v4"
+    assert captured["signed_kwargs"]["method"] == "GET"
+    assert captured["signed_kwargs"]["expiration"] == timedelta(minutes=7)
+
+
+def test_cache_busted_photo_url_leaves_signed_gcs_url_unchanged(monkeypatch):
+    monkeypatch.setattr(
+        inspect_module,
+        "_utc_now",
+        lambda: datetime(2026, 6, 9, 12, 0, tzinfo=timezone.utc),
+    )
+    signed_url = (
+        "https://storage.googleapis.com/milu-user/raw_photos/example.jpg"
+        "?X-Goog-Algorithm=GOOG4-RSA-SHA256"
+        "&X-Goog-Credential=service-account@example.com"
+        "&X-Goog-Signature=abc123"
+    )
+
+    assert inspect_module._cache_busted_photo_url(signed_url) == signed_url
+
+
+def test_cache_busted_photo_url_adds_cache_bust_for_plain_url(monkeypatch):
+    monkeypatch.setattr(
+        inspect_module,
+        "_utc_now",
+        lambda: datetime(2026, 6, 9, 12, 0, tzinfo=timezone.utc),
+    )
+
+    cache_busted = inspect_module._cache_busted_photo_url(
+        "https://example.com/photo.jpg?size=large"
+    )
+    query = parse_qs(urlsplit(cache_busted).query)
+
+    assert query["size"] == ["large"]
+    assert query["_recent_photo_cache_bust"] == ["1781006400000"]
 
 
 def test_load_candidate_photos_merges_moments_and_photos(monkeypatch):
@@ -138,9 +226,9 @@ def test_get_openai_client_falls_back_to_selected_llm_config(monkeypatch):
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-    monkeypatch.delenv("MAGIC_CAMERA_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("RECENT_PHOTO_OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("MAGIC_CAMERA_OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("RECENT_PHOTO_OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.setattr(inspect_module, "OpenAI", FakeOpenAI)
 
@@ -191,7 +279,7 @@ def test_parse_analysis_json_recovers_from_invalid_escape_sequences():
 def test_tool_returns_no_match_when_uid_is_missing(monkeypatch):
     monkeypatch.setattr(inspect_module, "get_owner_phone_for_device", lambda _: None)
 
-    result = inspect_module.inspect_recent_magic_camera_photo(_conn())
+    result = inspect_module.inspect_recent_photo(_conn())
     payload = _extract_payload(result)
 
     assert result.action == Action.REQLLM
@@ -200,7 +288,11 @@ def test_tool_returns_no_match_when_uid_is_missing(monkeypatch):
 
 
 def test_tool_returns_no_match_when_usable_image_is_missing(monkeypatch):
-    monkeypatch.setattr(inspect_module, "get_owner_phone_for_device", lambda _: "+15551234567")
+    monkeypatch.setattr(
+        inspect_module,
+        "get_owner_phone_for_device",
+        lambda _: "+15551234567",
+    )
     monkeypatch.setattr(
         inspect_module,
         "_load_candidate_photos",
@@ -217,7 +309,7 @@ def test_tool_returns_no_match_when_usable_image_is_missing(monkeypatch):
         lambda: datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
     )
 
-    result = inspect_module.inspect_recent_magic_camera_photo(_conn())
+    result = inspect_module.inspect_recent_photo(_conn())
     payload = _extract_payload(result)
 
     assert result.action == Action.REQLLM
@@ -225,7 +317,11 @@ def test_tool_returns_no_match_when_usable_image_is_missing(monkeypatch):
 
 
 def test_tool_returns_analysis_payload_for_recent_photo(monkeypatch):
-    monkeypatch.setattr(inspect_module, "get_owner_phone_for_device", lambda _: "+15551234567")
+    monkeypatch.setattr(
+        inspect_module,
+        "get_owner_phone_for_device",
+        lambda _: "+15551234567",
+    )
     monkeypatch.setattr(
         inspect_module,
         "_load_candidate_photos",
@@ -253,7 +349,7 @@ def test_tool_returns_analysis_payload_for_recent_photo(monkeypatch):
     )
     monkeypatch.setattr(
         inspect_module,
-        "_analyze_magic_camera_photo",
+        "_analyze_recent_photo",
         lambda photo_url, conn: {
             "summary": "A painted figurine sits on a desk.",
             "detailed_description": "The image shows a hand-painted figurine with blue accents on a light desk surface.",
@@ -269,7 +365,7 @@ def test_tool_returns_analysis_payload_for_recent_photo(monkeypatch):
         },
     )
 
-    result = inspect_module.inspect_recent_magic_camera_photo(_conn())
+    result = inspect_module.inspect_recent_photo(_conn())
     payload = _extract_payload(result)
 
     assert result.action == Action.REQLLM
@@ -279,3 +375,67 @@ def test_tool_returns_analysis_payload_for_recent_photo(monkeypatch):
     assert payload["caption"] == "look at this"
     assert payload["text"] == "Not just a workspace"
     assert payload["analysis"]["summary"] == "A painted figurine sits on a desk."
+
+
+def test_tool_returns_analysis_payload_for_private_peek_photo(monkeypatch):
+    captured = {}
+
+    monkeypatch.setenv("PRIVATE_PHOTOS_BUCKET", "private-bucket")
+    monkeypatch.setattr(
+        inspect_module,
+        "get_owner_phone_for_device",
+        lambda _: "+15551234567",
+    )
+    monkeypatch.setattr(
+        inspect_module,
+        "_load_candidate_photos",
+        lambda uid: [
+            {
+                "id": "photo-456",
+                "gcsPath": "raw_photos/+15551234567/photo-456.jpeg",
+                "createdAt": "2026-05-06T10:30:00+00:00",
+                "source_collection": "photos",
+                "source": "camera_peek_upload",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        inspect_module,
+        "_utc_now",
+        lambda: datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        inspect_module,
+        "_build_gcs_signed_url",
+        lambda gcs_path: f"https://signed.example/{gcs_path}",
+    )
+
+    def fake_analyze(photo_url, conn):
+        captured["photo_url"] = photo_url
+        return {
+            "summary": "A private peek photo is visible.",
+            "detailed_description": "The signed URL was passed into the analyzer.",
+            "notable_objects": ["peek photo"],
+            "people_or_characters": [],
+            "colors": [],
+            "composition": "Unknown.",
+            "visible_text": [],
+            "style_cues": [],
+            "mood_cues": [],
+            "grounded_interpretation_hints": [],
+            "uncertainties": [],
+        }
+
+    monkeypatch.setattr(inspect_module, "_analyze_recent_photo", fake_analyze)
+
+    result = inspect_module.inspect_recent_photo(_conn())
+    payload = _extract_payload(result)
+
+    assert result.action == Action.REQLLM
+    assert payload["status"] == "found"
+    assert payload["photo_id"] == "photo-456"
+    assert payload["source_collection"] == "photos"
+    assert captured["photo_url"] == (
+        "https://signed.example/raw_photos/+15551234567/photo-456.jpeg"
+    )
+    assert payload["analysis"]["summary"] == "A private peek photo is visible."
