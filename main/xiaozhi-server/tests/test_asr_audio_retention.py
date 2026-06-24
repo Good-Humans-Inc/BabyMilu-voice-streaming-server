@@ -186,9 +186,58 @@ def test_asr_gate_rejects_noise_fragments_and_accepts_short_english(tmp_path):
     assert provider._should_forward_asr_text("۵۔")[0] is False
     assert provider._should_forward_asr_text("общими")[0] is False
     assert provider._should_forward_asr_text("谢谢。")[0] is False
+    assert provider._should_forward_asr_text(
+        "Hmm",
+        audio_duration_seconds=0.4,
+    )[0] is False
+    assert provider._should_forward_asr_text(
+        "You",
+        audio_duration_seconds=0.5,
+    )[0] is False
     assert provider._should_forward_asr_text("I want you to be more emotional.")[0]
     assert provider._should_forward_asr_text("Hi!")[0]
     assert provider._should_forward_asr_text("Ok.")[0]
+    assert provider._should_forward_asr_text(
+        "You got milk?",
+        audio_duration_seconds=0.8,
+    )[0]
+    assert provider._should_forward_asr_text(
+        "Hmm",
+        audio_duration_seconds=2.5,
+    )[0]
+
+
+def test_asr_unclear_prompt_speaks_without_forwarding_to_dialogue(tmp_path):
+    from core.providers.asr.openai import ASRProvider
+
+    output_dir = tmp_path / "tmp"
+    output_dir.mkdir()
+    provider = ASRProvider(
+        {
+            "api_key": "test",
+            "base_url": "https://example.com/asr",
+            "model_name": "gpt-4o-mini-transcribe",
+            "output_dir": str(output_dir),
+            "unclear_asr_prompt": "I didn't hear that clearly.",
+        },
+        delete_audio_file=True,
+    )
+    spoken = []
+
+    conn = SimpleNamespace(
+        sentence_id="sentence-1",
+        tts_MessageText="",
+        tts=SimpleNamespace(
+            tts_one_sentence=lambda _conn, content_type, content_detail, sentence_id=None: spoken.append(
+                (content_type.name, content_detail, sentence_id)
+            ),
+        ),
+    )
+
+    asyncio.run(provider._maybe_speak_unclear_asr_prompt(conn, "low_signal_fragment"))
+
+    assert spoken == [("TEXT", "I didn't hear that clearly.", "sentence-1")]
+    assert conn.tts_MessageText == "I didn't hear that clearly."
 
 
 def test_openai_asr_sends_language_and_prompt(tmp_path, monkeypatch):
