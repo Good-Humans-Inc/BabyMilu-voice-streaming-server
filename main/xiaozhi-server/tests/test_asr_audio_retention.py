@@ -219,9 +219,8 @@ def test_asr_gate_rejects_noise_fragments_and_accepts_short_english(tmp_path):
         "You know",
         audio_duration_seconds=0.42,
     )[0] is False
-    assert provider._should_forward_asr_text("Going out for a")[0] is False
-    assert provider._should_forward_asr_text("My friend is about to")[0] is False
-    assert provider._should_forward_asr_text("I wanted to")[0] is False
+    assert provider._should_forward_asr_text("I found a")[0] is False
+    assert provider._should_forward_asr_text("Can I get the")[0] is False
     assert provider._should_forward_asr_text("I want you to be more emotional.")[0]
     assert provider._should_forward_asr_text("Hi!")[0]
     assert provider._should_forward_asr_text("Ok.")[0]
@@ -259,6 +258,8 @@ def test_asr_gate_rejects_noise_fragments_and_accepts_short_english(tmp_path):
     )[0]
     assert provider._should_forward_asr_text("I want to make a cake.")[0]
     assert provider._should_forward_asr_text("There are four.")[0]
+    assert provider._should_forward_asr_text("My friend is about to.")[0]
+    assert provider._should_forward_asr_text("I wanted to.")[0]
     assert provider._should_forward_asr_text("Can you turn it on.")[0]
     assert provider._should_forward_asr_text("Where are you going to?")[0]
     assert provider._should_forward_asr_text(

@@ -149,15 +149,6 @@ INCOMPLETE_ENDING_WORDS = {
     "an",
     "the",
 }
-INCOMPLETE_ENDING_PHRASES = {
-    ("about", "to"),
-    ("going", "to"),
-    ("have", "to"),
-    ("need", "to"),
-    ("trying", "to"),
-    ("want", "to"),
-    ("wanted", "to"),
-}
 UNCLEAR_ASR_PROMPT_REASONS = {
     "single_character_fragment",
     "no_ascii_letters",
@@ -791,9 +782,6 @@ class ASRProviderBase(ABC):
             return False
 
         if tokens[-1] in INCOMPLETE_ENDING_WORDS:
-            return True
-
-        if len(tokens) >= 2 and tuple(tokens[-2:]) in INCOMPLETE_ENDING_PHRASES:
             return True
 
         return False
