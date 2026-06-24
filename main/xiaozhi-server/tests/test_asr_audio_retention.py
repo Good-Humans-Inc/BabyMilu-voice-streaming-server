@@ -200,12 +200,40 @@ def test_asr_gate_rejects_noise_fragments_and_accepts_short_english(tmp_path):
         audio_duration_seconds=0.42,
     )[0] is False
     assert provider._should_forward_asr_text(
-        "Woo",
-        audio_duration_seconds=0.18,
+        "I mean",
+        audio_duration_seconds=0.42,
+    )[0] is False
+    assert provider._should_forward_asr_text(
+        "The",
+        audio_duration_seconds=0.24,
+    )[0] is False
+    assert provider._should_forward_asr_text(
+        "Well",
+        audio_duration_seconds=0.42,
+    )[0] is False
+    assert provider._should_forward_asr_text(
+        "You know",
+        audio_duration_seconds=0.42,
     )[0] is False
     assert provider._should_forward_asr_text("I want you to be more emotional.")[0]
     assert provider._should_forward_asr_text("Hi!")[0]
     assert provider._should_forward_asr_text("Ok.")[0]
+    assert provider._should_forward_asr_text(
+        "Woo",
+        audio_duration_seconds=0.18,
+    )[0]
+    assert provider._should_forward_asr_text(
+        "Good job.",
+        audio_duration_seconds=0.4,
+    )[0]
+    assert provider._should_forward_asr_text(
+        "No.",
+        audio_duration_seconds=0.24,
+    )[0]
+    assert provider._should_forward_asr_text(
+        "Wait.",
+        audio_duration_seconds=0.24,
+    )[0]
     assert provider._should_forward_asr_text(
         "Picnic.",
         audio_duration_seconds=0.6,

@@ -313,8 +313,9 @@ turn. The gate rejects:
   voice interaction
 - configurable low-signal fragments such as `hmm`, `uh`, `you`, or `empty` when
   the captured audio is shorter than `low_signal_fragment_max_audio_seconds`
-- configurable ambiguous short fragments such as `i said`, `i have`, or `woo`
-  when the captured audio is shorter than
+- configurable ambiguous short fragments such as function words (`the`, `and`,
+  `so`) or repair openers (`i said`, `i mean`, `you know`) when the captured
+  audio is shorter than
   `ambiguous_short_fragment_max_audio_seconds`
 
 For rejected non-empty fuzzy transcripts, the server may speak
@@ -330,7 +331,7 @@ reject_ambiguous_short_fragments: true
 low_signal_fragment_max_audio_seconds: 1.2
 ambiguous_short_fragment_max_audio_seconds: 0.7
 low_signal_fragments: ["hmm", "uh", "you", "empty"]
-ambiguous_short_fragments: ["i said", "i have", "woo"]
+ambiguous_short_fragments: ["the", "and", "so", "i said", "i mean", "you know"]
 speak_on_unclear_asr: true
 unclear_asr_prompt: "I didn't catch that clearly. Can you say it again?"
 unclear_asr_prompt_cooldown_seconds: 4.0
