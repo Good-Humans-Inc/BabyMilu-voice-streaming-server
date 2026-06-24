@@ -48,10 +48,17 @@ DEFAULT_LOW_SIGNAL_ASR_FRAGMENTS = {
     "you",
     "empty",
 }
+DEFAULT_AMBIGUOUS_SHORT_ASR_FRAGMENTS = {
+    "i have",
+    "i said",
+    "woo",
+}
 UNCLEAR_ASR_PROMPT_REASONS = {
     "single_character_fragment",
     "no_ascii_letters",
+    "non_english_characters",
     "low_signal_fragment",
+    "ambiguous_short_fragment",
 }
 
 
@@ -66,8 +73,14 @@ class ASRProviderBase(ABC):
         self.audio_gcs_delete_local = True
         self.reject_non_english_fragments = True
         self.reject_low_signal_fragments = True
+        self.reject_ambiguous_short_fragments = True
         self.low_signal_fragment_max_audio_seconds = 1.2
+        self.ambiguous_short_fragment_max_audio_seconds = 0.7
         self.low_signal_fragments = set(DEFAULT_LOW_SIGNAL_ASR_FRAGMENTS)
+        self.ambiguous_short_fragments = {
+            self._normalize_short_fragment_key(item)
+            for item in DEFAULT_AMBIGUOUS_SHORT_ASR_FRAGMENTS
+        }
         self.speak_on_unclear_asr = True
         self.unclear_asr_prompt = "I didn't catch that clearly. Can you say it again?"
         self.unclear_asr_prompt_cooldown_seconds = 4.0
@@ -111,9 +124,17 @@ class ASRProviderBase(ABC):
             config.get("reject_low_signal_fragments"),
             self.reject_low_signal_fragments,
         )
+        self.reject_ambiguous_short_fragments = self._as_bool(
+            config.get("reject_ambiguous_short_fragments"),
+            self.reject_ambiguous_short_fragments,
+        )
         self.low_signal_fragment_max_audio_seconds = self._as_float(
             config.get("low_signal_fragment_max_audio_seconds"),
             self.low_signal_fragment_max_audio_seconds,
+        )
+        self.ambiguous_short_fragment_max_audio_seconds = self._as_float(
+            config.get("ambiguous_short_fragment_max_audio_seconds"),
+            self.ambiguous_short_fragment_max_audio_seconds,
         )
         configured_low_signal = config.get("low_signal_fragments")
         if isinstance(configured_low_signal, str):
@@ -126,6 +147,19 @@ class ASRProviderBase(ABC):
             self.low_signal_fragments = {
                 str(item).strip().casefold()
                 for item in configured_low_signal
+                if str(item).strip()
+            }
+        configured_ambiguous_short = config.get("ambiguous_short_fragments")
+        if isinstance(configured_ambiguous_short, str):
+            configured_ambiguous_short = [
+                item.strip()
+                for item in configured_ambiguous_short.split(",")
+                if item.strip()
+            ]
+        if isinstance(configured_ambiguous_short, (list, tuple, set)):
+            self.ambiguous_short_fragments = {
+                self._normalize_short_fragment_key(item)
+                for item in configured_ambiguous_short
                 if str(item).strip()
             }
         self.speak_on_unclear_asr = self._as_bool(
@@ -532,11 +566,23 @@ class ASRProviderBase(ABC):
         ):
             return False, filtered_text, "no_ascii_letters"
 
+        if (
+            self.reject_non_english_fragments
+            and self._has_non_ascii_letter(filtered_text)
+        ):
+            return False, filtered_text, "non_english_characters"
+
         if self._is_low_signal_asr_fragment(
             filtered_text,
             audio_duration_seconds=audio_duration_seconds,
         ):
             return False, filtered_text, "low_signal_fragment"
+
+        if self._is_ambiguous_short_asr_fragment(
+            filtered_text,
+            audio_duration_seconds=audio_duration_seconds,
+        ):
+            return False, filtered_text, "ambiguous_short_fragment"
 
         return True, filtered_text, "ok"
 
@@ -554,6 +600,29 @@ class ASRProviderBase(ABC):
         if audio_duration_seconds is None:
             return True
         return audio_duration_seconds <= self.low_signal_fragment_max_audio_seconds
+
+    def _is_ambiguous_short_asr_fragment(
+        self,
+        filtered_text: str,
+        *,
+        audio_duration_seconds: Optional[float],
+    ) -> bool:
+        if not self.reject_ambiguous_short_fragments:
+            return False
+        if audio_duration_seconds is None:
+            return False
+        normalized = self._normalize_short_fragment_key(filtered_text)
+        if normalized not in self.ambiguous_short_fragments:
+            return False
+        return audio_duration_seconds <= self.ambiguous_short_fragment_max_audio_seconds
+
+    @staticmethod
+    def _normalize_short_fragment_key(text: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(text or "").casefold())
+
+    @staticmethod
+    def _has_non_ascii_letter(text: str) -> bool:
+        return any(ord(char) > 127 and char.isalpha() for char in text or "")
 
     @staticmethod
     def _estimate_audio_duration_seconds(

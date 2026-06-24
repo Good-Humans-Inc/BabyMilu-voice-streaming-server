@@ -186,6 +186,7 @@ def test_asr_gate_rejects_noise_fragments_and_accepts_short_english(tmp_path):
     assert provider._should_forward_asr_text("۵۔")[0] is False
     assert provider._should_forward_asr_text("общими")[0] is False
     assert provider._should_forward_asr_text("谢谢。")[0] is False
+    assert provider._should_forward_asr_text("Jeg må se en fe.")[0] is False
     assert provider._should_forward_asr_text(
         "Hmm",
         audio_duration_seconds=0.4,
@@ -194,9 +195,33 @@ def test_asr_gate_rejects_noise_fragments_and_accepts_short_english(tmp_path):
         "You",
         audio_duration_seconds=0.5,
     )[0] is False
+    assert provider._should_forward_asr_text(
+        "I said",
+        audio_duration_seconds=0.42,
+    )[0] is False
+    assert provider._should_forward_asr_text(
+        "Woo",
+        audio_duration_seconds=0.18,
+    )[0] is False
     assert provider._should_forward_asr_text("I want you to be more emotional.")[0]
     assert provider._should_forward_asr_text("Hi!")[0]
     assert provider._should_forward_asr_text("Ok.")[0]
+    assert provider._should_forward_asr_text(
+        "Picnic.",
+        audio_duration_seconds=0.6,
+    )[0]
+    assert provider._should_forward_asr_text(
+        "Sure.",
+        audio_duration_seconds=0.4,
+    )[0]
+    assert provider._should_forward_asr_text(
+        "Okay.",
+        audio_duration_seconds=0.4,
+    )[0]
+    assert provider._should_forward_asr_text(
+        "I said her birthday is tomorrow.",
+        audio_duration_seconds=1.4,
+    )[0]
     assert provider._should_forward_asr_text(
         "You got milk?",
         audio_duration_seconds=0.8,
