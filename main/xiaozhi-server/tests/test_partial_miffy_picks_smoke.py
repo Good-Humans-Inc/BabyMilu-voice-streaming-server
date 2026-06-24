@@ -222,7 +222,7 @@ def _call_name(call_node):
     return None
 
 
-def test_cached_prompt_and_per_turn_refresh_paths_are_not_executable():
+def test_cached_prompt_path_is_not_executable_and_per_turn_refresh_is_enabled():
     calls = {
         _call_name(node)
         for node in ast.walk(_connection_tree())
@@ -231,7 +231,7 @@ def test_cached_prompt_and_per_turn_refresh_paths_are_not_executable():
 
     assert "get_cached_enhanced_prompt" not in calls
     assert "invalidate_device_prompt_cache" not in calls
-    assert "_refresh_character_binding_if_needed" not in calls
+    assert "_refresh_character_binding_if_needed" in calls
 
 
 def test_device_scoped_conversation_binding_is_not_short_circuited():

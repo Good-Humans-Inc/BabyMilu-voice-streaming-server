@@ -280,9 +280,14 @@ The normal audio path now looks like this:
 5. ASR receives the frame and updates utterance state.
 6. If speech stops, ASR copies the utterance, clears the frame buffer, resets
    connection VAD state, and releases the VAD provider.
-7. If TTS starts, the send path releases any remaining VAD lease before marking
+7. ASR filters empty, non-English, and low-signal fragments before a transcript
+   can start an LLM turn. Non-empty fuzzy transcripts can trigger a short repeat
+   prompt instead of being treated as user intent.
+8. If TTS starts, the send path releases any remaining VAD lease before marking
    the server as speaking.
-8. If the connection closes, close waits for in-flight VAD work before returning
+9. On every top-level user turn, the active character binding is refreshed so
+   connected devices can pick up profile/voice changes without reconnecting.
+10. If the connection closes, close waits for in-flight VAD work before returning
    the provider.
 
 The key invariant is:
@@ -294,6 +299,34 @@ the same time.
 
 A provider may be reused by another connection later, but only after release and
 reset.
+
+## ASR Transcript Gate
+
+`ASRProviderBase` owns the last gate before an ASR transcript becomes an LLM
+turn. The gate rejects:
+
+- empty transcripts after punctuation stripping
+- single-character fragments
+- non-English fragments with no ASCII letters when `reject_non_english_fragments`
+  is enabled
+- configurable low-signal fragments such as `hmm`, `uh`, `you`, or `empty` when
+  the captured audio is shorter than `low_signal_fragment_max_audio_seconds`
+
+For rejected non-empty fuzzy transcripts, the server may speak
+`unclear_asr_prompt` directly through TTS. This response is not inserted into the
+dialogue history and does not call the LLM.
+
+Relevant ASR config keys:
+
+```yaml
+reject_non_english_fragments: true
+reject_low_signal_fragments: true
+low_signal_fragment_max_audio_seconds: 1.2
+low_signal_fragments: ["hmm", "uh", "you", "empty"]
+speak_on_unclear_asr: true
+unclear_asr_prompt: "I didn't catch that clearly. Can you say it again?"
+unclear_asr_prompt_cooldown_seconds: 4.0
+```
 
 ## Configuration Guide
 
