@@ -320,6 +320,9 @@ turn. The gate rejects:
   `so`) or repair openers (`i said`, `i mean`, `you know`) when the captured
   audio is shorter than
   `ambiguous_short_fragment_max_audio_seconds`
+- incomplete transcript endings such as `going to`, `about to`, or a trailing
+  article like `a`/`the`, so BabyMilu does not answer while the user is still
+  forming a sentence
 
 For rejected non-empty fuzzy transcripts, the server may speak
 `unclear_asr_prompt` directly through TTS. This response is not inserted into the
@@ -331,6 +334,7 @@ Relevant ASR config keys:
 reject_non_english_fragments: true
 reject_low_signal_fragments: true
 reject_ambiguous_short_fragments: true
+reject_incomplete_fragments: true
 low_signal_fragment_max_audio_seconds: 1.2
 ambiguous_short_fragment_max_audio_seconds: 0.7
 low_signal_fragments: ["hmm", "uh", "you", "empty"]
@@ -349,6 +353,10 @@ Rejected non-English transcripts are treated like unclear ASR: they are not sent
 to the LLM, not written as dialogue turns, and not used for memory. If
 `speak_on_unclear_asr` is enabled, the server says the configured unclear prompt
 instead of letting the character roleplay the transcript.
+
+The default Silero VAD silence window is intentionally patient for BabyMilu's
+companion style. Users often pause to think, say `hmm`, or search for a word, so
+the default should prefer waiting over fast endpointing.
 
 ## Configuration Guide
 

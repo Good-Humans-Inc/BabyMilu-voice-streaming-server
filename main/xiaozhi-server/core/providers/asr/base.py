@@ -144,6 +144,20 @@ DEFAULT_NON_ENGLISH_MARKER_GROUPS = {
         "takk",
     },
 }
+INCOMPLETE_ENDING_WORDS = {
+    "a",
+    "an",
+    "the",
+}
+INCOMPLETE_ENDING_PHRASES = {
+    ("about", "to"),
+    ("going", "to"),
+    ("have", "to"),
+    ("need", "to"),
+    ("trying", "to"),
+    ("want", "to"),
+    ("wanted", "to"),
+}
 UNCLEAR_ASR_PROMPT_REASONS = {
     "single_character_fragment",
     "no_ascii_letters",
@@ -151,6 +165,7 @@ UNCLEAR_ASR_PROMPT_REASONS = {
     "detected_non_english",
     "low_signal_fragment",
     "ambiguous_short_fragment",
+    "incomplete_fragment",
 }
 
 
@@ -166,6 +181,7 @@ class ASRProviderBase(ABC):
         self.reject_non_english_fragments = True
         self.reject_low_signal_fragments = True
         self.reject_ambiguous_short_fragments = True
+        self.reject_incomplete_fragments = True
         self.low_signal_fragment_max_audio_seconds = 1.2
         self.ambiguous_short_fragment_max_audio_seconds = 0.7
         self.low_signal_fragments = set(DEFAULT_LOW_SIGNAL_ASR_FRAGMENTS)
@@ -223,6 +239,10 @@ class ASRProviderBase(ABC):
         self.reject_ambiguous_short_fragments = self._as_bool(
             config.get("reject_ambiguous_short_fragments"),
             self.reject_ambiguous_short_fragments,
+        )
+        self.reject_incomplete_fragments = self._as_bool(
+            config.get("reject_incomplete_fragments"),
+            self.reject_incomplete_fragments,
         )
         self.low_signal_fragment_max_audio_seconds = self._as_float(
             config.get("low_signal_fragment_max_audio_seconds"),
@@ -709,6 +729,9 @@ class ASRProviderBase(ABC):
         ):
             return False, filtered_text, "ambiguous_short_fragment"
 
+        if self._is_incomplete_asr_fragment(raw_text_value):
+            return False, filtered_text, "incomplete_fragment"
+
         return True, filtered_text, "ok"
 
     def _is_low_signal_asr_fragment(
@@ -753,6 +776,26 @@ class ASRProviderBase(ABC):
         for markers in self.non_english_marker_groups.values():
             if len(token_set & markers) >= 2:
                 return True
+        return False
+
+    def _is_incomplete_asr_fragment(self, text: str) -> bool:
+        if not self.reject_incomplete_fragments:
+            return False
+
+        stripped = str(text or "").strip()
+        if not stripped or stripped.endswith("?"):
+            return False
+
+        tokens = self._language_tokens(stripped)
+        if not tokens:
+            return False
+
+        if tokens[-1] in INCOMPLETE_ENDING_WORDS:
+            return True
+
+        if len(tokens) >= 2 and tuple(tokens[-2:]) in INCOMPLETE_ENDING_PHRASES:
+            return True
+
         return False
 
     @classmethod

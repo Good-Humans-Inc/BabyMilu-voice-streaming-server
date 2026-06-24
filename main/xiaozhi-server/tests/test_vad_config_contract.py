@@ -8,4 +8,4 @@ def test_default_silero_vad_allows_normal_human_pauses():
 
     config_text = config_path.read_text(encoding="utf-8")
 
-    assert "min_silence_duration_ms: 900" in config_text
+    assert "min_silence_duration_ms: 1500" in config_text
