@@ -10,6 +10,7 @@ import queue
 import asyncio
 import traceback
 import threading
+import unicodedata
 import opuslib_next
 import concurrent.futures
 from abc import ABC, abstractmethod
@@ -33,6 +34,7 @@ except Exception:
 GCS_AUDIO_RETENTION_MODES = {"gcs", "upload", "cloud"}
 PERSIST_AUDIO_RETENTION_MODES = {"archive", "keep"} | GCS_AUDIO_RETENTION_MODES
 ASCII_LETTER_PATTERN = re.compile(r"[A-Za-z]")
+WORD_PATTERN = re.compile(r"[a-z]+")
 DEFAULT_LOW_SIGNAL_ASR_FRAGMENTS = {
     "ah",
     "eh",
@@ -88,10 +90,65 @@ DEFAULT_AMBIGUOUS_SHORT_ASR_FRAGMENTS = {
     "with",
     "you know",
 }
+DEFAULT_NON_ENGLISH_MARKER_GROUPS = {
+    "french": {
+        "bonjour",
+        "comment",
+        "fatigue",
+        "je",
+        "merci",
+        "pourquoi",
+        "quoi",
+        "suis",
+        "tres",
+        "vous",
+    },
+    "german": {
+        "aber",
+        "bin",
+        "bitte",
+        "danke",
+        "guten",
+        "hallo",
+        "ich",
+        "morgen",
+        "mude",
+        "nicht",
+        "und",
+    },
+    "spanish": {
+        "buenas",
+        "buenos",
+        "como",
+        "dias",
+        "estas",
+        "estoy",
+        "gracias",
+        "hola",
+        "muy",
+        "pero",
+        "porque",
+        "quiero",
+    },
+    "nordic": {
+        "det",
+        "hva",
+        "hvor",
+        "ikke",
+        "jeg",
+        "ma",
+        "med",
+        "og",
+        "se",
+        "skal",
+        "takk",
+    },
+}
 UNCLEAR_ASR_PROMPT_REASONS = {
     "single_character_fragment",
     "no_ascii_letters",
     "non_english_characters",
+    "detected_non_english",
     "low_signal_fragment",
     "ambiguous_short_fragment",
 }
@@ -115,6 +172,10 @@ class ASRProviderBase(ABC):
         self.ambiguous_short_fragments = {
             self._normalize_short_fragment_key(item)
             for item in DEFAULT_AMBIGUOUS_SHORT_ASR_FRAGMENTS
+        }
+        self.non_english_marker_groups = {
+            language: set(markers)
+            for language, markers in DEFAULT_NON_ENGLISH_MARKER_GROUPS.items()
         }
         self.speak_on_unclear_asr = True
         self.unclear_asr_prompt = "I didn't catch that clearly. Can you say it again?"
@@ -197,6 +258,28 @@ class ASRProviderBase(ABC):
                 for item in configured_ambiguous_short
                 if str(item).strip()
             }
+        configured_non_english = config.get("non_english_marker_groups")
+        if isinstance(configured_non_english, dict):
+            marker_groups = {}
+            for language, markers in configured_non_english.items():
+                if isinstance(markers, str):
+                    markers = [
+                        item.strip()
+                        for item in markers.split(",")
+                        if item.strip()
+                    ]
+                if not isinstance(markers, (list, tuple, set)):
+                    continue
+                normalized_markers = {
+                    self._normalize_language_marker(item)
+                    for item in markers
+                    if str(item).strip()
+                }
+                normalized_markers.discard("")
+                if normalized_markers:
+                    marker_groups[str(language)] = normalized_markers
+            if marker_groups:
+                self.non_english_marker_groups = marker_groups
         self.speak_on_unclear_asr = self._as_bool(
             config.get("speak_on_unclear_asr"),
             self.speak_on_unclear_asr,
@@ -587,7 +670,8 @@ class ASRProviderBase(ABC):
         *,
         audio_duration_seconds: Optional[float] = None,
     ) -> tuple[bool, str, str]:
-        text_len, filtered_text = remove_punctuation_and_length(raw_text or "")
+        raw_text_value = raw_text or ""
+        text_len, filtered_text = remove_punctuation_and_length(raw_text_value)
         filtered_text = (filtered_text or "").strip()
         if text_len <= 0 or not filtered_text:
             return False, filtered_text, "empty_after_punctuation"
@@ -603,9 +687,15 @@ class ASRProviderBase(ABC):
 
         if (
             self.reject_non_english_fragments
-            and self._has_non_ascii_letter(filtered_text)
+            and self._has_non_ascii_letter(raw_text_value)
         ):
             return False, filtered_text, "non_english_characters"
+
+        if (
+            self.reject_non_english_fragments
+            and self._is_detected_non_english_text(raw_text_value)
+        ):
+            return False, filtered_text, "detected_non_english"
 
         if self._is_low_signal_asr_fragment(
             filtered_text,
@@ -654,6 +744,27 @@ class ASRProviderBase(ABC):
     @staticmethod
     def _normalize_short_fragment_key(text: str) -> str:
         return re.sub(r"[^a-z0-9]+", "", str(text or "").casefold())
+
+    def _is_detected_non_english_text(self, text: str) -> bool:
+        tokens = self._language_tokens(text)
+        if len(tokens) < 2:
+            return False
+        token_set = set(tokens)
+        for markers in self.non_english_marker_groups.values():
+            if len(token_set & markers) >= 2:
+                return True
+        return False
+
+    @classmethod
+    def _language_tokens(cls, text: str) -> list[str]:
+        normalized = unicodedata.normalize("NFKD", str(text or ""))
+        ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+        return WORD_PATTERN.findall(ascii_text.casefold())
+
+    @classmethod
+    def _normalize_language_marker(cls, text: str) -> str:
+        tokens = cls._language_tokens(str(text or ""))
+        return tokens[0] if tokens else ""
 
     @staticmethod
     def _has_non_ascii_letter(text: str) -> bool:

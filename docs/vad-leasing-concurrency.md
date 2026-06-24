@@ -311,6 +311,9 @@ turn. The gate rejects:
   is enabled
 - transcripts with non-ASCII letters when the runtime is configured for English
   voice interaction
+- transcripts that match conservative non-English marker groups, such as
+  `je suis`, `ich bin`, `hola como`, or `jeg ma`, when English-only ASR is
+  expected
 - configurable low-signal fragments such as `hmm`, `uh`, `you`, or `empty` when
   the captured audio is shorter than `low_signal_fragment_max_audio_seconds`
 - configurable ambiguous short fragments such as function words (`the`, `and`,
@@ -332,10 +335,20 @@ low_signal_fragment_max_audio_seconds: 1.2
 ambiguous_short_fragment_max_audio_seconds: 0.7
 low_signal_fragments: ["hmm", "uh", "you", "empty"]
 ambiguous_short_fragments: ["the", "and", "so", "i said", "i mean", "you know"]
+non_english_marker_groups:
+  french: ["je", "suis", "merci", "bonjour"]
+  german: ["ich", "bin", "danke", "nicht"]
+  spanish: ["hola", "como", "estas", "gracias"]
+  nordic: ["jeg", "ma", "ikke", "takk"]
 speak_on_unclear_asr: true
 unclear_asr_prompt: "I didn't catch that clearly. Can you say it again?"
 unclear_asr_prompt_cooldown_seconds: 4.0
 ```
+
+Rejected non-English transcripts are treated like unclear ASR: they are not sent
+to the LLM, not written as dialogue turns, and not used for memory. If
+`speak_on_unclear_asr` is enabled, the server says the configured unclear prompt
+instead of letting the character roleplay the transcript.
 
 ## Configuration Guide
 
