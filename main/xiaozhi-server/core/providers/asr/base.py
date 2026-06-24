@@ -10,6 +10,7 @@ import queue
 import asyncio
 import traceback
 import threading
+import unicodedata
 import opuslib_next
 import concurrent.futures
 from abc import ABC, abstractmethod
@@ -33,6 +34,130 @@ except Exception:
 GCS_AUDIO_RETENTION_MODES = {"gcs", "upload", "cloud"}
 PERSIST_AUDIO_RETENTION_MODES = {"archive", "keep"} | GCS_AUDIO_RETENTION_MODES
 ASCII_LETTER_PATTERN = re.compile(r"[A-Za-z]")
+WORD_PATTERN = re.compile(r"[a-z]+")
+DEFAULT_LOW_SIGNAL_ASR_FRAGMENTS = {
+    "ah",
+    "eh",
+    "er",
+    "hm",
+    "hmm",
+    "hmmm",
+    "oh",
+    "uh",
+    "uhh",
+    "um",
+    "umm",
+    "you",
+    "empty",
+}
+DEFAULT_AMBIGUOUS_SHORT_ASR_FRAGMENTS = {
+    "a",
+    "actually",
+    "an",
+    "and",
+    "are",
+    "basically",
+    "because",
+    "but",
+    "for",
+    "from",
+    "i mean",
+    "i have",
+    "i said",
+    "i was",
+    "if",
+    "in",
+    "is",
+    "it",
+    "it was",
+    "like",
+    "of",
+    "on",
+    "or",
+    "so",
+    "that",
+    "the",
+    "then",
+    "there",
+    "there are",
+    "there is",
+    "this",
+    "to",
+    "was",
+    "we were",
+    "well",
+    "were",
+    "with",
+    "you know",
+}
+DEFAULT_NON_ENGLISH_MARKER_GROUPS = {
+    "french": {
+        "bonjour",
+        "comment",
+        "fatigue",
+        "je",
+        "merci",
+        "pourquoi",
+        "quoi",
+        "suis",
+        "tres",
+        "vous",
+    },
+    "german": {
+        "aber",
+        "bin",
+        "bitte",
+        "danke",
+        "guten",
+        "hallo",
+        "ich",
+        "morgen",
+        "mude",
+        "nicht",
+        "und",
+    },
+    "spanish": {
+        "buenas",
+        "buenos",
+        "como",
+        "dias",
+        "estas",
+        "estoy",
+        "gracias",
+        "hola",
+        "muy",
+        "pero",
+        "porque",
+        "quiero",
+    },
+    "nordic": {
+        "det",
+        "hva",
+        "hvor",
+        "ikke",
+        "jeg",
+        "ma",
+        "med",
+        "og",
+        "se",
+        "skal",
+        "takk",
+    },
+}
+INCOMPLETE_ENDING_WORDS = {
+    "a",
+    "an",
+    "the",
+}
+UNCLEAR_ASR_PROMPT_REASONS = {
+    "single_character_fragment",
+    "no_ascii_letters",
+    "non_english_characters",
+    "detected_non_english",
+    "low_signal_fragment",
+    "ambiguous_short_fragment",
+    "incomplete_fragment",
+}
 
 
 class ASRProviderBase(ABC):
@@ -45,6 +170,23 @@ class ASRProviderBase(ABC):
         self.audio_gcs_prefix = "asr_audio"
         self.audio_gcs_delete_local = True
         self.reject_non_english_fragments = True
+        self.reject_low_signal_fragments = True
+        self.reject_ambiguous_short_fragments = True
+        self.reject_incomplete_fragments = True
+        self.low_signal_fragment_max_audio_seconds = 1.2
+        self.ambiguous_short_fragment_max_audio_seconds = 0.7
+        self.low_signal_fragments = set(DEFAULT_LOW_SIGNAL_ASR_FRAGMENTS)
+        self.ambiguous_short_fragments = {
+            self._normalize_short_fragment_key(item)
+            for item in DEFAULT_AMBIGUOUS_SHORT_ASR_FRAGMENTS
+        }
+        self.non_english_marker_groups = {
+            language: set(markers)
+            for language, markers in DEFAULT_NON_ENGLISH_MARKER_GROUPS.items()
+        }
+        self.speak_on_unclear_asr = True
+        self.unclear_asr_prompt = "I didn't catch that clearly. Can you say it again?"
+        self.unclear_asr_prompt_cooldown_seconds = 4.0
 
     def configure_audio_retention(
         self,
@@ -80,6 +222,85 @@ class ASRProviderBase(ABC):
         self.reject_non_english_fragments = self._as_bool(
             config.get("reject_non_english_fragments"),
             self.reject_non_english_fragments,
+        )
+        self.reject_low_signal_fragments = self._as_bool(
+            config.get("reject_low_signal_fragments"),
+            self.reject_low_signal_fragments,
+        )
+        self.reject_ambiguous_short_fragments = self._as_bool(
+            config.get("reject_ambiguous_short_fragments"),
+            self.reject_ambiguous_short_fragments,
+        )
+        self.reject_incomplete_fragments = self._as_bool(
+            config.get("reject_incomplete_fragments"),
+            self.reject_incomplete_fragments,
+        )
+        self.low_signal_fragment_max_audio_seconds = self._as_float(
+            config.get("low_signal_fragment_max_audio_seconds"),
+            self.low_signal_fragment_max_audio_seconds,
+        )
+        self.ambiguous_short_fragment_max_audio_seconds = self._as_float(
+            config.get("ambiguous_short_fragment_max_audio_seconds"),
+            self.ambiguous_short_fragment_max_audio_seconds,
+        )
+        configured_low_signal = config.get("low_signal_fragments")
+        if isinstance(configured_low_signal, str):
+            configured_low_signal = [
+                item.strip()
+                for item in configured_low_signal.split(",")
+                if item.strip()
+            ]
+        if isinstance(configured_low_signal, (list, tuple, set)):
+            self.low_signal_fragments = {
+                str(item).strip().casefold()
+                for item in configured_low_signal
+                if str(item).strip()
+            }
+        configured_ambiguous_short = config.get("ambiguous_short_fragments")
+        if isinstance(configured_ambiguous_short, str):
+            configured_ambiguous_short = [
+                item.strip()
+                for item in configured_ambiguous_short.split(",")
+                if item.strip()
+            ]
+        if isinstance(configured_ambiguous_short, (list, tuple, set)):
+            self.ambiguous_short_fragments = {
+                self._normalize_short_fragment_key(item)
+                for item in configured_ambiguous_short
+                if str(item).strip()
+            }
+        configured_non_english = config.get("non_english_marker_groups")
+        if isinstance(configured_non_english, dict):
+            marker_groups = {}
+            for language, markers in configured_non_english.items():
+                if isinstance(markers, str):
+                    markers = [
+                        item.strip()
+                        for item in markers.split(",")
+                        if item.strip()
+                    ]
+                if not isinstance(markers, (list, tuple, set)):
+                    continue
+                normalized_markers = {
+                    self._normalize_language_marker(item)
+                    for item in markers
+                    if str(item).strip()
+                }
+                normalized_markers.discard("")
+                if normalized_markers:
+                    marker_groups[str(language)] = normalized_markers
+            if marker_groups:
+                self.non_english_marker_groups = marker_groups
+        self.speak_on_unclear_asr = self._as_bool(
+            config.get("speak_on_unclear_asr"),
+            self.speak_on_unclear_asr,
+        )
+        self.unclear_asr_prompt = str(
+            config.get("unclear_asr_prompt") or self.unclear_asr_prompt
+        ).strip()
+        self.unclear_asr_prompt_cooldown_seconds = self._as_float(
+            config.get("unclear_asr_prompt_cooldown_seconds"),
+            self.unclear_asr_prompt_cooldown_seconds,
         )
 
     def should_persist_audio_file(self) -> bool:
@@ -214,6 +435,15 @@ class ASRProviderBase(ABC):
         if isinstance(value, bool):
             return value
         return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    @staticmethod
+    def _as_float(value, default: float) -> float:
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
     # 打开音频通道
     async def open_audio_channels(self, conn):
@@ -404,8 +634,15 @@ class ASRProviderBase(ABC):
             total_time = time.monotonic() - total_start_time
             logger.bind(tag=TAG).info(f"总处理耗时: {total_time:.3f}s")
 
+            audio_duration_seconds = self._estimate_audio_duration_seconds(
+                combined_pcm_data,
+                asr_audio_task,
+            )
             should_forward, filtered_text, reject_reason = (
-                self._should_forward_asr_text(raw_text)
+                self._should_forward_asr_text(
+                    raw_text,
+                    audio_duration_seconds=audio_duration_seconds,
+                )
             )
             self.stop_ws_connection()
 
@@ -421,6 +658,7 @@ class ASRProviderBase(ABC):
                     "忽略ASR识别片段: "
                     f"reason={reject_reason} filtered={filtered_text!r} raw={raw_text!r}"
                 )
+                await self._maybe_speak_unclear_asr_prompt(conn, reject_reason)
 
         except Exception as e:
             logger.bind(tag=TAG).error(f"处理语音停止失败: {e}")
@@ -437,8 +675,14 @@ class ASRProviderBase(ABC):
         else:
             return text
 
-    def _should_forward_asr_text(self, raw_text: Optional[str]) -> tuple[bool, str, str]:
-        text_len, filtered_text = remove_punctuation_and_length(raw_text or "")
+    def _should_forward_asr_text(
+        self,
+        raw_text: Optional[str],
+        *,
+        audio_duration_seconds: Optional[float] = None,
+    ) -> tuple[bool, str, str]:
+        raw_text_value = raw_text or ""
+        text_len, filtered_text = remove_punctuation_and_length(raw_text_value)
         filtered_text = (filtered_text or "").strip()
         if text_len <= 0 or not filtered_text:
             return False, filtered_text, "empty_after_punctuation"
@@ -452,7 +696,177 @@ class ASRProviderBase(ABC):
         ):
             return False, filtered_text, "no_ascii_letters"
 
+        if (
+            self.reject_non_english_fragments
+            and self._has_non_ascii_letter(raw_text_value)
+        ):
+            return False, filtered_text, "non_english_characters"
+
+        if (
+            self.reject_non_english_fragments
+            and self._is_detected_non_english_text(raw_text_value)
+        ):
+            return False, filtered_text, "detected_non_english"
+
+        if self._is_low_signal_asr_fragment(
+            filtered_text,
+            audio_duration_seconds=audio_duration_seconds,
+        ):
+            return False, filtered_text, "low_signal_fragment"
+
+        if self._is_ambiguous_short_asr_fragment(
+            filtered_text,
+            audio_duration_seconds=audio_duration_seconds,
+        ):
+            return False, filtered_text, "ambiguous_short_fragment"
+
+        if self._is_incomplete_asr_fragment(raw_text_value):
+            return False, filtered_text, "incomplete_fragment"
+
         return True, filtered_text, "ok"
+
+    def _is_low_signal_asr_fragment(
+        self,
+        filtered_text: str,
+        *,
+        audio_duration_seconds: Optional[float],
+    ) -> bool:
+        if not self.reject_low_signal_fragments:
+            return False
+        normalized = " ".join((filtered_text or "").casefold().split())
+        if normalized not in self.low_signal_fragments:
+            return False
+        if audio_duration_seconds is None:
+            return True
+        return audio_duration_seconds <= self.low_signal_fragment_max_audio_seconds
+
+    def _is_ambiguous_short_asr_fragment(
+        self,
+        filtered_text: str,
+        *,
+        audio_duration_seconds: Optional[float],
+    ) -> bool:
+        if not self.reject_ambiguous_short_fragments:
+            return False
+        if audio_duration_seconds is None:
+            return False
+        normalized = self._normalize_short_fragment_key(filtered_text)
+        if normalized not in self.ambiguous_short_fragments:
+            return False
+        return audio_duration_seconds <= self.ambiguous_short_fragment_max_audio_seconds
+
+    @staticmethod
+    def _normalize_short_fragment_key(text: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(text or "").casefold())
+
+    def _is_detected_non_english_text(self, text: str) -> bool:
+        tokens = self._language_tokens(text)
+        if len(tokens) < 2:
+            return False
+        token_set = set(tokens)
+        for markers in self.non_english_marker_groups.values():
+            if len(token_set & markers) >= 2:
+                return True
+        return False
+
+    def _is_incomplete_asr_fragment(self, text: str) -> bool:
+        if not self.reject_incomplete_fragments:
+            return False
+
+        stripped = str(text or "").strip()
+        if not stripped or stripped.endswith("?"):
+            return False
+
+        tokens = self._language_tokens(stripped)
+        if not tokens:
+            return False
+
+        if tokens[-1] in INCOMPLETE_ENDING_WORDS:
+            return True
+
+        return False
+
+    @classmethod
+    def _language_tokens(cls, text: str) -> list[str]:
+        normalized = unicodedata.normalize("NFKD", str(text or ""))
+        ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+        return WORD_PATTERN.findall(ascii_text.casefold())
+
+    @classmethod
+    def _normalize_language_marker(cls, text: str) -> str:
+        tokens = cls._language_tokens(str(text or ""))
+        return tokens[0] if tokens else ""
+
+    @staticmethod
+    def _has_non_ascii_letter(text: str) -> bool:
+        return any(ord(char) > 127 and char.isalpha() for char in text or "")
+
+    @staticmethod
+    def _estimate_audio_duration_seconds(
+        combined_pcm_data: bytes,
+        asr_audio_task: List[bytes],
+    ) -> Optional[float]:
+        if combined_pcm_data:
+            return len(combined_pcm_data) / float(16000 * 2)
+        if asr_audio_task:
+            return len(asr_audio_task) * 0.06
+        return None
+
+    async def _maybe_speak_unclear_asr_prompt(self, conn, reject_reason: str) -> None:
+        if (
+            not self.speak_on_unclear_asr
+            or not self.unclear_asr_prompt
+            or reject_reason not in UNCLEAR_ASR_PROMPT_REASONS
+        ):
+            return
+
+        now = time.monotonic()
+        last_prompt_at = float(getattr(conn, "_last_unclear_asr_prompt_at", 0.0) or 0.0)
+        if now - last_prompt_at < self.unclear_asr_prompt_cooldown_seconds:
+            return
+        setattr(conn, "_last_unclear_asr_prompt_at", now)
+
+        try:
+            from core.providers.tts.dto.dto import (
+                ContentType,
+                SentenceType,
+                TTSMessageDTO,
+            )
+
+            sentence_id = getattr(conn, "sentence_id", None) or str(uuid.uuid4().hex)
+            conn.sentence_id = sentence_id
+            conn.tts_MessageText = self.unclear_asr_prompt
+
+            tts = getattr(conn, "tts", None)
+            if tts is None:
+                return
+            queue = getattr(tts, "tts_text_queue", None)
+            if queue is not None:
+                queue.put(
+                    TTSMessageDTO(
+                        sentence_id=sentence_id,
+                        sentence_type=SentenceType.FIRST,
+                        content_type=ContentType.ACTION,
+                    )
+                )
+            tts.tts_one_sentence(
+                conn,
+                ContentType.TEXT,
+                content_detail=self.unclear_asr_prompt,
+                sentence_id=sentence_id,
+            )
+            if queue is not None:
+                queue.put(
+                    TTSMessageDTO(
+                        sentence_id=sentence_id,
+                        sentence_type=SentenceType.LAST,
+                        content_type=ContentType.ACTION,
+                    )
+                )
+        except Exception as exc:
+            logger.bind(tag=TAG).warning(
+                f"Failed to speak unclear ASR prompt: {exc}"
+            )
 
     def _pcm_to_wav(self, pcm_data: bytes) -> bytes:
         """将PCM数据转换为WAV格式"""

@@ -8,6 +8,7 @@ from core.utils.output_counter import check_device_output_limit
 from core.handle.sendAudioHandle import send_stt_message, SentenceType
 
 TAG = __name__
+LLM_BUSY_ABORT_WAIT_SECONDS = 2.0
 
 
 async def handleAudioMessage(conn, audio):
@@ -100,9 +101,14 @@ async def startToChat(conn, text):
     # duplicated/conflicting TTS outputs.
     if not getattr(conn, "llm_finish_task", True):
         conn.logger.bind(tag=TAG).warning(
-            f"Dropping user query while LLM busy: {actual_text[:80]!r}"
+            f"User query arrived while LLM busy; aborting current response: {actual_text[:80]!r}"
         )
-        return
+        await _abort_current_response(conn)
+        if not await _wait_for_llm_idle(conn):
+            conn.logger.bind(tag=TAG).warning(
+                f"Dropping user query after busy LLM did not stop: {actual_text[:80]!r}"
+            )
+            return
 
     # 如果当日的输出字数大于限定的字数
     if conn.max_output_size > 0:
@@ -124,6 +130,38 @@ async def startToChat(conn, text):
     # 意图未被处理，继续常规聊天流程，使用实际文本内容
     await send_stt_message(conn, actual_text)
     conn.executor.submit(conn.chat, actual_text)
+
+
+async def _abort_current_response(conn):
+    try:
+        await handleAbortMessage(conn)
+    except Exception as e:
+        conn.logger.bind(tag=TAG).warning(
+            f"Failed to send abort before handling new user query: {e}"
+        )
+        conn.client_abort = True
+        clear_queues = getattr(conn, "clear_queues", None)
+        if callable(clear_queues):
+            clear_queues()
+
+
+async def _wait_for_llm_idle(conn):
+    timeout_seconds = LLM_BUSY_ABORT_WAIT_SECONDS
+    try:
+        configured = (getattr(conn, "config", {}) or {}).get(
+            "barge_in_wait_timeout_seconds"
+        )
+        if configured is not None:
+            timeout_seconds = float(configured)
+    except Exception:
+        timeout_seconds = LLM_BUSY_ABORT_WAIT_SECONDS
+
+    deadline = asyncio.get_running_loop().time() + max(0.0, timeout_seconds)
+    while not getattr(conn, "llm_finish_task", True):
+        if asyncio.get_running_loop().time() >= deadline:
+            return False
+        await asyncio.sleep(0.05)
+    return True
 
 
 async def no_voice_close_connect(conn, have_voice):

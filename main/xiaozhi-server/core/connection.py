@@ -41,6 +41,11 @@ from core.utils.voiceprint_provider import VoiceprintProvider
 from core.utils import textUtils
 from .chat_store import ChatStore
 from core.utils.util import filter_sensitive_info, check_vad_update, check_asr_update
+from core.utils.identity_guardrails import (
+    build_forced_self_introduction_text,
+    identity_text_has_drift,
+    is_forced_self_introduction_query,
+)
 from core.utils.firestore_client import (
     get_active_character_for_device,
     get_character_profile,
@@ -62,6 +67,7 @@ from core.utils.api_client import query_task, get_assigned_tasks_for_user, proce
 TAG = __name__
 TOOL_WAIT_PLACEHOLDERS = {
     "inspect_recent_photo": "hmmm",
+    "inspect_recent_magic_camera_photo": "hmmm",
 }
 
 auto_import_modules("plugins_func.functions")
@@ -2589,6 +2595,38 @@ Return ONLY the JSON array, no other explanation."""
             return self.llm.ensure_conversation(self.session_id)
         return None
 
+    def _handle_llm_conversation_reset(self, conversation_id: Optional[str]) -> None:
+        if not conversation_id:
+            return
+        self.current_conversation_id = conversation_id
+        last_used = datetime.now(timezone.utc).isoformat()
+        summary = self._build_last_interaction_summary()
+
+        try:
+            if self.use_mode_conversation and self.mode_session:
+                self._update_mode_session_conversation(
+                    {"id": conversation_id, "last_used": last_used}
+                )
+            elif self.device_id:
+                update_conversation_state_for_device(
+                    self.device_id,
+                    conversation_id=conversation_id,
+                    last_used=last_used,
+                    last_interaction_summary=summary,
+                )
+            if getattr(self, "_session_created", False):
+                self.chat_store.update_session_conversation_id(
+                    session_id=self.session_id,
+                    conversation_id=conversation_id,
+                )
+            self.logger.bind(tag=TAG).info(
+                f"Rebound session to reset LLM conversation: {conversation_id}"
+            )
+        except Exception as exc:
+            self.logger.bind(tag=TAG).warning(
+                f"Failed to persist reset LLM conversation {conversation_id}: {exc}"
+            )
+
     def _update_mode_session_conversation(
         self,
         conversation: Optional[Dict[str, Any]],
@@ -2637,7 +2675,7 @@ Return ONLY the JSON array, no other explanation."""
             self.device_id,
             conversation_id=conv_id,
             last_used=last_used,
-            last_interaction_summary=summary or None,
+            last_interaction_summary=summary,
         )
 
     def _build_last_interaction_summary(self, max_chars: int = 256) -> str:
@@ -2658,6 +2696,11 @@ Return ONLY the JSON array, no other explanation."""
         summary = " | ".join(reversed(parts))
         if len(summary) > max_chars:
             summary = summary[-max_chars:]
+        if identity_text_has_drift(summary):
+            self.logger.bind(tag=TAG).warning(
+                "Skipping contaminated last_interaction_summary with generic identity drift"
+            )
+            return ""
         return summary
 
     def _derive_conversation_ttl(self) -> timedelta:
@@ -2685,6 +2728,45 @@ Return ONLY the JSON array, no other explanation."""
             return False
         now = datetime.now(timezone.utc)
         return now - last_used > self.device_conversation_ttl
+
+    def _current_character_identity_fields(self) -> Dict[str, Any]:
+        fields: Dict[str, Any] = {}
+        char_id = (
+            getattr(self, "active_character_id", None)
+            or getattr(self, "current_character_id", None)
+        )
+        try:
+            if not char_id and getattr(self, "device_id", None):
+                char_id = get_active_character_for_device(self.device_id)
+            if char_id:
+                char_doc = get_character_profile(char_id)
+                fields = extract_character_profile_fields(char_doc or {}) or {}
+        except Exception as exc:
+            self.logger.bind(tag=TAG).warning(
+                f"Failed to load forced identity profile: {exc}"
+            )
+        return fields
+
+    def _build_forced_self_introduction_text(self, query) -> str:
+        return build_forced_self_introduction_text(
+            query,
+            self._current_character_identity_fields(),
+            prompt=getattr(self, "prompt", "") or "",
+            user_name=getattr(self, "user_name", "") or "",
+        )
+
+    def _compose_llm_instructions(self, memory_str, *, use_full_history: bool) -> str:
+        parts = []
+        if not use_full_history and getattr(self, "prompt", None):
+            parts.append(self.prompt)
+        if self.persistent_mode_specific_instructions:
+            parts.append(self.persistent_mode_specific_instructions)
+        if self.mode_specific_instructions:
+            parts.append(self.mode_specific_instructions)
+            self.mode_specific_instructions = ""
+        if memory_str:
+            parts.append(f"<memory>\n{memory_str}\n</memory>")
+        return "\n\n".join(part for part in parts if part)
 
     # ------------------------------------------------------------------
     # Follow-up scheduling (for modes like alarms)
@@ -2751,13 +2833,13 @@ Return ONLY the JSON array, no other explanation."""
 
         # For active websocket sessions, re-check character binding on user turns.
         # This ensures voice_id/prompt switch quickly after app-side character changes.
-        # if depth == 0 and is_user_input:
-        #     try:
-        #         self._refresh_character_binding_if_needed(force=False)
-        #     except Exception as e:
-        #         self.logger.bind(tag=TAG).warning(
-        #             f"Runtime character refresh failed (non-fatal): {e}"
-        #         )
+        if depth == 0 and is_user_input:
+            try:
+                self._refresh_character_binding_if_needed(force=False)
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(
+                    f"Runtime character refresh failed (non-fatal): {e}"
+                )
 
         # Genuine user input cancels any pending follow-up and marks the session as engaged.
         if query and is_user_input:
@@ -2802,64 +2884,76 @@ Return ONLY the JSON array, no other explanation."""
         if self.intent_type == "function_call" and hasattr(self, "func_handler"):
             functions = self.func_handler.get_functions()
         response_message = []
+        forced_identity_response = None
+        if (
+            depth == 0
+            and is_user_input
+            and is_forced_self_introduction_query(query)
+        ):
+            forced_identity_response = self._build_forced_self_introduction_text(query)
+            functions = None
+            self.logger.bind(tag=TAG).info(
+                "Forced character identity response for self-introduction/name query"
+            )
 
         try:
-            memory_str = None
-            if self.memory is not None:
+            if forced_identity_response:
+                llm_responses = [forced_identity_response]
+            else:
+                memory_str = None
+                if self.memory is not None:
+                    try:
+                        memory_str = self.run_async_provider(
+                            lambda: self.memory.query_memory(query),
+                            timeout=5.0,
+                        )
+                    except Exception as e:
+                        self.logger.bind(tag=TAG).warning(f"记忆查询失败或超时: {e}")
+
+                use_full_history = True
                 try:
-                    memory_str = self.run_async_provider(
-                        lambda: self.memory.query_memory(query),
-                        timeout=5.0,
+                    if hasattr(self.llm, "has_conversation") and self.llm.has_conversation(
+                        self.session_id
+                    ):
+                        use_full_history = False
+                except Exception:
+                    pass
+
+                if use_full_history:
+                    current_input = self.dialogue.get_llm_dialogue_with_memory(
+                        memory_str, self.config.get("voiceprint", {})
                     )
-                except Exception as e:
-                    self.logger.bind(tag=TAG).warning(f"记忆查询失败或超时: {e}")
+                else:
+                    current_input = [{"role": "user", "content": query}]
 
-            use_full_history = True
-            try:
-                if hasattr(self.llm, "has_conversation") and self.llm.has_conversation(
-                    self.session_id
-                ):
-                    use_full_history = False
-            except Exception:
-                pass
-
-            if use_full_history:
-                current_input = self.dialogue.get_llm_dialogue_with_memory(
-                    memory_str, self.config.get("voiceprint", {})
+                instructions = self._compose_llm_instructions(
+                    memory_str,
+                    use_full_history=use_full_history,
                 )
-            else:
-                current_input = [{"role": "user", "content": query}]
 
-            instructions = ""
-            if self.persistent_mode_specific_instructions:
-                instructions += self.persistent_mode_specific_instructions
-            if self.mode_specific_instructions:
-                instructions += self.mode_specific_instructions
-                self.mode_specific_instructions = ""
+                kwargs: Dict[str, Any] = {}
+                if instructions:
+                    kwargs["instructions"] = instructions
+                    self.logger.bind(tag=TAG).debug(
+                        f"Passing instructions to LLM (length: {len(instructions)})"
+                    )
+                if extra_inputs:
+                    kwargs["extra_inputs"] = extra_inputs
+                if hasattr(self.llm, "reset_conversation"):
+                    kwargs["system_text"] = self.prompt
+                    kwargs["on_conversation_reset"] = self._handle_llm_conversation_reset
 
-            if memory_str:
-                instructions += f"\n\n<memory>\n{memory_str}\n</memory>"
-
-            kwargs: Dict[str, Any] = {}
-            if instructions:
-                kwargs["instructions"] = instructions
-                self.logger.bind(tag=TAG).debug(
-                    f"Passing instructions to LLM (length: {len(instructions)})"
-                )
-            if extra_inputs:
-                kwargs["extra_inputs"] = extra_inputs
-
-            if self.intent_type == "function_call" and functions is not None:
-                llm_responses = self.llm.response_with_functions(
-                    self.session_id,
-                    current_input,
-                    functions=functions,
-                    **kwargs,
-                )
-            else:
-                llm_responses = self.llm.response(
-                    self.session_id, current_input, **kwargs
-                )
+                if self.intent_type == "function_call" and functions is not None:
+                    llm_responses = self.llm.response_with_functions(
+                        self.session_id,
+                        current_input,
+                        functions=functions,
+                        **kwargs,
+                    )
+                else:
+                    llm_responses = self.llm.response(
+                        self.session_id, current_input, **kwargs
+                    )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM 处理出错 {query}: {e}")
             return None

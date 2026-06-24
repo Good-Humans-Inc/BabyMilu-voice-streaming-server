@@ -96,7 +96,9 @@ SELF_INTRODUCTION_FUNCTION_DESC = {
         "description": (
             "Introduce yourself to someone new (like the user's friend). "
             "Share who you are, your personality, and your relationship with the user. "
-            "Use this when meeting new people or when asked to introduce yourself."
+            "Use this when meeting new people, when asked to introduce yourself, "
+            "or when asked your name, who you are, what people should call you, "
+            "or what your identity is."
         ),
         "parameters": {
             "type": "object",

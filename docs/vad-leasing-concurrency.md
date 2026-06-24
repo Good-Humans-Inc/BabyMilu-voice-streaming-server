@@ -280,9 +280,14 @@ The normal audio path now looks like this:
 5. ASR receives the frame and updates utterance state.
 6. If speech stops, ASR copies the utterance, clears the frame buffer, resets
    connection VAD state, and releases the VAD provider.
-7. If TTS starts, the send path releases any remaining VAD lease before marking
+7. ASR filters empty, non-English, and low-signal fragments before a transcript
+   can start an LLM turn. Non-empty fuzzy transcripts can trigger a short repeat
+   prompt instead of being treated as user intent.
+8. If TTS starts, the send path releases any remaining VAD lease before marking
    the server as speaking.
-8. If the connection closes, close waits for in-flight VAD work before returning
+9. On every top-level user turn, the active character binding is refreshed so
+   connected devices can pick up profile/voice changes without reconnecting.
+10. If the connection closes, close waits for in-flight VAD work before returning
    the provider.
 
 The key invariant is:
@@ -294,6 +299,65 @@ the same time.
 
 A provider may be reused by another connection later, but only after release and
 reset.
+
+## ASR Transcript Gate
+
+`ASRProviderBase` owns the last gate before an ASR transcript becomes an LLM
+turn. The gate rejects:
+
+- empty transcripts after punctuation stripping
+- single-character fragments
+- non-English fragments with no ASCII letters when `reject_non_english_fragments`
+  is enabled
+- transcripts with non-ASCII letters when the runtime is configured for English
+  voice interaction
+- transcripts that match conservative non-English marker groups, such as
+  `je suis`, `ich bin`, `hola como`, or `jeg ma`, when English-only ASR is
+  expected
+- configurable low-signal fragments such as `hmm`, `uh`, `you`, or `empty` when
+  the captured audio is shorter than `low_signal_fragment_max_audio_seconds`
+- configurable ambiguous short fragments such as function words (`the`, `and`,
+  `so`) or repair openers (`i said`, `i mean`, `you know`) when the captured
+  audio is shorter than
+  `ambiguous_short_fragment_max_audio_seconds`
+- incomplete transcript endings with a trailing article like `a`, `an`, or
+  `the`, so BabyMilu does not answer when ASR clearly clipped the next noun
+
+For rejected non-empty fuzzy transcripts, the server may speak
+`unclear_asr_prompt` directly through TTS. This response is not inserted into the
+dialogue history and does not call the LLM.
+
+Relevant ASR config keys:
+
+```yaml
+reject_non_english_fragments: true
+reject_low_signal_fragments: true
+reject_ambiguous_short_fragments: true
+reject_incomplete_fragments: true
+low_signal_fragment_max_audio_seconds: 1.2
+ambiguous_short_fragment_max_audio_seconds: 0.7
+low_signal_fragments: ["hmm", "uh", "you", "empty"]
+ambiguous_short_fragments: ["the", "and", "so", "i said", "i mean", "you know"]
+non_english_marker_groups:
+  french: ["je", "suis", "merci", "bonjour"]
+  german: ["ich", "bin", "danke", "nicht"]
+  spanish: ["hola", "como", "estas", "gracias"]
+  nordic: ["jeg", "ma", "ikke", "takk"]
+speak_on_unclear_asr: true
+unclear_asr_prompt: "I didn't catch that clearly. Can you say it again?"
+unclear_asr_prompt_cooldown_seconds: 4.0
+```
+
+Rejected non-English transcripts are treated like unclear ASR: they are not sent
+to the LLM, not written as dialogue turns, and not used for memory. If
+`speak_on_unclear_asr` is enabled, the server says the configured unclear prompt
+instead of letting the character roleplay the transcript.
+
+The default Silero VAD silence window is intentionally patient for BabyMilu's
+companion style. Users often pause to think, say `hmm`, or search for a word, so
+the default should prefer waiting over fast endpointing. Avoid adding broad
+phrase-specific incomplete rules; they can overfit one conversation and block
+valid elliptical replies for other users.
 
 ## Configuration Guide
 
