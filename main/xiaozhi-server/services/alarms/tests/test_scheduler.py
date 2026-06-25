@@ -138,6 +138,25 @@ def test_prepare_wake_requests_skips_existing_session(monkeypatch):
     assert fake_store.created == []
 
 
+def test_prepare_wake_requests_continues_when_session_lookup_fails(monkeypatch):
+    fake_store = _FakeSessionStore()
+    fake_store.get_session = lambda device_id, now=None: (_ for _ in ()).throw(
+        ValueError("bad stored timestamp")
+    )
+    monkeypatch.setattr(scheduler, "session_context_store", fake_store)
+
+    def fake_fetch(now, lookahead):
+        return [_make_alarm("DEV123", "morning_alarm")]
+
+    monkeypatch.setattr(scheduler.firestore_client, "fetch_due_alarms", fake_fetch)
+    wake_requests = scheduler.prepare_wake_requests(
+        datetime.now(timezone.utc), lookahead=timedelta(minutes=1)
+    )
+
+    assert len(wake_requests) == 1
+    assert fake_store.created[0][0] == "DEV123"
+
+
 def test_prepare_wake_requests_skips_when_last_processed_matches(monkeypatch):
     fake_store = _FakeSessionStore()
     monkeypatch.setattr(scheduler, "session_context_store", fake_store)
