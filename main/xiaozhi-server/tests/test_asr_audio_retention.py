@@ -301,8 +301,51 @@ def test_asr_unclear_prompt_speaks_without_forwarding_to_dialogue(tmp_path):
 
     asyncio.run(provider._maybe_speak_unclear_asr_prompt(conn, "low_signal_fragment"))
 
-    assert spoken == [("TEXT", "I didn't hear that clearly.", "sentence-1")]
+    assert len(spoken) == 1
+    assert spoken[0][0:2] == ("TEXT", "I didn't hear that clearly.")
+    assert spoken[0][2] != "sentence-1"
     assert conn.tts_MessageText == "I didn't hear that clearly."
+
+
+def test_asr_unclear_prompt_skips_while_response_active(tmp_path):
+    from core.providers.asr.openai import ASRProvider
+
+    output_dir = tmp_path / "tmp"
+    output_dir.mkdir()
+    provider = ASRProvider(
+        {
+            "api_key": "test",
+            "base_url": "https://example.com/asr",
+            "model_name": "gpt-4o-mini-transcribe",
+            "output_dir": str(output_dir),
+            "unclear_asr_prompt": "I didn't hear that clearly.",
+        },
+        delete_audio_file=True,
+    )
+    spoken = []
+
+    class _Logger:
+        def bind(self, **kwargs):
+            return self
+
+        def info(self, *args, **kwargs):
+            return None
+
+        def warning(self, *args, **kwargs):
+            return None
+
+    conn = SimpleNamespace(
+        llm_finish_task=False,
+        client_is_speaking=False,
+        logger=_Logger(),
+        tts=SimpleNamespace(
+            tts_one_sentence=lambda *args, **kwargs: spoken.append((args, kwargs))
+        ),
+    )
+
+    asyncio.run(provider._maybe_speak_unclear_asr_prompt(conn, "low_signal_fragment"))
+
+    assert spoken == []
 
 
 def test_openai_asr_sends_language_and_prompt(tmp_path, monkeypatch):

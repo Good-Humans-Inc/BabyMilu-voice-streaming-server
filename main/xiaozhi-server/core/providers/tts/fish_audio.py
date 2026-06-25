@@ -385,7 +385,8 @@ class TTSProvider(TTSProviderBase):
             return "ws://" + url[len("http://") :]
         return url
 
-    def _reset_response_state(self):
+    def _reset_response_state(self, sentence_id=None):
+        self._set_active_sentence_id(sentence_id)
         self.conn.client_abort = False
         self.tts_stop_request = False
         self.tts_text_buff = []
@@ -406,7 +407,7 @@ class TTSProvider(TTSProviderBase):
                 message = self.tts_text_queue.get(timeout=1)
 
                 if message.sentence_type == SentenceType.FIRST:
-                    self._reset_response_state()
+                    self._reset_response_state(message.sentence_id)
                 elif self.conn.client_abort:
                     continue
 
@@ -447,7 +448,12 @@ class TTSProvider(TTSProviderBase):
                             logger.bind(tag=TAG).error(
                                 f"Fish Audio TTS failed: {e}\n{traceback.format_exc()}"
                             )
-                            self.tts_audio_queue.put((SentenceType.LAST, [], None))
+                            self._queue_audio(
+                                SentenceType.LAST,
+                                [],
+                                None,
+                                sentence_id=message.sentence_id,
+                            )
                     else:
                         self._process_before_stop_play_files()
 
@@ -463,10 +469,10 @@ class TTSProvider(TTSProviderBase):
             try:
                 message = self.tts_text_queue.get(timeout=1)
                 if message.sentence_type == SentenceType.FIRST:
-                    self._reset_response_state()
+                    self._reset_response_state(message.sentence_id)
                     asyncio.run(self._stream_response_to_fish())
                 elif not self.conn.client_abort:
-                    self._reset_response_state()
+                    self._reset_response_state(message.sentence_id)
                     asyncio.run(self._stream_response_to_fish(initial_message=message))
             except queue.Empty:
                 continue
@@ -474,7 +480,7 @@ class TTSProvider(TTSProviderBase):
                 logger.bind(tag=TAG).error(
                     f"Fish Audio WebSocket TTS failed: {e}\n{traceback.format_exc()}"
                 )
-                self.tts_audio_queue.put((SentenceType.LAST, [], None))
+                self._queue_audio(SentenceType.LAST, [], None)
 
     def _build_websocket_request(self, reference_id: str) -> dict:
         return {
@@ -659,9 +665,7 @@ class TTSProvider(TTSProviderBase):
                     first_text = self._clean_stream_text_chunk(
                         "".join(self.tts_text_buff)
                     )
-                    self.tts_audio_queue.put(
-                        (SentenceType.FIRST, [], first_text or None)
-                    )
+                    self._queue_audio(SentenceType.FIRST, [], first_text or None)
                     self._ws_first_audio_sent = True
 
                 pcm_carry = self._process_pcm_audio_chunk(audio, pcm_carry)
@@ -892,7 +896,7 @@ class TTSProvider(TTSProviderBase):
                             raise _FishAudioHTTPError(resp.status, body)
 
                         else:
-                            self.tts_audio_queue.put((SentenceType.FIRST, [], text))
+                            self._queue_audio(SentenceType.FIRST, [], text)
 
                             async for chunk in resp.content.iter_chunked(4096):
                                 if self.conn and self.conn.client_abort:

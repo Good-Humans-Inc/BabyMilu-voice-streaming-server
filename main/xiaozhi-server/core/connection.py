@@ -281,6 +281,7 @@ class ConnectionHandler:
 
         # TTS
         self.sentence_id = None
+        self.active_tts_sentence_id = None
         self.voice_id = None
         self.tts_MessageText = ""
         self.active_character_id = None
@@ -3430,9 +3431,11 @@ Return ONLY the JSON array, no other explanation."""
 
     def clear_queues(self):
         if self.tts:
-            self.logger.bind(tag=TAG).debug(
+            active_tts_sentence_id = getattr(self, "active_tts_sentence_id", None)
+            self.logger.bind(tag=TAG).info(
                 f"开始清理: TTS队列大小={self.tts.tts_text_queue.qsize()}, "
-                f"音频队列大小={self.tts.tts_audio_queue.qsize()}"
+                f"音频队列大小={self.tts.tts_audio_queue.qsize()}, "
+                f"active_tts_sentence_id={active_tts_sentence_id}"
             )
             for q in [
                 self.tts.tts_text_queue,
@@ -3446,9 +3449,11 @@ Return ONLY the JSON array, no other explanation."""
                         q.get_nowait()
                     except queue.Empty:
                         break
-            self.logger.bind(tag=TAG).debug(
+            self.active_tts_sentence_id = None
+            self.logger.bind(tag=TAG).info(
                 f"清理结束: TTS队列大小={self.tts.tts_text_queue.qsize()}, "
-                f"音频队列大小={self.tts.tts_audio_queue.qsize()}"
+                f"音频队列大小={self.tts.tts_audio_queue.qsize()}, "
+                "active_tts_sentence_id=None"
             )
 
         for q in [self.report_queue, self.asr_audio_queue, self.early_audio_queue]:

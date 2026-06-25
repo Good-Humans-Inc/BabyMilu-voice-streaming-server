@@ -820,6 +820,17 @@ class ASRProviderBase(ABC):
         ):
             return
 
+        if not getattr(conn, "llm_finish_task", True) or getattr(
+            conn, "client_is_speaking", False
+        ):
+            logger.bind(tag=TAG).info(
+                "Skipping unclear ASR prompt while response is active: "
+                f"reason={reject_reason} "
+                f"llm_finish_task={getattr(conn, 'llm_finish_task', None)} "
+                f"client_is_speaking={getattr(conn, 'client_is_speaking', None)}"
+            )
+            return
+
         now = time.monotonic()
         last_prompt_at = float(getattr(conn, "_last_unclear_asr_prompt_at", 0.0) or 0.0)
         if now - last_prompt_at < self.unclear_asr_prompt_cooldown_seconds:
@@ -833,8 +844,9 @@ class ASRProviderBase(ABC):
                 TTSMessageDTO,
             )
 
-            sentence_id = getattr(conn, "sentence_id", None) or str(uuid.uuid4().hex)
+            sentence_id = str(uuid.uuid4().hex)
             conn.sentence_id = sentence_id
+            conn.active_tts_sentence_id = sentence_id
             conn.tts_MessageText = self.unclear_asr_prompt
 
             tts = getattr(conn, "tts", None)
