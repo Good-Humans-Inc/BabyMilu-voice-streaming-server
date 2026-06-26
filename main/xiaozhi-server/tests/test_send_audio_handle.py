@@ -110,8 +110,9 @@ def test_send_audio_message_keeps_mqtt_sequences_monotonic_across_segments():
         conn_from_mqtt_gateway=True,
         last_activity_time=0,
         session_id="session-1",
+        active_tts_sentence_id="sentence-1",
         websocket=_WebSocket(),
-        config={},
+        config={"tts_start_audio_grace_ms": 0},
         clearSpeakStatus=lambda: None,
         logger=SimpleNamespace(
             bind=lambda **kwargs: SimpleNamespace(
@@ -138,3 +139,72 @@ def test_send_audio_message_keeps_mqtt_sequences_monotonic_across_segments():
     sequences = [int.from_bytes(packet[4:8], "big") for packet in packets]
 
     assert sequences == [0, 1, 2, 3]
+
+
+def test_send_audio_message_drops_stale_sentence_id(monkeypatch):
+    events = []
+
+    async def fake_send_tts_message(conn, state, text=None):
+        events.append(("tts", state, text))
+
+    async def fake_send_audio(conn, audios):
+        events.append(("audio", audios))
+
+    monkeypatch.setattr(sendAudioHandle, "send_tts_message", fake_send_tts_message)
+    monkeypatch.setattr(sendAudioHandle, "sendAudio", fake_send_audio)
+
+    conn = SimpleNamespace(
+        tts=SimpleNamespace(tts_audio_first_sentence=True),
+        active_tts_sentence_id="new-sentence",
+        close_after_chat=False,
+        logger=SimpleNamespace(
+            bind=lambda **kwargs: SimpleNamespace(
+                info=lambda *args, **kwargs: None,
+                warning=lambda *args, **kwargs: None,
+            )
+        ),
+    )
+
+    asyncio.run(
+        sendAudioHandle.sendAudioMessage(
+            conn,
+            SentenceType.LAST,
+            [],
+            None,
+            sentence_id="old-sentence",
+        )
+    )
+
+    assert events == []
+    assert conn.tts.tts_audio_first_sentence is True
+
+
+def test_send_stt_message_does_not_send_early_tts_start(monkeypatch):
+    tts_states = []
+    websocket_messages = []
+
+    async def fake_send_tts_message(conn, state, text=None):
+        tts_states.append((state, text))
+
+    monkeypatch.setattr(sendAudioHandle, "send_tts_message", fake_send_tts_message)
+
+    class _WebSocket:
+        async def send(self, payload):
+            websocket_messages.append(payload)
+
+    conn = SimpleNamespace(
+        config={},
+        session_id="session-1",
+        websocket=_WebSocket(),
+        logger=SimpleNamespace(
+            bind=lambda **kwargs: SimpleNamespace(
+                info=lambda *args, **kwargs: None,
+                warning=lambda *args, **kwargs: None,
+            )
+        ),
+    )
+
+    asyncio.run(sendAudioHandle.send_stt_message(conn, "Pretty good."))
+
+    assert tts_states == []
+    assert '"type": "stt"' in websocket_messages[0]

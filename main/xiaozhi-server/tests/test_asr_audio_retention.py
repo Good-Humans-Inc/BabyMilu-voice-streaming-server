@@ -221,6 +221,9 @@ def test_asr_gate_rejects_noise_fragments_and_accepts_short_english(tmp_path):
     )[0] is False
     assert provider._should_forward_asr_text("I found a")[0] is False
     assert provider._should_forward_asr_text("Can I get the")[0] is False
+    assert provider._should_forward_asr_text("I want to")[0] is False
+    assert provider._should_forward_asr_text("I could just like...")[0] is False
+    assert provider._should_forward_asr_text("Also, I could just like...")[0] is False
     assert provider._should_forward_asr_text("I want you to be more emotional.")[0]
     assert provider._should_forward_asr_text("Hi!")[0]
     assert provider._should_forward_asr_text("Ok.")[0]
@@ -231,6 +234,10 @@ def test_asr_gate_rejects_noise_fragments_and_accepts_short_english(tmp_path):
     assert provider._should_forward_asr_text(
         "Good job.",
         audio_duration_seconds=0.4,
+    )[0] is False
+    assert provider._should_forward_asr_text(
+        "Good job.",
+        audio_duration_seconds=0.8,
     )[0]
     assert provider._should_forward_asr_text(
         "No.",
@@ -252,6 +259,18 @@ def test_asr_gate_rejects_noise_fragments_and_accepts_short_english(tmp_path):
         "Okay.",
         audio_duration_seconds=0.4,
     )[0]
+    assert provider._should_forward_asr_text(
+        "Put it in the refrigerator.",
+        audio_duration_seconds=0.24,
+    )[0] is False
+    assert provider._should_forward_asr_text(
+        "Okie dokie",
+        audio_duration_seconds=0.6,
+    )[0] is False
+    assert provider._should_forward_asr_text(
+        "This is too much transcript for the clip.",
+        audio_duration_seconds=1.0,
+    )[0] is False
     assert provider._should_forward_asr_text(
         "I said her birthday is tomorrow.",
         audio_duration_seconds=1.4,
@@ -301,8 +320,51 @@ def test_asr_unclear_prompt_speaks_without_forwarding_to_dialogue(tmp_path):
 
     asyncio.run(provider._maybe_speak_unclear_asr_prompt(conn, "low_signal_fragment"))
 
-    assert spoken == [("TEXT", "I didn't hear that clearly.", "sentence-1")]
+    assert len(spoken) == 1
+    assert spoken[0][0:2] == ("TEXT", "I didn't hear that clearly.")
+    assert spoken[0][2] != "sentence-1"
     assert conn.tts_MessageText == "I didn't hear that clearly."
+
+
+def test_asr_unclear_prompt_skips_while_response_active(tmp_path):
+    from core.providers.asr.openai import ASRProvider
+
+    output_dir = tmp_path / "tmp"
+    output_dir.mkdir()
+    provider = ASRProvider(
+        {
+            "api_key": "test",
+            "base_url": "https://example.com/asr",
+            "model_name": "gpt-4o-mini-transcribe",
+            "output_dir": str(output_dir),
+            "unclear_asr_prompt": "I didn't hear that clearly.",
+        },
+        delete_audio_file=True,
+    )
+    spoken = []
+
+    class _Logger:
+        def bind(self, **kwargs):
+            return self
+
+        def info(self, *args, **kwargs):
+            return None
+
+        def warning(self, *args, **kwargs):
+            return None
+
+    conn = SimpleNamespace(
+        llm_finish_task=False,
+        client_is_speaking=False,
+        logger=_Logger(),
+        tts=SimpleNamespace(
+            tts_one_sentence=lambda *args, **kwargs: spoken.append((args, kwargs))
+        ),
+    )
+
+    asyncio.run(provider._maybe_speak_unclear_asr_prompt(conn, "low_signal_fragment"))
+
+    assert spoken == []
 
 
 def test_openai_asr_sends_language_and_prompt(tmp_path, monkeypatch):
