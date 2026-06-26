@@ -221,6 +221,9 @@ def test_asr_gate_rejects_noise_fragments_and_accepts_short_english(tmp_path):
     )[0] is False
     assert provider._should_forward_asr_text("I found a")[0] is False
     assert provider._should_forward_asr_text("Can I get the")[0] is False
+    assert provider._should_forward_asr_text("I want to")[0] is False
+    assert provider._should_forward_asr_text("I could just like...")[0] is False
+    assert provider._should_forward_asr_text("Also, I could just like...")[0] is False
     assert provider._should_forward_asr_text("I want you to be more emotional.")[0]
     assert provider._should_forward_asr_text("Hi!")[0]
     assert provider._should_forward_asr_text("Ok.")[0]
@@ -231,6 +234,10 @@ def test_asr_gate_rejects_noise_fragments_and_accepts_short_english(tmp_path):
     assert provider._should_forward_asr_text(
         "Good job.",
         audio_duration_seconds=0.4,
+    )[0] is False
+    assert provider._should_forward_asr_text(
+        "Good job.",
+        audio_duration_seconds=0.8,
     )[0]
     assert provider._should_forward_asr_text(
         "No.",
@@ -252,6 +259,18 @@ def test_asr_gate_rejects_noise_fragments_and_accepts_short_english(tmp_path):
         "Okay.",
         audio_duration_seconds=0.4,
     )[0]
+    assert provider._should_forward_asr_text(
+        "Put it in the refrigerator.",
+        audio_duration_seconds=0.24,
+    )[0] is False
+    assert provider._should_forward_asr_text(
+        "Okie dokie",
+        audio_duration_seconds=0.6,
+    )[0] is False
+    assert provider._should_forward_asr_text(
+        "This is too much transcript for the clip.",
+        audio_duration_seconds=1.0,
+    )[0] is False
     assert provider._should_forward_asr_text(
         "I said her birthday is tomorrow.",
         audio_duration_seconds=1.4,

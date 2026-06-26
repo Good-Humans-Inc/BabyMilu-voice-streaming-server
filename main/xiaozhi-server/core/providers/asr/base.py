@@ -149,6 +149,13 @@ INCOMPLETE_ENDING_WORDS = {
     "an",
     "the",
 }
+INCOMPLETE_ENDING_PHRASES = {
+    ("want", "to"),
+    ("i", "want", "to"),
+    ("i", "could", "just"),
+    ("could", "just", "like"),
+    ("i", "could", "just", "like"),
+}
 UNCLEAR_ASR_PROMPT_REASONS = {
     "single_character_fragment",
     "no_ascii_letters",
@@ -157,6 +164,7 @@ UNCLEAR_ASR_PROMPT_REASONS = {
     "low_signal_fragment",
     "ambiguous_short_fragment",
     "incomplete_fragment",
+    "implausible_short_transcript",
 }
 
 
@@ -173,8 +181,13 @@ class ASRProviderBase(ABC):
         self.reject_low_signal_fragments = True
         self.reject_ambiguous_short_fragments = True
         self.reject_incomplete_fragments = True
+        self.reject_implausible_short_transcripts = True
         self.low_signal_fragment_max_audio_seconds = 1.2
         self.ambiguous_short_fragment_max_audio_seconds = 0.7
+        self.implausible_multi_word_max_audio_seconds = 0.75
+        self.implausible_long_text_max_audio_seconds = 0.5
+        self.implausible_long_text_min_chars = 12
+        self.max_transcript_chars_per_second = 25.0
         self.low_signal_fragments = set(DEFAULT_LOW_SIGNAL_ASR_FRAGMENTS)
         self.ambiguous_short_fragments = {
             self._normalize_short_fragment_key(item)
@@ -235,6 +248,10 @@ class ASRProviderBase(ABC):
             config.get("reject_incomplete_fragments"),
             self.reject_incomplete_fragments,
         )
+        self.reject_implausible_short_transcripts = self._as_bool(
+            config.get("reject_implausible_short_transcripts"),
+            self.reject_implausible_short_transcripts,
+        )
         self.low_signal_fragment_max_audio_seconds = self._as_float(
             config.get("low_signal_fragment_max_audio_seconds"),
             self.low_signal_fragment_max_audio_seconds,
@@ -242,6 +259,22 @@ class ASRProviderBase(ABC):
         self.ambiguous_short_fragment_max_audio_seconds = self._as_float(
             config.get("ambiguous_short_fragment_max_audio_seconds"),
             self.ambiguous_short_fragment_max_audio_seconds,
+        )
+        self.implausible_multi_word_max_audio_seconds = self._as_float(
+            config.get("implausible_multi_word_max_audio_seconds"),
+            self.implausible_multi_word_max_audio_seconds,
+        )
+        self.implausible_long_text_max_audio_seconds = self._as_float(
+            config.get("implausible_long_text_max_audio_seconds"),
+            self.implausible_long_text_max_audio_seconds,
+        )
+        self.implausible_long_text_min_chars = self._as_float(
+            config.get("implausible_long_text_min_chars"),
+            self.implausible_long_text_min_chars,
+        )
+        self.max_transcript_chars_per_second = self._as_float(
+            config.get("max_transcript_chars_per_second"),
+            self.max_transcript_chars_per_second,
         )
         configured_low_signal = config.get("low_signal_fragments")
         if isinstance(configured_low_signal, str):
@@ -723,6 +756,13 @@ class ASRProviderBase(ABC):
         if self._is_incomplete_asr_fragment(raw_text_value):
             return False, filtered_text, "incomplete_fragment"
 
+        if self._is_implausible_short_transcript(
+            raw_text_value,
+            filtered_text,
+            audio_duration_seconds=audio_duration_seconds,
+        ):
+            return False, filtered_text, "implausible_short_transcript"
+
         return True, filtered_text, "ok"
 
     def _is_low_signal_asr_fragment(
@@ -784,7 +824,44 @@ class ASRProviderBase(ABC):
         if tokens[-1] in INCOMPLETE_ENDING_WORDS:
             return True
 
+        for phrase in INCOMPLETE_ENDING_PHRASES:
+            phrase_len = len(phrase)
+            if phrase_len <= len(tokens) and tuple(tokens[-phrase_len:]) == phrase:
+                return True
+
         return False
+
+    def _is_implausible_short_transcript(
+        self,
+        raw_text: str,
+        filtered_text: str,
+        *,
+        audio_duration_seconds: Optional[float],
+    ) -> bool:
+        if (
+            not self.reject_implausible_short_transcripts
+            or audio_duration_seconds is None
+            or audio_duration_seconds <= 0
+        ):
+            return False
+
+        tokens = self._language_tokens(raw_text)
+        compact_text = re.sub(r"\s+", "", filtered_text or "")
+
+        if (
+            len(tokens) >= 2
+            and audio_duration_seconds <= self.implausible_multi_word_max_audio_seconds
+        ):
+            return True
+
+        if (
+            len(compact_text) >= self.implausible_long_text_min_chars
+            and audio_duration_seconds <= self.implausible_long_text_max_audio_seconds
+        ):
+            return True
+
+        chars_per_second = len(compact_text) / audio_duration_seconds
+        return chars_per_second > self.max_transcript_chars_per_second
 
     @classmethod
     def _language_tokens(cls, text: str) -> list[str]:

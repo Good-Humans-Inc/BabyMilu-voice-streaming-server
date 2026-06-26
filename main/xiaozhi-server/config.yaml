@@ -444,6 +444,11 @@ ASR:
     language: en
     prompt: "Only transcribe intentional nearby English speech directed at BabyMilu. If the audio is unclear, background noise, typing, device speaker echo, music, or not directed at BabyMilu, return an empty transcript."
     reject_non_english_fragments: true
+    reject_implausible_short_transcripts: true
+    implausible_multi_word_max_audio_seconds: 0.75
+    implausible_long_text_max_audio_seconds: 0.5
+    implausible_long_text_min_chars: 12
+    max_transcript_chars_per_second: 25
     output_dir: tmp/
     # 可选：覆盖默认保留策略
     # audio_retention_mode: delete
