@@ -92,6 +92,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--prompt",
         help="Optional free-form prompt for future interaction scenarios",
     )
+    run.add_argument(
+        "--from-timezone",
+        default="America/Los_Angeles",
+        help="Original IANA timezone for timezone-recalculation scenarios",
+    )
+    run.add_argument(
+        "--to-timezone",
+        default="America/New_York",
+        help="Replacement IANA timezone for timezone-recalculation scenarios",
+    )
 
     return parser
 

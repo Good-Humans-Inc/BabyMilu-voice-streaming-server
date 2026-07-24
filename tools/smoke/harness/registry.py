@@ -6,6 +6,10 @@ from .scenario import BaseScenario
 from .scenarios.interaction import MagicCameraPhotoScenario
 from .scenarios.daycare import DaycareFoodGiftScenario
 from .scenarios.scheduled import ScheduledAlarmScenario, ScheduledReminderScenario
+from .scenarios.timezone_recalculation import (
+    ScheduledDailyCallTimezoneRecalculationScenario,
+    ScheduledTimezoneRecalculationScenario,
+)
 
 
 @dataclass
@@ -18,17 +22,43 @@ class ScenarioDescriptor:
 SCENARIOS = {
     "scheduled.reminder": ScenarioDescriptor(
         name="scheduled.reminder",
-        description="Create an app-shaped reminder, trigger the scheduler, and verify Firestore plus plushie/app side effects.",
+        description=(
+            "Create an app-shaped reminder, trigger the scheduler, and verify "
+            "Firestore plus plushie/app side effects."
+        ),
         cls=ScheduledReminderScenario,
     ),
     "scheduled.alarm": ScenarioDescriptor(
         name="scheduled.alarm",
-        description="Create an app-shaped alarm, trigger the scheduler, and verify wake session plus recurring advancement.",
+        description=(
+            "Create an app-shaped alarm, trigger the scheduler, and verify wake "
+            "session plus recurring advancement."
+        ),
         cls=ScheduledAlarmScenario,
+    ),
+    "scheduled.timezone_recalculation": ScenarioDescriptor(
+        name="scheduled.timezone_recalculation",
+        description=(
+            "On a local Firestore emulator, change the user timezone and verify "
+            "recurring reminder/alarm UTC cursors are rebased."
+        ),
+        cls=ScheduledTimezoneRecalculationScenario,
+    ),
+    "scheduled.daily_call_timezone_recalculation": ScenarioDescriptor(
+        name="scheduled.daily_call_timezone_recalculation",
+        description=(
+            "On a local Firestore emulator, change a phone-keyed user timezone "
+            "and verify the Daily Call UTC cursor is rebased without dispatch."
+        ),
+        cls=ScheduledDailyCallTimezoneRecalculationScenario,
     ),
     "interaction.magic_camera_photo": ScenarioDescriptor(
         name="interaction.magic_camera_photo",
-        description="Run a Magic Camera websocket prompt, verify a recent photo exists, and assert the assistant uses the inspection path instead of the fallback 'can't see it' response.",
+        description=(
+            "Run a Magic Camera websocket prompt, verify a recent photo exists, "
+            "and assert the assistant uses the inspection path instead of the "
+            "fallback 'can't see it' response."
+        ),
         cls=MagicCameraPhotoScenario,
     ),
     "interaction.daycare_food_gift": ScenarioDescriptor(
@@ -51,4 +81,6 @@ def make_scenario(name: str) -> BaseScenario:
         return SCENARIOS[name].cls()
     except KeyError as exc:
         known = ", ".join(sorted(SCENARIOS))
-        raise SystemExit(f"Unknown scenario {name!r}. Known scenarios: {known}") from exc
+        raise SystemExit(
+            f"Unknown scenario {name!r}. Known scenarios: {known}"
+        ) from exc

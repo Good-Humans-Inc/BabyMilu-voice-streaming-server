@@ -15,6 +15,8 @@ The harness currently ships with staged scenarios for:
 
 - `scheduled.reminder`
 - `scheduled.alarm`
+- `scheduled.timezone_recalculation`
+- `scheduled.daily_call_timezone_recalculation`
 - `interaction.magic_camera_photo`
 - `interaction.daycare_food_gift`
 
@@ -165,6 +167,88 @@ python3 tools/smoke/run.py run \
   --repeat weekly \
   --label "shared smoke alarm"
 ```
+
+### Example: Timezone Recalculation Smoke (Local Emulator Only)
+
+`scheduled.timezone_recalculation` is intentionally unable to run against cloud
+Firestore. It seeds one weekly reminder and one weekly alarm in the Firestore
+emulator, changes the user's IANA timezone, and waits for the Firestore worker to
+rebase both `nextOccurrenceUTC` values while preserving `schedule.timeLocal` and
+`schedule.days`.
+
+Start the Firestore emulator and the timezone-change worker/function emulator
+first. The backend branch provides the guarded local runner:
+
+```bash
+cd /path/to/babymilu-backend
+export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
+python3 src/commands/run-user-timezone-worker-local.py \
+  --project demo-babymilu \
+  --database development \
+  --uid smoke-timezone-user
+```
+
+Then run:
+
+```bash
+cd /Users/yan/Desktop/BabyMilu/.worktrees/voice-server-timezone-schedule-recalculation
+export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
+export BABYMILU_SMOKE_ENVIRONMENT_TYPE=local-compose
+export BABYMILU_SMOKE_DATA_MODE=isolated
+export BABYMILU_SMOKE_PROJECT=demo-babymilu
+export BABYMILU_SMOKE_MQTT_HOST=127.0.0.1
+export BABYMILU_SMOKE_WS_URL=ws://127.0.0.1:8000
+export BABYMILU_SMOKE_COMPOSE_PROJECT_DIR="$PWD"
+export BABYMILU_SMOKE_SCHEDULER_TRIGGER=entrypoint
+export BABYMILU_SMOKE_SCHEDULER_ENTRYPOINT=services.alarms.cloud.functions:scan_due_scheduled_items
+
+python3 tools/smoke/run.py preflight --env timezone-local
+python3 tools/smoke/run.py run \
+  --env timezone-local \
+  --scenario scheduled.timezone_recalculation \
+  --uid smoke-timezone-user \
+  --from-timezone America/Los_Angeles \
+  --to-timezone America/New_York
+```
+
+The scenario does not invoke the due-item scheduler or a device simulator. It
+expects the local Firestore update trigger to perform the recalculation. Created
+schedule documents and the synthetic user are removed automatically unless
+`--keep-docs` is supplied.
+
+In a third terminal, start a second guarded worker for the phone-keyed
+`(default)` database:
+
+```bash
+cd /path/to/babymilu-backend
+export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
+python3 src/commands/run-user-timezone-worker-local.py \
+  --project demo-babymilu \
+  --database '(default)' \
+  --uid +15550001111
+```
+
+Back in the voice-server smoke terminal, run the separate phone-keyed Daily Call
+contract against the same emulator:
+
+```bash
+python3 tools/smoke/run.py run \
+  --env timezone-local \
+  --scenario scheduled.daily_call_timezone_recalculation \
+  --uid +15550001111 \
+  --from-timezone America/Los_Angeles \
+  --to-timezone America/New_York
+```
+
+This validates `(default)/users/{E.164 phone}/miluCall/dailyCall`, including its
+seven-day `times` map, billing/character/retry/compensation preservation, and
+no-claim/no-dispatch invariant. The reminder/alarm scenario explicitly uses
+`development`; both artifacts record their database ID. UID-to-phone
+cross-database identity propagation remains covered by backend worker tests and
+must be validated separately against reconciled staging identities.
+
+Both timezone scenarios refuse an occupied synthetic user (and Daily Call
+path), so cleanup cannot overwrite a pre-existing emulator fixture.
 
 ### Example: Magic Camera Smoke
 

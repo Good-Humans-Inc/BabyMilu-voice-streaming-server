@@ -17,6 +17,7 @@ That general shape supports:
 
 - alarms
 - reminders
+- timezone-triggered schedule recalculation
 - websocket/LLM interactions
 - memory flows
 - backend-triggered state changes
@@ -204,7 +205,30 @@ Every Codex or human operator should:
 
 ## Next Scenarios To Add
 
-The current framework ships with scheduled scenarios. The next good additions are:
+The current framework ships with reminder/alarm delivery scenarios plus two
+local-emulator-only timezone scenarios.
+
+`scheduled.timezone_recalculation`:
+
+1. seeds a future weekly reminder and alarm with the same local wall time
+2. changes `users/{uid}.timezone` from one IANA zone to another
+3. waits for both persisted `nextOccurrenceUTC` and `nextTriggerUTC` cursors to
+   match the new zone in the `development` database
+4. writes the before/expected/after values to `scenario-details.json`
+5. restores/deletes all emulator fixtures
+
+`scheduled.daily_call_timezone_recalculation` seeds the canonical phone-keyed
+`(default)/users/{phone}/miluCall/dailyCall` document, changes the parent
+timezone, and verifies the UTC cursor moves without a claim or dispatch while
+billing, consumed-day, character, retry, and compensation fields stay intact.
+It refuses any occupied synthetic user or Daily Call path, preventing cleanup
+from modifying a pre-existing emulator fixture.
+
+Both refuse cloud and `live-shape` environments and require separate guarded
+local workers for `development` and `(default)`. The exact UID-to-phone bridge
+still belongs in backend identity tests and reconciled staging validation.
+
+The next good additions are:
 
 - `interaction.first_response`
 - `memory.write_then_recall`

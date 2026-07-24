@@ -121,6 +121,77 @@ python3 tools/smoke/run.py run \
   --label "codex shared alarm smoke"
 ```
 
+Timezone recalculation example (local Firestore emulator only):
+
+```bash
+cd /Users/yan/Desktop/BabyMilu/.worktrees/voice-server-timezone-schedule-recalculation
+export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
+export BABYMILU_SMOKE_ENVIRONMENT_TYPE=local-compose
+export BABYMILU_SMOKE_DATA_MODE=isolated
+export BABYMILU_SMOKE_PROJECT=demo-babymilu
+export BABYMILU_SMOKE_MQTT_HOST=127.0.0.1
+export BABYMILU_SMOKE_WS_URL=ws://127.0.0.1:8000
+export BABYMILU_SMOKE_COMPOSE_PROJECT_DIR="$PWD"
+export BABYMILU_SMOKE_SCHEDULER_TRIGGER=entrypoint
+export BABYMILU_SMOKE_SCHEDULER_ENTRYPOINT=services.alarms.cloud.functions:scan_due_scheduled_items
+```
+
+In a separate terminal, start the backend branch's guarded emulator worker:
+
+```bash
+cd /path/to/babymilu-backend
+export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
+python3 src/commands/run-user-timezone-worker-local.py \
+  --project demo-babymilu \
+  --database development \
+  --uid smoke-timezone-user
+```
+
+Then run:
+
+```bash
+python3 tools/smoke/run.py preflight --env timezone-local
+python3 tools/smoke/run.py run \
+  --env timezone-local \
+  --scenario scheduled.timezone_recalculation \
+  --uid smoke-timezone-user \
+  --from-timezone America/Los_Angeles \
+  --to-timezone America/New_York
+```
+
+This scenario hard-fails unless it sees `local-compose` + `isolated`,
+`FIRESTORE_EMULATOR_HOST`, and a `demo-*` project ID. It verifies the Firestore
+timezone-update worker only; it does not invoke a cloud endpoint, due-item
+scheduler, MQTT, or websocket runtime.
+
+In a third terminal, start a second worker against `(default)`:
+
+```bash
+cd /path/to/babymilu-backend
+export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
+python3 src/commands/run-user-timezone-worker-local.py \
+  --project demo-babymilu \
+  --database '(default)' \
+  --uid +15550001111
+```
+
+Back in the voice-server smoke terminal, run the Daily Call cursor contract
+with the same fresh E.164 fixture:
+
+```bash
+python3 tools/smoke/run.py run \
+  --env timezone-local \
+  --scenario scheduled.daily_call_timezone_recalculation \
+  --uid +15550001111 \
+  --from-timezone America/Los_Angeles \
+  --to-timezone America/New_York
+```
+
+The reminder/alarm artifact must report `database=development`; the Daily Call
+artifact must report `database=(default)`. The latter also verifies that
+billing, consumed-day, character, retry, and compensation fields are unchanged.
+Both scenarios refuse occupied synthetic fixtures.
+
 Magic Camera example:
 
 ```bash
