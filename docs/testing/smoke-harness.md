@@ -217,16 +217,21 @@ local-emulator-only timezone scenarios.
 4. writes the before/expected/after values to `scenario-details.json`
 5. restores/deletes all emulator fixtures
 
-`scheduled.daily_call_timezone_recalculation` seeds the canonical phone-keyed
-`(default)/users/{phone}/miluCall/dailyCall` document, changes the parent
+`scheduled.daily_call_timezone_recalculation` is retained as deferred database
+migration coverage. It seeds the phone-keyed
+`development/users/{phone}/miluCall/dailyCall` document, changes the parent
 timezone, and verifies the UTC cursor moves without a claim or dispatch while
 billing, consumed-day, character, retry, and compensation fields stay intact.
-It refuses any occupied synthetic user or Daily Call path, preventing cleanup
-from modifying a pre-existing emulator fixture.
+It is not part of the current production-release candidate, whose only
+Firestore database and required timezone scenario are `development` and
+`scheduled.timezone_recalculation`. It refuses any occupied synthetic user or
+Daily Call path, preventing cleanup from modifying a pre-existing emulator
+fixture.
 
-Both refuse cloud and `live-shape` environments and require separate guarded
-local workers for `development` and `(default)`. The exact UID-to-phone bridge
-still belongs in backend identity tests and reconciled staging validation.
+Both refuse cloud and `live-shape` environments and use guarded workers against
+`development`. No `(default)` worker or UID-to-phone bridge is part of the
+current design; existing Daily Call identities and records must be reconciled
+when they are migrated.
 
 The next good additions are:
 

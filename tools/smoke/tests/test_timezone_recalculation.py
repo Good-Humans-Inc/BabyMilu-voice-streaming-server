@@ -13,6 +13,8 @@ if str(SMOKE_ROOT) not in sys.path:
     sys.path.insert(0, str(SMOKE_ROOT))
 
 from harness.scenarios.timezone_recalculation import (  # noqa: E402
+    DAILY_CALL_DATABASE_ID,
+    SCHEDULE_DATABASE_ID,
     _as_utc,
     _next_daily_call_occurrence_utc,
     _next_weekly_occurrence_utc,
@@ -27,6 +29,11 @@ class FakeAdapter:
 
     def get_document(self, path: str) -> dict | None:
         return self.documents.get(path)
+
+
+def test_all_timezone_smokes_are_pinned_to_development() -> None:
+    assert SCHEDULE_DATABASE_ID == "development"
+    assert DAILY_CALL_DATABASE_ID == SCHEDULE_DATABASE_ID
 
 
 def test_next_weekly_occurrence_rebases_wall_clock_to_new_timezone() -> None:

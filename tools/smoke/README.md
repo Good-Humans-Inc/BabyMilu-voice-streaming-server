@@ -216,15 +216,23 @@ expects the local Firestore update trigger to perform the recalculation. Created
 schedule documents and the synthetic user are removed automatically unless
 `--keep-docs` is supplied.
 
-In a third terminal, start a second guarded worker for the phone-keyed
-`(default)` database:
+### Deferred Daily Call Migration Coverage
+
+The production-release candidate uses `development` as its only Firestore
+database. The Daily Call scenario below is retained to prove the canonical
+`development` data shape before the later database migration, but it is not
+part of the current live-data release gate. No `(default)` timezone worker
+should be deployed for this release.
+
+For migration-readiness testing, start a second guarded worker for a phone-keyed
+fixture in the same `development` emulator database:
 
 ```bash
 cd /path/to/babymilu-backend
 export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
 python3 src/commands/run-user-timezone-worker-local.py \
   --project demo-babymilu \
-  --database '(default)' \
+  --database development \
   --uid +15550001111
 ```
 
@@ -240,12 +248,13 @@ python3 tools/smoke/run.py run \
   --to-timezone America/New_York
 ```
 
-This validates `(default)/users/{E.164 phone}/miluCall/dailyCall`, including its
+This deferred scenario validates
+`development/users/{E.164 phone}/miluCall/dailyCall`, including its
 seven-day `times` map, billing/character/retry/compensation preservation, and
 no-claim/no-dispatch invariant. The reminder/alarm scenario explicitly uses
-`development`; both artifacts record their database ID. UID-to-phone
-cross-database identity propagation remains covered by backend worker tests and
-must be validated separately against reconciled staging identities.
+`development`; both artifacts record that database ID. Cross-database identity
+propagation is intentionally absent and existing `(default)` records must be
+reconciled during the Daily Call database migration.
 
 Both timezone scenarios refuse an occupied synthetic user (and Daily Call
 path), so cleanup cannot overwrite a pre-existing emulator fixture.

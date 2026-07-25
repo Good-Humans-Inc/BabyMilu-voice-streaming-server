@@ -23,7 +23,7 @@ WEEKDAY_INDEX = {
 }
 DAILY_CALL_DAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 SCHEDULE_DATABASE_ID = "development"
-DAILY_CALL_DATABASE_ID = "(default)"
+DAILY_CALL_DATABASE_ID = SCHEDULE_DATABASE_ID
 DAILY_CALL_PRESERVED_FIELDS = (
     "times",
     "billing",

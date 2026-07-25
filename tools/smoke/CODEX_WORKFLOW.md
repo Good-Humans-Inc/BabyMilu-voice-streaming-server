@@ -164,14 +164,21 @@ This scenario hard-fails unless it sees `local-compose` + `isolated`,
 timezone-update worker only; it does not invoke a cloud endpoint, due-item
 scheduler, MQTT, or websocket runtime.
 
-In a third terminal, start a second worker against `(default)`:
+The current production-release candidate stops here: `development` is its only
+Firestore database and `scheduled.timezone_recalculation` is the required
+timezone release gate.
+
+The following Daily Call coverage is retained for the later database migration;
+do not deploy or require a `(default)` timezone worker for the current release.
+For migration-readiness testing, start a second emulator worker for the
+phone-keyed fixture in `development`:
 
 ```bash
 cd /path/to/babymilu-backend
 export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
 python3 src/commands/run-user-timezone-worker-local.py \
   --project demo-babymilu \
-  --database '(default)' \
+  --database development \
   --uid +15550001111
 ```
 
@@ -187,10 +194,10 @@ python3 tools/smoke/run.py run \
   --to-timezone America/New_York
 ```
 
-The reminder/alarm artifact must report `database=development`; the Daily Call
-artifact must report `database=(default)`. The latter also verifies that
-billing, consumed-day, character, retry, and compensation fields are unchanged.
-Both scenarios refuse occupied synthetic fixtures.
+The required release artifact must report `database=development`. The deferred
+Daily Call artifact also reports `database=development` and verifies that billing,
+consumed-day, character, retry, and compensation fields are unchanged. Both
+scenarios refuse occupied synthetic fixtures.
 
 Magic Camera example:
 
