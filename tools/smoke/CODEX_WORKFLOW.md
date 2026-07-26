@@ -230,6 +230,41 @@ occupied synthetic fixtures. These direct scenarios do not exercise the
 cross-database UID/phone bridge; backend worker tests remain the contract for
 that propagation.
 
+For an explicitly approved deployed-worker rollout, use the separate
+`cloud` + `live-shape` scenario. Do not repurpose the emulator scenarios or
+change its constants. The operator must approve these exact disposable trees:
+
+```text
+development/users/codex-timezone-live-smoke-20260726
+(default)/users/+15550003333
+```
+
+The fixed reminder, schedule, and Daily Call descendants are recorded in the
+scenario artifact. Run preflight first, then:
+
+```bash
+python3 tools/smoke/run.py run \
+  --env staging \
+  --scenario scheduled.cloud_timezone_worker_recalculation \
+  --uid codex-timezone-live-smoke-20260726 \
+  --from-timezone America/Los_Angeles \
+  --to-timezone America/New_York \
+  --direct-default-timezone America/Chicago \
+  --confirm-live-timezone-smoke RUN_LIVE_TIMEZONE_WORKER_SMOKE_20260726 \
+  --timeout-seconds 180
+```
+
+The scenario refuses a different project, environment mode, UID, confirmation,
+Firestore emulator, `--keep-docs`, `--skip-preflight`, occupied user subtree,
+matching legacy
+top-level schedule, unexpected worker identity/filter, or public/additional
+service-local Run Invoker. Project-level named invokers are audited into the
+artifact; public project members are refused. The scenario also requires the
+effective unauthenticated HTTP probe to be denied. Fixture creation is atomic
+create-only; all subsequent updates and cleanup deletes require the exact
+current run marker. Its `finally` path must report both trees and all matching
+legacy queries empty before the result is considered successful.
+
 Magic Camera example:
 
 ```bash

@@ -205,8 +205,9 @@ Every Codex or human operator should:
 
 ## Next Scenarios To Add
 
-The current framework ships with reminder/alarm delivery scenarios plus four
-local-emulator-only timezone scenarios.
+The current framework ships with reminder/alarm delivery scenarios, four
+local-emulator-only timezone scenarios, and one explicitly approved deployed
+worker rollout scenario.
 
 `scheduled.timezone_recalculation`:
 
@@ -234,6 +235,31 @@ fixtures. This prevents cleanup from modifying pre-existing data. The two
 default scenarios prove direct `(default)` worker behavior; the
 development-to-default UID/phone bridge remains a backend worker-test
 responsibility.
+
+`scheduled.cloud_timezone_worker_recalculation` closes the deployed integration
+gap without weakening those local guards. It is pinned to
+`composed-augury-469200-g6`, `development`, `(default)`, one synthetic Firebase
+UID, one synthetic E.164 user, and three deterministic child documents. It:
+
+1. validates both deployed Eventarc contracts, service-local single-invoker
+   IAM, audits inherited project-level named invokers, refuses public project
+   members, and requires effective unauthenticated denial;
+2. proves both exact user trees and matching top-level legacy queries are empty;
+3. seeds a future reminder, schedule, and Daily Call without invoking delivery;
+4. changes the development timezone and verifies both schedule audits/cursors;
+5. verifies the guarded UID-to-phone bridge and bridged Daily Call audit/cursor;
+6. directly changes the `(default)` timezone and verifies a distinct worker
+   event recalculates Daily Call again;
+7. asserts all delivery, claim, miss, and dispatch markers remain absent;
+8. uses create-only fixture writes plus transactionally marker-guarded updates
+   and cleanup deletes;
+9. processes children before parents in `finally` and polls until both
+   subtrees and matching legacy queries are empty.
+
+The live scenario requires an exact non-secret confirmation value and refuses
+both `--keep-docs` and `--skip-preflight`. Its artifact is the rollout
+evidence; it is not a reusable production-data migration or an invitation to
+substitute a real user.
 
 The next good additions are:
 

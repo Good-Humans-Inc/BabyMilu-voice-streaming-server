@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from google.cloud import firestore
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 
 WEEKDAY_CODES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -67,12 +68,100 @@ class FirestoreDataAdapter:
         snapshot = self._document_ref(path).get()
         return snapshot.to_dict() if snapshot.exists else None
 
+    def set_document(self, path: str, payload: dict) -> None:
+        self._document_ref(path).set(payload)
+
+    def create_document(self, path: str, payload: dict) -> None:
+        """Create an exact document and fail atomically if it already exists."""
+
+        self._document_ref(path).create(payload)
+
+    def update_document(self, path: str, updates: dict) -> None:
+        self._document_ref(path).update(updates)
+
+    def update_document_if_marker(
+        self,
+        path: str,
+        updates: dict,
+        *,
+        marker: dict,
+    ) -> None:
+        """Update only while this run's exact fixture marker still owns it."""
+
+        reference = self._document_ref(path)
+
+        @firestore.transactional
+        def update_owned(transaction) -> None:
+            snapshot = reference.get(transaction=transaction)
+            if not snapshot.exists:
+                raise RuntimeError(
+                    f"Refusing update because fixture disappeared: {path}"
+                )
+            document = snapshot.to_dict() or {}
+            if document.get("_smokeFixture") != marker:
+                raise RuntimeError(
+                    f"Refusing update because fixture ownership changed: {path}"
+                )
+            transaction.update(reference, updates)
+
+        update_owned(self.client.transaction())
+
+    def delete_document_if_marker(
+        self,
+        path: str,
+        *,
+        marker: dict,
+    ) -> str:
+        """Delete only while this run's exact fixture marker still owns it."""
+
+        reference = self._document_ref(path)
+
+        @firestore.transactional
+        def delete_owned(transaction) -> str:
+            snapshot = reference.get(transaction=transaction)
+            if not snapshot.exists:
+                return "absent"
+            document = snapshot.to_dict() or {}
+            if document.get("_smokeFixture") != marker:
+                return "ownership_changed"
+            transaction.delete(reference)
+            return "deleted"
+
+        return delete_owned(self.client.transaction())
+
     def restore_document(self, path: str, previous: dict | None) -> None:
         reference = self._document_ref(path)
         if previous is None:
             reference.delete()
             return
         reference.set(previous)
+
+    def list_descendant_documents(self, path: str) -> dict[str, dict]:
+        """Return every descendant under one exact document subtree."""
+
+        documents: dict[str, dict] = {}
+
+        def collect(reference) -> None:
+            for collection in reference.collections():
+                for snapshot in collection.stream():
+                    documents[snapshot.reference.path] = snapshot.to_dict() or {}
+                    collect(snapshot.reference)
+
+        collect(self._document_ref(path))
+        return documents
+
+    def find_legacy_schedule_documents(self, uid: str) -> dict[str, dict]:
+        """Find top-level schedule shapes a timezone worker could mutate."""
+
+        documents: dict[str, dict] = {}
+        for collection_name in ("reminders", "alarms", "schedules"):
+            for owner_field in ("uid", "userId", "user_id"):
+                snapshots = self.client.collection(collection_name).where(
+                    filter=FieldFilter(owner_field, "==", uid),
+                ).stream()
+                for snapshot in snapshots:
+                    documents[snapshot.reference.path] = snapshot.to_dict() or {}
+        return documents
 
     def get_recent_magic_photo(
         self,

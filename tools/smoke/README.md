@@ -19,6 +19,7 @@ The harness currently ships with staged scenarios for:
 - `scheduled.daily_call_timezone_recalculation`
 - `scheduled.default_timezone_recalculation`
 - `scheduled.default_daily_call_timezone_recalculation`
+- `scheduled.cloud_timezone_worker_recalculation`
 - `interaction.magic_camera_photo`
 - `interaction.daycare_food_gift`
 
@@ -296,6 +297,66 @@ synthetic fixtures. Cleanup therefore cannot overwrite a pre-existing
 emulator user or schedule. The direct default-worker scenarios do not prove
 the development-to-default UID/phone bridge; keep that identity propagation
 covered by backend worker tests.
+
+### Deployed Dual-Database Worker Smoke (Explicit Live Approval Only)
+
+`scheduled.cloud_timezone_worker_recalculation` is the guarded rollout smoke
+for the deployed Eventarc workers. It is intentionally separate from the four
+local-emulator contracts and runs only with `cloud` + `live-shape`.
+
+Before any Firestore write it verifies:
+
+- project `composed-augury-469200-g6`;
+- active development and `(default)` function contracts, exact database/path
+  filters, runtime/build/trigger service accounts, and `nam5` trigger region;
+- one service-level Run Invoker per worker: its exact Eventarc identity,
+  an audit of inherited project-level Run Invokers, no public project member,
+  and an effective unauthenticated HTTP denial;
+- complete absence of both disposable user trees and any matching top-level
+  legacy reminder/alarm/schedule.
+
+The only write allowlist is:
+
+```text
+development/users/codex-timezone-live-smoke-20260726
+development/users/codex-timezone-live-smoke-20260726/reminders/codex-timezone-live-smoke-reminder-20260726
+development/users/codex-timezone-live-smoke-20260726/schedules/codex-timezone-live-smoke-schedule-20260726
+(default)/users/+15550003333
+(default)/users/+15550003333/miluCall/dailyCall
+```
+
+Run it only after an operator explicitly approves those exact disposable
+documents and confirms both workers are deployed:
+
+```bash
+python3 tools/smoke/run.py preflight --env staging
+
+python3 tools/smoke/run.py run \
+  --env staging \
+  --scenario scheduled.cloud_timezone_worker_recalculation \
+  --uid codex-timezone-live-smoke-20260726 \
+  --from-timezone America/Los_Angeles \
+  --to-timezone America/New_York \
+  --direct-default-timezone America/Chicago \
+  --confirm-live-timezone-smoke RUN_LIVE_TIMEZONE_WORKER_SMOKE_20260726 \
+  --timeout-seconds 180
+```
+
+The scenario proves the development update, reminder/schedule cursor and audit
+recalculation, guarded UID-to-E.164 bridge, bridged Daily Call recalculation,
+and a second direct `(default)` timezone update. It also asserts no schedule or
+Daily Call delivery/claim marker is written. It never invokes the due-item
+scheduler, MQTT, or websocket runtime.
+
+`--keep-docs` and `--skip-preflight` are refused. Every fixture write is
+create-only, timezone updates
+are transactionally conditioned on this run's exact marker, and cleanup only
+deletes a document while that same marker still owns it. Cleanup runs in
+`finally`, processes exact child documents before their parents, then
+repeatedly verifies that both user trees and matching top-level legacy queries
+are empty. The pre-run snapshot,
+deployed-contract evidence, both Eventarc audit results, no-delivery fields,
+and cleanup proof are written to `scenario-details.json`.
 
 ### Example: Magic Camera Smoke
 

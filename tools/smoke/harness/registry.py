@@ -6,6 +6,9 @@ from .scenario import BaseScenario
 from .scenarios.interaction import MagicCameraPhotoScenario
 from .scenarios.daycare import DaycareFoodGiftScenario
 from .scenarios.scheduled import ScheduledAlarmScenario, ScheduledReminderScenario
+from .scenarios.cloud_timezone_recalculation import (
+    ScheduledCloudTimezoneWorkerRecalculationScenario,
+)
 from .scenarios.timezone_recalculation import (
     ScheduledDailyCallTimezoneRecalculationScenario,
     ScheduledDefaultDailyCallTimezoneRecalculationScenario,
@@ -71,6 +74,15 @@ SCENARIOS = {
             "dispatch."
         ),
         cls=ScheduledDefaultDailyCallTimezoneRecalculationScenario,
+    ),
+    "scheduled.cloud_timezone_worker_recalculation": ScenarioDescriptor(
+        name="scheduled.cloud_timezone_worker_recalculation",
+        description=(
+            "Against the deployed cloud workers, verify development schedule "
+            "recalculation, the guarded default bridge, direct default Daily "
+            "Call recalculation, private IAM, and exact fixture cleanup."
+        ),
+        cls=ScheduledCloudTimezoneWorkerRecalculationScenario,
     ),
     "interaction.magic_camera_photo": ScenarioDescriptor(
         name="interaction.magic_camera_photo",
