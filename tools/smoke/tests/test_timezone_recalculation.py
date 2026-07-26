@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,13 +15,19 @@ if str(SMOKE_ROOT) not in sys.path:
 
 from harness.scenarios.timezone_recalculation import (  # noqa: E402
     DAILY_CALL_DATABASE_ID,
+    DEFAULT_DATABASE_ID,
     SCHEDULE_DATABASE_ID,
+    ScheduledDailyCallTimezoneRecalculationScenario,
+    ScheduledDefaultDailyCallTimezoneRecalculationScenario,
+    ScheduledDefaultTimezoneRecalculationScenario,
+    ScheduledTimezoneRecalculationScenario,
     _as_utc,
     _next_daily_call_occurrence_utc,
     _next_weekly_occurrence_utc,
     _recalculation_state,
     _validate_local_isolated_environment,
 )
+from harness.registry import make_scenario  # noqa: E402
 
 
 class FakeAdapter:
@@ -31,9 +38,44 @@ class FakeAdapter:
         return self.documents.get(path)
 
 
-def test_all_timezone_smokes_are_pinned_to_development() -> None:
+def test_development_timezone_smokes_are_pinned_to_development() -> None:
     assert SCHEDULE_DATABASE_ID == "development"
     assert DAILY_CALL_DATABASE_ID == SCHEDULE_DATABASE_ID
+    assert ScheduledTimezoneRecalculationScenario.database_id == "development"
+    assert (
+        ScheduledDailyCallTimezoneRecalculationScenario.database_id
+        == "development"
+    )
+
+
+def test_default_worker_smokes_are_pinned_to_default_database() -> None:
+    assert DEFAULT_DATABASE_ID == "(default)"
+    assert (
+        ScheduledDefaultTimezoneRecalculationScenario.database_id
+        == DEFAULT_DATABASE_ID
+    )
+    assert (
+        ScheduledDefaultDailyCallTimezoneRecalculationScenario.database_id
+        == DEFAULT_DATABASE_ID
+    )
+    assert (
+        ScheduledDefaultTimezoneRecalculationScenario.name
+        == "scheduled.default_timezone_recalculation"
+    )
+    assert (
+        ScheduledDefaultDailyCallTimezoneRecalculationScenario.name
+        == "scheduled.default_daily_call_timezone_recalculation"
+    )
+    assert isinstance(
+        make_scenario("scheduled.default_timezone_recalculation"),
+        ScheduledDefaultTimezoneRecalculationScenario,
+    )
+    assert isinstance(
+        make_scenario(
+            "scheduled.default_daily_call_timezone_recalculation",
+        ),
+        ScheduledDefaultDailyCallTimezoneRecalculationScenario,
+    )
 
 
 def test_next_weekly_occurrence_rebases_wall_clock_to_new_timezone() -> None:
@@ -269,3 +311,27 @@ def test_scenario_accepts_local_demo_emulator(monkeypatch) -> None:
     )
 
     _validate_local_isolated_environment(context)
+
+
+@pytest.mark.parametrize(
+    "scenario_cls",
+    (
+        ScheduledDefaultTimezoneRecalculationScenario,
+        ScheduledDefaultDailyCallTimezoneRecalculationScenario,
+    ),
+)
+def test_default_worker_scenarios_keep_cloud_refusal(
+    monkeypatch,
+    scenario_cls,
+) -> None:
+    monkeypatch.setenv("FIRESTORE_EMULATOR_HOST", "127.0.0.1:8080")
+    context = SimpleNamespace(
+        environment=SimpleNamespace(
+            environment_type="cloud",
+            data_mode="isolated",
+            project="demo-babymilu",
+        )
+    )
+
+    with pytest.raises(RuntimeError, match=scenario_cls.name):
+        asyncio.run(scenario_cls().run(context))

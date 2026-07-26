@@ -22,8 +22,10 @@ WEEKDAY_INDEX = {
     "Sun": 6,
 }
 DAILY_CALL_DAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
-SCHEDULE_DATABASE_ID = "development"
-DAILY_CALL_DATABASE_ID = SCHEDULE_DATABASE_ID
+DEVELOPMENT_DATABASE_ID = "development"
+DEFAULT_DATABASE_ID = "(default)"
+SCHEDULE_DATABASE_ID = DEVELOPMENT_DATABASE_ID
+DAILY_CALL_DATABASE_ID = DEVELOPMENT_DATABASE_ID
 DAILY_CALL_PRESERVED_FIELDS = (
     "times",
     "billing",
@@ -148,25 +150,29 @@ def _recalculation_state(
     return final_docs
 
 
-def _validate_local_isolated_environment(context: ScenarioContext) -> None:
+def _validate_local_isolated_environment(
+    context: ScenarioContext,
+    *,
+    scenario_name: str = "scheduled.timezone_recalculation",
+) -> None:
     environment = context.environment
     if (
         environment.environment_type != "local-compose"
         or environment.data_mode != "isolated"
     ):
         raise RuntimeError(
-            "scheduled.timezone_recalculation is local-only and requires "
+            f"{scenario_name} is local-only and requires "
             "environment_type=local-compose with data_mode=isolated"
         )
     emulator_host = os.environ.get("FIRESTORE_EMULATOR_HOST", "").strip()
     if not emulator_host:
         raise RuntimeError(
-            "scheduled.timezone_recalculation requires FIRESTORE_EMULATOR_HOST; "
+            f"{scenario_name} requires FIRESTORE_EMULATOR_HOST; "
             "it will not run against a cloud Firestore database"
         )
     if not environment.project.startswith("demo-"):
         raise RuntimeError(
-            "scheduled.timezone_recalculation requires a demo-* project ID as an "
+            f"{scenario_name} requires a demo-* project ID as an "
             "additional guard against cloud writes"
         )
 
@@ -228,14 +234,18 @@ async def _wait_for_daily_call_recalculation(
 
 class ScheduledTimezoneRecalculationScenario(BaseScenario):
     name = "scheduled.timezone_recalculation"
+    database_id = SCHEDULE_DATABASE_ID
     description = (
-        "Change an emulator user's timezone and verify recurring reminder/alarm "
-        "UTC cursors are rebased while their local wall-clock schedules stay "
-        "unchanged"
+        "In development, change an emulator user's timezone and verify recurring "
+        "reminder/alarm UTC cursors are rebased while their local wall-clock "
+        "schedules stay unchanged"
     )
 
     async def run(self, context: ScenarioContext) -> ScenarioResult:
-        _validate_local_isolated_environment(context)
+        _validate_local_isolated_environment(
+            context,
+            scenario_name=self.name,
+        )
         started = utc_now_iso()
         args = context.args
 
@@ -250,7 +260,7 @@ class ScheduledTimezoneRecalculationScenario(BaseScenario):
             )
 
         adapter = FirestoreDataAdapter(
-            context.firestore_for(SCHEDULE_DATABASE_ID),
+            context.firestore_for(self.database_id),
         )
         previous_user = adapter.get_user(args.uid)
         if previous_user is not None:
@@ -343,7 +353,7 @@ class ScheduledTimezoneRecalculationScenario(BaseScenario):
                     "environmentType": context.environment.environment_type,
                     "dataMode": context.environment.data_mode,
                     "project": context.environment.project,
-                    "database": SCHEDULE_DATABASE_ID,
+                    "database": self.database_id,
                     "firestoreEmulatorHost": os.environ.get(
                         "FIRESTORE_EMULATOR_HOST"
                     ),
@@ -414,7 +424,8 @@ class ScheduledTimezoneRecalculationScenario(BaseScenario):
                 finished_at=utc_now_iso(),
                 summary=(
                     "Recurring reminder and alarm UTC cursors were recalculated "
-                    f"after {args.from_timezone} -> {args.to_timezone}"
+                    f"in {self.database_id} after "
+                    f"{args.from_timezone} -> {args.to_timezone}"
                 ),
                 artifact_dir=str(context.artifact_dir),
                 details=details,
@@ -431,15 +442,32 @@ class ScheduledTimezoneRecalculationScenario(BaseScenario):
                 )
 
 
+class ScheduledDefaultTimezoneRecalculationScenario(
+    ScheduledTimezoneRecalculationScenario
+):
+    name = "scheduled.default_timezone_recalculation"
+    database_id = DEFAULT_DATABASE_ID
+    description = (
+        "In (default), change an emulator user's timezone and verify recurring "
+        "reminder/alarm UTC cursors are rebased while their local wall-clock "
+        "schedules stay unchanged"
+    )
+
+
 class ScheduledDailyCallTimezoneRecalculationScenario(BaseScenario):
     name = "scheduled.daily_call_timezone_recalculation"
+    database_id = DAILY_CALL_DATABASE_ID
     description = (
-        "Change a phone-keyed emulator user's timezone and verify the Daily Call "
-        "UTC cursor is rebased without consuming or dispatching a call"
+        "In development, change a phone-keyed emulator user's timezone and verify "
+        "the Daily Call UTC cursor is rebased without consuming or dispatching "
+        "a call"
     )
 
     async def run(self, context: ScenarioContext) -> ScenarioResult:
-        _validate_local_isolated_environment(context)
+        _validate_local_isolated_environment(
+            context,
+            scenario_name=self.name,
+        )
         if not re.fullmatch(r"\+[1-9]\d{7,14}", context.args.uid):
             raise RuntimeError(
                 "Daily Call timezone smoke requires an E.164 --uid"
@@ -458,7 +486,7 @@ class ScheduledDailyCallTimezoneRecalculationScenario(BaseScenario):
             )
 
         adapter = FirestoreDataAdapter(
-            context.firestore_for(DAILY_CALL_DATABASE_ID),
+            context.firestore_for(self.database_id),
         )
         previous_user = adapter.get_user(args.uid)
         timezone_was_present = bool(
@@ -518,7 +546,7 @@ class ScheduledDailyCallTimezoneRecalculationScenario(BaseScenario):
                     "environmentType": context.environment.environment_type,
                     "dataMode": context.environment.data_mode,
                     "project": context.environment.project,
-                    "database": DAILY_CALL_DATABASE_ID,
+                    "database": self.database_id,
                     "firestoreEmulatorHost": os.environ.get(
                         "FIRESTORE_EMULATOR_HOST"
                     ),
@@ -558,8 +586,9 @@ class ScheduledDailyCallTimezoneRecalculationScenario(BaseScenario):
                 started_at=started,
                 finished_at=utc_now_iso(),
                 summary=(
-                    "Daily Call UTC cursor was recalculated without a claim or "
-                    f"dispatch after {args.from_timezone} -> {args.to_timezone}"
+                    "Daily Call UTC cursor was recalculated in "
+                    f"{self.database_id} without a claim or dispatch after "
+                    f"{args.from_timezone} -> {args.to_timezone}"
                 ),
                 artifact_dir=str(context.artifact_dir),
                 details=details,
@@ -576,3 +605,15 @@ class ScheduledDailyCallTimezoneRecalculationScenario(BaseScenario):
                     timezone_was_present=timezone_was_present,
                     timezone_value=previous_timezone,
                 )
+
+
+class ScheduledDefaultDailyCallTimezoneRecalculationScenario(
+    ScheduledDailyCallTimezoneRecalculationScenario
+):
+    name = "scheduled.default_daily_call_timezone_recalculation"
+    database_id = DEFAULT_DATABASE_ID
+    description = (
+        "In (default), change a phone-keyed emulator user's timezone and verify "
+        "the Daily Call UTC cursor is rebased without consuming or dispatching "
+        "a call"
+    )

@@ -8,6 +8,8 @@ from .scenarios.daycare import DaycareFoodGiftScenario
 from .scenarios.scheduled import ScheduledAlarmScenario, ScheduledReminderScenario
 from .scenarios.timezone_recalculation import (
     ScheduledDailyCallTimezoneRecalculationScenario,
+    ScheduledDefaultDailyCallTimezoneRecalculationScenario,
+    ScheduledDefaultTimezoneRecalculationScenario,
     ScheduledTimezoneRecalculationScenario,
 )
 
@@ -47,10 +49,28 @@ SCENARIOS = {
     "scheduled.daily_call_timezone_recalculation": ScenarioDescriptor(
         name="scheduled.daily_call_timezone_recalculation",
         description=(
-            "On a local Firestore emulator, change a phone-keyed user timezone "
-            "and verify the Daily Call UTC cursor is rebased without dispatch."
+            "On a local Firestore emulator, change a development phone-keyed "
+            "user timezone and verify the Daily Call UTC cursor is rebased "
+            "without dispatch."
         ),
         cls=ScheduledDailyCallTimezoneRecalculationScenario,
+    ),
+    "scheduled.default_timezone_recalculation": ScenarioDescriptor(
+        name="scheduled.default_timezone_recalculation",
+        description=(
+            "On a local Firestore emulator, change a (default) user timezone "
+            "and verify recurring reminder/alarm UTC cursors are rebased."
+        ),
+        cls=ScheduledDefaultTimezoneRecalculationScenario,
+    ),
+    "scheduled.default_daily_call_timezone_recalculation": ScenarioDescriptor(
+        name="scheduled.default_daily_call_timezone_recalculation",
+        description=(
+            "On a local Firestore emulator, change a (default) phone-keyed user "
+            "timezone and verify the Daily Call UTC cursor is rebased without "
+            "dispatch."
+        ),
+        cls=ScheduledDefaultDailyCallTimezoneRecalculationScenario,
     ),
     "interaction.magic_camera_photo": ScenarioDescriptor(
         name="interaction.magic_camera_photo",

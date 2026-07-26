@@ -205,7 +205,7 @@ Every Codex or human operator should:
 
 ## Next Scenarios To Add
 
-The current framework ships with reminder/alarm delivery scenarios plus two
+The current framework ships with reminder/alarm delivery scenarios plus four
 local-emulator-only timezone scenarios.
 
 `scheduled.timezone_recalculation`:
@@ -217,21 +217,23 @@ local-emulator-only timezone scenarios.
 4. writes the before/expected/after values to `scenario-details.json`
 5. restores/deletes all emulator fixtures
 
-`scheduled.daily_call_timezone_recalculation` is retained as deferred database
-migration coverage. It seeds the phone-keyed
+`scheduled.daily_call_timezone_recalculation` seeds the phone-keyed
 `development/users/{phone}/miluCall/dailyCall` document, changes the parent
 timezone, and verifies the UTC cursor moves without a claim or dispatch while
 billing, consumed-day, character, retry, and compensation fields stay intact.
-It is not part of the current production-release candidate, whose only
-Firestore database and required timezone scenario are `development` and
-`scheduled.timezone_recalculation`. It refuses any occupied synthetic user or
-Daily Call path, preventing cleanup from modifying a pre-existing emulator
-fixture.
 
-Both refuse cloud and `live-shape` environments and use guarded workers against
-`development`. No `(default)` worker or UID-to-phone bridge is part of the
-current design; existing Daily Call identities and records must be reconciled
-when they are migrated.
+`scheduled.default_timezone_recalculation` repeats the reminder/alarm contract
+against `(default)`, and
+`scheduled.default_daily_call_timezone_recalculation` repeats the Daily Call
+contract there. Their distinct scenario names flow into artifact directory
+names, and every `scenario-details.json` records the exact database ID.
+
+All four scenarios refuse cloud and `live-shape` environments, require a
+Firestore emulator plus a `demo-*` project, and refuse occupied synthetic
+fixtures. This prevents cleanup from modifying pre-existing data. The two
+default scenarios prove direct `(default)` worker behavior; the
+development-to-default UID/phone bridge remains a backend worker-test
+responsibility.
 
 The next good additions are:
 

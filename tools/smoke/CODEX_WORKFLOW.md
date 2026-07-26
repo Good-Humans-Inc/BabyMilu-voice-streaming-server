@@ -164,14 +164,9 @@ This scenario hard-fails unless it sees `local-compose` + `isolated`,
 timezone-update worker only; it does not invoke a cloud endpoint, due-item
 scheduler, MQTT, or websocket runtime.
 
-The current production-release candidate stops here: `development` is its only
-Firestore database and `scheduled.timezone_recalculation` is the required
-timezone release gate.
-
-The following Daily Call coverage is retained for the later database migration;
-do not deploy or require a `(default)` timezone worker for the current release.
-For migration-readiness testing, start a second emulator worker for the
-phone-keyed fixture in `development`:
+The dual-database rollout requires direct worker coverage for both
+`development` and `(default)`. Start a second development worker for the
+phone-keyed Daily Call fixture:
 
 ```bash
 cd /path/to/babymilu-backend
@@ -194,10 +189,46 @@ python3 tools/smoke/run.py run \
   --to-timezone America/New_York
 ```
 
-The required release artifact must report `database=development`. The deferred
-Daily Call artifact also reports `database=development` and verifies that billing,
-consumed-day, character, retry, and compensation fields are unchanged. Both
-scenarios refuse occupied synthetic fixtures.
+Both development artifacts must report `database=development`. The Daily Call
+artifact verifies that billing, consumed-day, character, retry, and
+compensation fields are unchanged.
+
+Start a third guarded worker against `(default)` with one fresh E.164 fixture
+allowlisted for both default scenarios:
+
+```bash
+cd /path/to/babymilu-backend
+export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
+python3 src/commands/run-user-timezone-worker-local.py \
+  --project demo-babymilu \
+  --database '(default)' \
+  --uid +15550002222
+```
+
+Run both direct default-worker contracts:
+
+```bash
+python3 tools/smoke/run.py run \
+  --env timezone-local \
+  --scenario scheduled.default_timezone_recalculation \
+  --uid +15550002222 \
+  --from-timezone America/Los_Angeles \
+  --to-timezone America/New_York
+
+python3 tools/smoke/run.py run \
+  --env timezone-local \
+  --scenario scheduled.default_daily_call_timezone_recalculation \
+  --uid +15550002222 \
+  --from-timezone America/Los_Angeles \
+  --to-timezone America/New_York
+```
+
+The default artifacts must report `database=(default)` and have scenario names
+that include `default`. All four timezone scenarios refuse cloud,
+`live-shape`, non-`demo-*` projects, missing `FIRESTORE_EMULATOR_HOST`, and
+occupied synthetic fixtures. These direct scenarios do not exercise the
+cross-database UID/phone bridge; backend worker tests remain the contract for
+that propagation.
 
 Magic Camera example:
 

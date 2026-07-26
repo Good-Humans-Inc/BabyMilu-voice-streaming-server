@@ -17,6 +17,8 @@ The harness currently ships with staged scenarios for:
 - `scheduled.alarm`
 - `scheduled.timezone_recalculation`
 - `scheduled.daily_call_timezone_recalculation`
+- `scheduled.default_timezone_recalculation`
+- `scheduled.default_daily_call_timezone_recalculation`
 - `interaction.magic_camera_photo`
 - `interaction.daycare_food_gift`
 
@@ -216,16 +218,15 @@ expects the local Firestore update trigger to perform the recalculation. Created
 schedule documents and the synthetic user are removed automatically unless
 `--keep-docs` is supplied.
 
-### Deferred Daily Call Migration Coverage
+### Dual-Database Worker Coverage
 
-The production-release candidate uses `development` as its only Firestore
-database. The Daily Call scenario below is retained to prove the canonical
-`development` data shape before the later database migration, but it is not
-part of the current live-data release gate. No `(default)` timezone worker
-should be deployed for this release.
+The rollout has separate workers for `development` and `(default)`. Keep the
+existing development coverage, including its phone-keyed Daily Call shape, and
+run the explicitly named default-database scenarios before releasing either
+worker.
 
-For migration-readiness testing, start a second guarded worker for a phone-keyed
-fixture in the same `development` emulator database:
+Start a second guarded development worker for the phone-keyed Daily Call
+fixture:
 
 ```bash
 cd /path/to/babymilu-backend
@@ -236,8 +237,7 @@ python3 src/commands/run-user-timezone-worker-local.py \
   --uid +15550001111
 ```
 
-Back in the voice-server smoke terminal, run the separate phone-keyed Daily Call
-contract against the same emulator:
+Back in the voice-server smoke terminal, run the phone-keyed Daily Call contract:
 
 ```bash
 python3 tools/smoke/run.py run \
@@ -248,16 +248,54 @@ python3 tools/smoke/run.py run \
   --to-timezone America/New_York
 ```
 
-This deferred scenario validates
+This scenario validates
 `development/users/{E.164 phone}/miluCall/dailyCall`, including its
 seven-day `times` map, billing/character/retry/compensation preservation, and
-no-claim/no-dispatch invariant. The reminder/alarm scenario explicitly uses
-`development`; both artifacts record that database ID. Cross-database identity
-propagation is intentionally absent and existing `(default)` records must be
-reconciled during the Daily Call database migration.
+no-claim/no-dispatch invariant.
 
-Both timezone scenarios refuse an occupied synthetic user (and Daily Call
-path), so cleanup cannot overwrite a pre-existing emulator fixture.
+In another terminal, start the guarded `(default)` worker with one fresh E.164
+fixture allowlisted for both default-database scenarios:
+
+```bash
+cd /path/to/babymilu-backend
+export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
+python3 src/commands/run-user-timezone-worker-local.py \
+  --project demo-babymilu \
+  --database '(default)' \
+  --uid +15550002222
+```
+
+Then run both direct `(default)` worker contracts:
+
+```bash
+python3 tools/smoke/run.py run \
+  --env timezone-local \
+  --scenario scheduled.default_timezone_recalculation \
+  --uid +15550002222 \
+  --from-timezone America/Los_Angeles \
+  --to-timezone America/New_York
+
+python3 tools/smoke/run.py run \
+  --env timezone-local \
+  --scenario scheduled.default_daily_call_timezone_recalculation \
+  --uid +15550002222 \
+  --from-timezone America/Los_Angeles \
+  --to-timezone America/New_York
+```
+
+The first default scenario covers recurring reminder and alarm
+`nextOccurrenceUTC` plus `nextTriggerUTC`; the second covers
+`users/{phone}/miluCall/dailyCall`. Artifact directory names include
+`default_timezone_recalculation` or
+`default_daily_call_timezone_recalculation`, and each
+`scenario-details.json` records `database=(default)`.
+
+All four timezone scenarios hard-refuse cloud and `live-shape` environments,
+require `FIRESTORE_EMULATOR_HOST` plus a `demo-*` project, and refuse occupied
+synthetic fixtures. Cleanup therefore cannot overwrite a pre-existing
+emulator user or schedule. The direct default-worker scenarios do not prove
+the development-to-default UID/phone bridge; keep that identity propagation
+covered by backend worker tests.
 
 ### Example: Magic Camera Smoke
 
