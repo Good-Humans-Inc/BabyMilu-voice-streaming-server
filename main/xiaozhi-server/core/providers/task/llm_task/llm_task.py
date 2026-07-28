@@ -3,6 +3,7 @@ LLM-based Task Detection Provider
 Uses LLM to detect and match tasks from conversation against user's assigned tasks
 """
 
+import asyncio
 import json
 import time
 from ..base import TaskProviderBase, logger
@@ -75,7 +76,14 @@ class TaskProvider(TaskProviderBase):
         self.temperature = config.get("temperature", 0.5)
         self.stateless = config.get("stateless", True)
         
-    async def detect_task(self, msgs, tasks=None, user_id=None, character_name=None):
+    async def detect_task(
+        self,
+        msgs,
+        tasks=None,
+        user_id=None,
+        character_name=None,
+        device_id=None,
+    ):
         """
         Detect tasks from conversation messages
         
@@ -83,6 +91,7 @@ class TaskProvider(TaskProviderBase):
             msgs: List of conversation messages (Message objects or dicts)
             tasks: user's assigned tasks text (optional, can be provided later)
             user_id: User ID for logging purposes
+            device_id: Active connection device ID used for backend ownership binding
             
         Returns:
             list: Matched tasks with format:
@@ -119,7 +128,10 @@ class TaskProvider(TaskProviderBase):
                     )
             else:
                 # Fetch user's assigned tasks
-                assigned_tasks = get_assigned_tasks_for_user(user_id)
+                assigned_tasks = await asyncio.to_thread(
+                    get_assigned_tasks_for_user,
+                    device_id,
+                )
 
                 # Build tasks text
                 tasks_text = self._build_tasks_text_from_list(
@@ -186,7 +198,11 @@ class TaskProvider(TaskProviderBase):
                 logger.bind(tag=TAG).info(
                     f"任务检测完成 - 用户: {user_id}, 匹配任务数: {len(matched_tasks)}"
                 )
-                process_user_action(user_id, matched_tasks)
+                await asyncio.to_thread(
+                    process_user_action,
+                    device_id,
+                    matched_tasks,
+                )
                 return matched_tasks
             else:
                 logger.bind(tag=TAG).debug(f"任务检测完成 - 用户: {user_id}, 无匹配任务")

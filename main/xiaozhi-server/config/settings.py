@@ -36,6 +36,10 @@ def check_config_file():
 def get_gcp_credentials_path() -> str:
     """Return the path to GCP credentials if set via env/config.
 
+    Set ``BABYMILU_ALLOW_GCP_KEY_FILES=false`` on VM deployments to force
+    metadata/ADC and prevent a stale mounted JSON key from shadowing the
+    attached service account.
+
     Precedence:
       1) GOOGLE_APPLICATION_CREDENTIALS env var (if it's a file)
       2) If env var points to a directory, look for sa.json inside it
@@ -43,6 +47,15 @@ def get_gcp_credentials_path() -> str:
       4) data/.gcp/sa.json (if present and mounted)
       5) data/.gcp/ directory (if present, look for any JSON file inside)
     """
+    if os.environ.get("BABYMILU_ALLOW_GCP_KEY_FILES", "true").strip().lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+        return ""
+
     # 1) Environment variable (preferred)
     path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
     if path:

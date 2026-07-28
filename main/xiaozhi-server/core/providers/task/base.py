@@ -15,7 +15,14 @@ class TaskProviderBase(ABC):
         self.llm = llm
 
     @abstractmethod
-    async def detect_task(self, msgs, tasks=None, user_id=None, character_name=None):
+    async def detect_task(
+        self,
+        msgs,
+        tasks=None,
+        user_id=None,
+        character_name=None,
+        device_id=None,
+    ):
         """
         Detect tasks from conversation messages
         
@@ -24,10 +31,11 @@ class TaskProviderBase(ABC):
             tasks: List of user's assigned tasks (optional)
             user_id: User ID for logging purposes
             character_name: Character name for logging purposes
+            device_id: Active connection device ID for backend ownership binding
         Returns:
             list: Matched tasks with format [{"task_id": "...", "task_action": "...", "match_reason": "..."}, ...]
         """
-        print("this is base func", msgs, tasks, user_id, character_name)
+        print("this is base func", msgs, tasks, user_id, character_name, device_id)
         return []
         
     def init_task(self, role_id, llm, **kwargs):

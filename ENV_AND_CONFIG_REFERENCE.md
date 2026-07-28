@@ -180,6 +180,16 @@ export GOOGLE_APPLICATION_CREDENTIALS="/path/to/sa.json"
 export GOOGLE_CLOUD_PROJECT="your-project-id"
 ```
 
+For the miffy-dev task API, do not use this downloaded-key path. The voice VM
+must attach
+`babymilu-production-server@composed-augury-469200-g6.iam.gserviceaccount.com`,
+and the process fetches an audience-bound Google identity token through
+ADC/metadata. `BABYMILU_TASK_API_BASE_URL` must be the exact
+`https://us-central1-composed-augury-469200-g6.cloudfunctions.net/tasks-api-miffy-dev`
+audience, and VM compose must set `BABYMILU_ALLOW_GCP_KEY_FILES=false` so a
+stale file cannot shadow metadata identity; there is no shared internal-key
+fallback.
+
 ---
 
 ## 6. Model Files

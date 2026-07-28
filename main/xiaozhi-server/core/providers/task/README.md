@@ -77,16 +77,17 @@ task_provider.init_task(
 ### 3. 检测任务
 
 ```python
-from core.utils.firestore_client import get_assigned_tasks_for_user
+from core.utils.api_client import get_assigned_tasks_for_user
 
-# 获取用户的已分配任务
-tasks = get_assigned_tasks_for_user(user_id)
+# 后端通过当前连接设备解析所有者；调用方不发送 uid/手机号
+tasks = get_assigned_tasks_for_user(device_id)
 
 # 从对话中检测任务
 matched_tasks = await task_provider.detect_task(
     msgs=conversation_messages,  # 对话消息列表
     tasks=tasks,                  # 用户的已分配任务
-    user_id=user_id               # 用户ID
+    user_id=user_id,              # 仅用于本地日志/LLM上下文
+    device_id=device_id           # 当前连接设备ID（后端所有权绑定）
 )
 
 # 处理匹配结果
@@ -124,19 +125,19 @@ if task_config and task_config.get("type"):
 
 # 在会话结束时检测任务
 if self.task_provider and self.device_id:
-    owner_phone = get_owner_phone_for_device(self.device_id)
-    if owner_phone:
-        tasks = get_assigned_tasks_for_user(owner_phone)
-        conversation = self.dialogue.get_llm_dialogue()
-        
-        matched_tasks = await self.task_provider.detect_task(
-            msgs=conversation,
-            tasks=tasks,
-            user_id=owner_phone
-        )
-        
-        if matched_tasks:
-            process_user_action(owner_phone, matched_tasks)
+    owner_phone = get_owner_phone_for_device(self.device_id)  # local display/log hint only
+    tasks = get_assigned_tasks_for_user(self.device_id)
+    conversation = self.dialogue.get_llm_dialogue()
+
+    matched_tasks = await self.task_provider.detect_task(
+        msgs=conversation,
+        tasks=tasks,
+        user_id=owner_phone,
+        device_id=self.device_id,
+    )
+
+    if matched_tasks:
+        process_user_action(self.device_id, matched_tasks)
 ```
 
 ## 返回格式
@@ -172,7 +173,14 @@ class TaskProvider(TaskProviderBase):
         super().__init__(config)
         # 初始化配置
         
-    async def detect_task(self, msgs, tasks=None, user_id=None):
+    async def detect_task(
+        self,
+        msgs,
+        tasks=None,
+        user_id=None,
+        character_name=None,
+        device_id=None,
+    ):
         # 实现任务检测逻辑
         matched_tasks = []
         # ... 处理逻辑 ...
@@ -186,6 +194,23 @@ class TaskProvider(TaskProviderBase):
 3. 返回的任务列表可能为空，需要进行判断
 4. 任务检测是异步方法，需要使用 `await` 调用
 
+## Task API 身份与设备绑定
+
+- API 根地址和 Google OIDC audience 都必须精确为
+  `https://us-central1-composed-augury-469200-g6.cloudfunctions.net/tasks-api-miffy-dev`。
+- 运行进程必须使用 VM metadata/ADC 中的
+  `babymilu-production-server@composed-augury-469200-g6.iam.gserviceaccount.com`。
+  VM compose 设置 `BABYMILU_ALLOW_GCP_KEY_FILES=false`，确保旧的挂载 key
+  不会覆盖 attached identity。不要分发 service-account JSON key。
+- 调用会发送 `Authorization: Bearer <Google identity token>` 和
+  `X-BabyMilu-Auth-Mode: google-oidc`。令牌会线程安全地缓存，并在临近
+  `exp` 时刷新；令牌不得出现在日志中。
+- `/tasks` 和 `/tasks/process` 都必须携带当前连接的 `deviceId`。后端在
+  Firestore `development` 中解析设备所有者；调用方不发送 uid、手机号、
+  共享 internal key 或 `X-BabyMilu-Internal-Token`。
+- 如果旧 Xiaozhi VM 没有附加上述精确 service account，应停用这条旧调用
+  路径或先迁移 VM 身份；后端不会增加第二个 caller allowlist。
+
 ## 配置项说明
 
 ### llm_task 提供者配置
@@ -196,4 +221,3 @@ class TaskProvider(TaskProviderBase):
 | max_tokens | int | 1000 | LLM最大输出tokens |
 | temperature | float | 0.2 | LLM温度参数 |
 | stateless | bool | true | 是否使用无状态模式 |
-
