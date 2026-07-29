@@ -107,15 +107,15 @@ def _check_gcloud_access_token() -> PreflightCheck:
         return PreflightCheck(name="gcloud-auth", ok=False, detail=detail)
 
 
-def _check_firestore(project: str) -> PreflightCheck:
+def _check_firestore(project: str, database: str) -> PreflightCheck:
     try:
         firestore = importlib.import_module("google.cloud.firestore")
-        client = firestore.Client(project=project)
+        client = firestore.Client(project=project, database=database)
         _ = client.project
         return PreflightCheck(
             name="firestore-client",
             ok=True,
-            detail=f"client ready for project {project}",
+            detail=f"client ready for project {project}, database {database}",
         )
     except Exception as exc:
         return PreflightCheck(name="firestore-client", ok=False, detail=str(exc))
@@ -227,6 +227,10 @@ def run_preflight(environment: EnvironmentConfig, strict: bool = False) -> list[
             [
                 _check_import("google.cloud.firestore"),
                 _check_env_field("project", environment.project),
+                _check_env_field(
+                    "firestore_database",
+                    environment.firestore_database,
+                ),
             ]
         )
 
@@ -243,7 +247,12 @@ def run_preflight(environment: EnvironmentConfig, strict: bool = False) -> list[
                     detail=adc_detail,
                 )
             )
-            checks.append(_check_firestore(environment.project))
+            checks.append(
+                _check_firestore(
+                    environment.project,
+                    environment.firestore_database,
+                )
+            )
     return checks
 
 

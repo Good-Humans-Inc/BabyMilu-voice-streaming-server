@@ -59,6 +59,18 @@ def load_environment(name: str, explicit: str | None = None) -> EnvironmentConfi
             "server_log_command_template": os.environ.get(
                 "BABYMILU_SMOKE_SERVER_LOG_COMMAND_TEMPLATE", ""
             ),
+            "firestore_database": os.environ.get(
+                "BABYMILU_SMOKE_FIRESTORE_DATABASE",
+                "(default)",
+            ),
+            "daycare_url": os.environ.get(
+                "BABYMILU_SMOKE_DAYCARE_URL",
+                "",
+            ),
+            "firebase_api_key": os.environ.get(
+                "BABYMILU_SMOKE_FIREBASE_API_KEY",
+                "",
+            ),
             "notes": os.environ.get("BABYMILU_SMOKE_NOTES", ""),
         }
     else:
@@ -73,6 +85,9 @@ def load_environment(name: str, explicit: str | None = None) -> EnvironmentConfi
         payload.setdefault("compose_service", "server")
         payload.setdefault("compose_workdir", "/opt/xiaozhi-esp32-server")
         payload.setdefault("server_log_command_template", "")
+        payload.setdefault("firestore_database", "(default)")
+        payload.setdefault("daycare_url", "")
+        payload.setdefault("firebase_api_key", "")
         payload.setdefault("notes", "")
 
     artifact_root = payload["artifact_root"]
@@ -96,6 +111,9 @@ def load_environment(name: str, explicit: str | None = None) -> EnvironmentConfi
         compose_service=payload["compose_service"],
         compose_workdir=payload["compose_workdir"],
         server_log_command_template=payload["server_log_command_template"],
+        firestore_database=payload["firestore_database"],
+        daycare_url=payload["daycare_url"],
+        firebase_api_key=payload["firebase_api_key"],
         notes=payload["notes"],
     )
     setattr(env, "source_path", str(source_path) if source_path else "<env-vars>")

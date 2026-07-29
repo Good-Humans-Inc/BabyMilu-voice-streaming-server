@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from .scenario import BaseScenario
 from .scenarios.interaction import MagicCameraPhotoScenario
+from .scenarios.daycare import DaycareFoodGiftScenario
 from .scenarios.scheduled import ScheduledAlarmScenario, ScheduledReminderScenario
 
 
@@ -29,6 +30,14 @@ SCENARIOS = {
         name="interaction.magic_camera_photo",
         description="Run a Magic Camera websocket prompt, verify a recent photo exists, and assert the assistant uses the inspection path instead of the fallback 'can't see it' response.",
         cls=MagicCameraPhotoScenario,
+    ),
+    "interaction.daycare_food_gift": ScenarioDescriptor(
+        name="interaction.daycare_food_gift",
+        description=(
+            "Create isolated authenticated Food and Gift actions, verify "
+            "private image generation and send completion, then clean up."
+        ),
+        cls=DaycareFoodGiftScenario,
     ),
 }
 

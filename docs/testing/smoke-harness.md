@@ -212,3 +212,11 @@ The current framework ships with scheduled scenarios. The next good additions ar
 - `task.daily_plushie`
 
 Those should reuse the same framework core instead of spawning new standalone scripts.
+
+## Daycare release scenario
+
+`interaction.daycare_food_gift` verifies the deployed miffy-dev Daycare path.
+It uses a disposable Firebase identity and the named `development` Firestore
+database, proves Food and Gift through private image download and Send
+completion, and removes its Auth, Firestore, Storage, and synthetic economy
+effects during cleanup.
