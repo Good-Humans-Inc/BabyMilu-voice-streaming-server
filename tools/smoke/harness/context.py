@@ -20,5 +20,8 @@ class ScenarioContext:
         if self._firestore is None:
             from google.cloud import firestore
 
-            self._firestore = firestore.Client(project=self.environment.project)
+            self._firestore = firestore.Client(
+                project=self.environment.project,
+                database=self.environment.firestore_database,
+            )
         return self._firestore

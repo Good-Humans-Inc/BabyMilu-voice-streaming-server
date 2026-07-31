@@ -16,6 +16,7 @@ The harness currently ships with staged scenarios for:
 - `scheduled.reminder`
 - `scheduled.alarm`
 - `interaction.magic_camera_photo`
+- `interaction.daycare_food_gift`
 
 Those scenarios already exercise the four core layers:
 
@@ -175,6 +176,27 @@ python3 tools/smoke/run.py run \
   --device-id 90:e5:b1:d6:fb:0c \
   --label "shared smoke magic camera"
 ```
+
+### Example: Daycare Food + Gift Smoke
+
+The environment config must select Firestore `development` and provide the
+deployed Daycare URL plus the Firebase web API key. The API key is public
+Firebase client configuration, not a server credential.
+
+```bash
+/Users/yan/Desktop/BabyMilu/.venv/bin/python tools/smoke/run.py run \
+  --config tools/smoke/environments/daycare-miffy-dev.local.json \
+  --scenario interaction.daycare_food_gift \
+  --uid auto-daycare \
+  --timeout-seconds 300 \
+  --label "miffy-dev Daycare release smoke"
+```
+
+The scenario creates a disposable Firebase email/password identity, seeds an
+isolated user and character in the named database, runs authenticated Food and
+Gift text actions through preview and Send, validates each signed private
+image, reverses its synthetic economy counters, and removes Firebase Auth,
+Firestore, and Storage test data.
 
 ## Codex Workflow
 

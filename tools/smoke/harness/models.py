@@ -24,6 +24,9 @@ class EnvironmentConfig:
     compose_service: str = "server"
     compose_workdir: str = "/opt/xiaozhi-esp32-server"
     server_log_command_template: str = ""
+    firestore_database: str = "(default)"
+    daycare_url: str = ""
+    firebase_api_key: str = ""
     notes: str = ""
 
 
