@@ -17,6 +17,7 @@ The harness currently ships with staged scenarios for:
 - `scheduled.alarm`
 - `interaction.magic_camera_photo`
 - `interaction.daycare_food_gift`
+- `device.pair_and_deliver_animation`
 
 Those scenarios already exercise the four core layers:
 
@@ -197,6 +198,29 @@ isolated user and character in the named database, runs authenticated Food and
 Gift text actions through preview and Send, validates each signed private
 image, reverses its synthetic economy counters, and removes Firebase Auth,
 Firestore, and Storage test data.
+
+### Example: Authenticated Device Pairing And Animation Delivery
+
+This release gate uses `cloud` + `live-shape` against Firestore
+`development`. It creates disposable Firebase and device identities, verifies
+the atomic claim and Supabase refresh for device and non-device characters,
+validates `test.bin` plus its checksum, captures the MQTT update, and downloads
+the immutable asset as a simulated device.
+
+```bash
+python3 -m venv .smoke-venv
+.smoke-venv/bin/pip install -r tools/smoke/requirements.txt
+.smoke-venv/bin/python tools/smoke/run.py preflight --env device-flow
+.smoke-venv/bin/python tools/smoke/run.py run \
+  --env device-flow \
+  --scenario device.pair_and_deliver_animation \
+  --uid synthetic-device-flow \
+  --timeout-seconds 180
+```
+
+Provide Firebase, Supabase database, miffy-dev API, GCS and MQTT configuration
+only through environment variables or a gitignored `.local.json` file. The
+scenario deletes its Firebase, Firestore, Supabase and GCS state in `finally`.
 
 ## Codex Workflow
 

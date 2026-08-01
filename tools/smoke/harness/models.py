@@ -27,6 +27,11 @@ class EnvironmentConfig:
     firestore_database: str = "(default)"
     daycare_url: str = ""
     firebase_api_key: str = ""
+    device_api_url: str = ""
+    user_api_url: str = ""
+    character_api_url: str = ""
+    device_bin_url: str = ""
+    device_assets_bucket: str = "milu-public-new"
     notes: str = ""
 
 
