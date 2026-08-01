@@ -6,6 +6,7 @@ from .scenario import BaseScenario
 from .scenarios.interaction import MagicCameraPhotoScenario
 from .scenarios.daycare import DaycareFoodGiftScenario
 from .scenarios.scheduled import ScheduledAlarmScenario, ScheduledReminderScenario
+from .scenarios.device_flow import DevicePairAndDeliverAnimationScenario
 
 
 @dataclass
@@ -16,6 +17,15 @@ class ScenarioDescriptor:
 
 
 SCENARIOS = {
+    "device.pair_and_deliver_animation": ScenarioDescriptor(
+        name="device.pair_and_deliver_animation",
+        description=(
+            "Create isolated authenticated users, atomically claim a device, "
+            "verify Supabase refresh, generate and checksum test.bin, capture "
+            "the MQTT command, and simulate the device download."
+        ),
+        cls=DevicePairAndDeliverAnimationScenario,
+    ),
     "scheduled.reminder": ScenarioDescriptor(
         name="scheduled.reminder",
         description="Create an app-shaped reminder, trigger the scheduler, and verify Firestore plus plushie/app side effects.",

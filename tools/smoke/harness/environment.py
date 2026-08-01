@@ -71,6 +71,13 @@ def load_environment(name: str, explicit: str | None = None) -> EnvironmentConfi
                 "BABYMILU_SMOKE_FIREBASE_API_KEY",
                 "",
             ),
+            "device_api_url": os.environ.get("BABYMILU_SMOKE_DEVICE_API_URL", ""),
+            "user_api_url": os.environ.get("BABYMILU_SMOKE_USER_API_URL", ""),
+            "character_api_url": os.environ.get("BABYMILU_SMOKE_CHARACTER_API_URL", ""),
+            "device_bin_url": os.environ.get("BABYMILU_SMOKE_DEVICE_BIN_URL", ""),
+            "device_assets_bucket": os.environ.get(
+                "BABYMILU_SMOKE_DEVICE_ASSETS_BUCKET", "milu-public-new"
+            ),
             "notes": os.environ.get("BABYMILU_SMOKE_NOTES", ""),
         }
     else:
@@ -88,6 +95,11 @@ def load_environment(name: str, explicit: str | None = None) -> EnvironmentConfi
         payload.setdefault("firestore_database", "(default)")
         payload.setdefault("daycare_url", "")
         payload.setdefault("firebase_api_key", "")
+        payload.setdefault("device_api_url", "")
+        payload.setdefault("user_api_url", "")
+        payload.setdefault("character_api_url", "")
+        payload.setdefault("device_bin_url", "")
+        payload.setdefault("device_assets_bucket", "milu-public-new")
         payload.setdefault("notes", "")
 
     artifact_root = payload["artifact_root"]
@@ -114,6 +126,11 @@ def load_environment(name: str, explicit: str | None = None) -> EnvironmentConfi
         firestore_database=payload["firestore_database"],
         daycare_url=payload["daycare_url"],
         firebase_api_key=payload["firebase_api_key"],
+        device_api_url=payload["device_api_url"],
+        user_api_url=payload["user_api_url"],
+        character_api_url=payload["character_api_url"],
+        device_bin_url=payload["device_bin_url"],
+        device_assets_bucket=payload["device_assets_bucket"],
         notes=payload["notes"],
     )
     setattr(env, "source_path", str(source_path) if source_path else "<env-vars>")

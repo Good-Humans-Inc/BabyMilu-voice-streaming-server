@@ -220,3 +220,21 @@ It uses a disposable Firebase identity and the named `development` Firestore
 database, proves Food and Gift through private image download and Send
 completion, and removes its Auth, Firestore, Storage, and synthetic economy
 effects during cleanup.
+
+## Authenticated device pairing and animation delivery
+
+`device.pair_and_deliver_animation` runs in `cloud` + `live-shape` mode against
+the named `development` database. Passing requires observable evidence that:
+
+1. Missing Firebase authentication is rejected.
+2. The verified UID atomically owns both user and device records.
+3. The active character is derived server-side and claim replay is idempotent.
+4. Profile/voice writes refresh Supabase for device and non-device characters.
+5. `device_bin/<MAC>/test.bin` and `test.bin.sha256` exist and match.
+6. MQTT publishes `remote_anim_update` with matching identity and SHA-256.
+7. A simulated device downloads the immutable HTTPS asset and validates it.
+
+The scenario uses a unique locally administered MAC and disposable Firebase
+identity. Cleanup deletes its Firebase, Firestore, Supabase, and GCS state. A
+failure is a release blocker; `scenario-details.json` identifies the first
+unmet external contract without recording credentials.
