@@ -446,7 +446,12 @@ class DevicePairAndDeliverAnimationScenario(BaseScenario):
             binary_blob = bucket.blob(f"{device_prefix}test.bin")
             checksum_blob = bucket.blob(f"{device_prefix}test.bin.sha256")
             binary = binary_blob.download_as_bytes()
-            checksum = checksum_blob.download_as_text().strip().lower()
+            checksum_line = checksum_blob.download_as_text().strip().lower()
+            checksum_match = re.fullmatch(
+                r"([0-9a-f]{64})  test\.bin",
+                checksum_line,
+            )
+            checksum = checksum_match.group(1) if checksum_match else ""
             digest = hashlib.sha256(binary).hexdigest()
             if not binary or not _SHA256.fullmatch(checksum) or checksum != digest:
                 raise AssertionError("test.bin or its SHA-256 sidecar is invalid")
