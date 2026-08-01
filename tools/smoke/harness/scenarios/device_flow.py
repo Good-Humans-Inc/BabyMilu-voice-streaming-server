@@ -267,7 +267,12 @@ class DevicePairAndDeliverAnimationScenario(BaseScenario):
         deleted = 0
         for prefix in prefixes:
             for blob in client.list_blobs(bucket_name, prefix=prefix):
-                blob.delete()
+                blob.reload()
+                generation = int(blob.generation)
+                if blob.temporary_hold is True:
+                    blob.temporary_hold = False
+                    blob.patch(if_generation_match=generation)
+                blob.delete(if_generation_match=generation)
                 deleted += 1
         return deleted
 
