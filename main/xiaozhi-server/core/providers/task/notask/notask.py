@@ -15,7 +15,14 @@ class TaskProvider(TaskProviderBase):
         super().__init__(config)
         logger.bind(tag=TAG).debug("初始化无任务检测模式")
 
-    async def detect_task(self, msgs, tasks=None, user_id=None):
+    async def detect_task(
+        self,
+        msgs,
+        tasks=None,
+        user_id=None,
+        character_name=None,
+        device_id=None,
+    ):
         """
         No-op task detection
         
@@ -24,4 +31,3 @@ class TaskProvider(TaskProviderBase):
         """
         logger.bind(tag=TAG).debug("notask mode: 跳过任务检测")
         return []
-

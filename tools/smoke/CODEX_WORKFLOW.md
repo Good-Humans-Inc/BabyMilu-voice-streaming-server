@@ -121,6 +121,150 @@ python3 tools/smoke/run.py run \
   --label "codex shared alarm smoke"
 ```
 
+Timezone recalculation example (local Firestore emulator only):
+
+```bash
+cd /Users/yan/Desktop/BabyMilu/.worktrees/voice-server-timezone-schedule-recalculation
+export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
+export BABYMILU_SMOKE_ENVIRONMENT_TYPE=local-compose
+export BABYMILU_SMOKE_DATA_MODE=isolated
+export BABYMILU_SMOKE_PROJECT=demo-babymilu
+export BABYMILU_SMOKE_MQTT_HOST=127.0.0.1
+export BABYMILU_SMOKE_WS_URL=ws://127.0.0.1:8000
+export BABYMILU_SMOKE_COMPOSE_PROJECT_DIR="$PWD"
+export BABYMILU_SMOKE_SCHEDULER_TRIGGER=entrypoint
+export BABYMILU_SMOKE_SCHEDULER_ENTRYPOINT=services.alarms.cloud.functions:scan_due_scheduled_items
+```
+
+In a separate terminal, start the backend branch's guarded emulator worker:
+
+```bash
+cd /path/to/babymilu-backend
+export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
+python3 src/commands/run-user-timezone-worker-local.py \
+  --project demo-babymilu \
+  --database development \
+  --uid smoke-timezone-user
+```
+
+Then run:
+
+```bash
+python3 tools/smoke/run.py preflight --env timezone-local
+python3 tools/smoke/run.py run \
+  --env timezone-local \
+  --scenario scheduled.timezone_recalculation \
+  --uid smoke-timezone-user \
+  --from-timezone America/Los_Angeles \
+  --to-timezone America/New_York
+```
+
+This scenario hard-fails unless it sees `local-compose` + `isolated`,
+`FIRESTORE_EMULATOR_HOST`, and a `demo-*` project ID. It verifies the Firestore
+timezone-update worker only; it does not invoke a cloud endpoint, due-item
+scheduler, MQTT, or websocket runtime.
+
+The dual-database rollout requires direct worker coverage for both
+`development` and `(default)`. Start a second development worker for the
+phone-keyed Daily Call fixture:
+
+```bash
+cd /path/to/babymilu-backend
+export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
+python3 src/commands/run-user-timezone-worker-local.py \
+  --project demo-babymilu \
+  --database development \
+  --uid +15550001111
+```
+
+Back in the voice-server smoke terminal, run the Daily Call cursor contract
+with the same fresh E.164 fixture:
+
+```bash
+python3 tools/smoke/run.py run \
+  --env timezone-local \
+  --scenario scheduled.daily_call_timezone_recalculation \
+  --uid +15550001111 \
+  --from-timezone America/Los_Angeles \
+  --to-timezone America/New_York
+```
+
+Both development artifacts must report `database=development`. The Daily Call
+artifact verifies that billing, consumed-day, character, retry, and
+compensation fields are unchanged.
+
+Start a third guarded worker against `(default)` with one fresh E.164 fixture
+allowlisted for both default scenarios:
+
+```bash
+cd /path/to/babymilu-backend
+export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
+python3 src/commands/run-user-timezone-worker-local.py \
+  --project demo-babymilu \
+  --database '(default)' \
+  --uid +15550002222
+```
+
+Run both direct default-worker contracts:
+
+```bash
+python3 tools/smoke/run.py run \
+  --env timezone-local \
+  --scenario scheduled.default_timezone_recalculation \
+  --uid +15550002222 \
+  --from-timezone America/Los_Angeles \
+  --to-timezone America/New_York
+
+python3 tools/smoke/run.py run \
+  --env timezone-local \
+  --scenario scheduled.default_daily_call_timezone_recalculation \
+  --uid +15550002222 \
+  --from-timezone America/Los_Angeles \
+  --to-timezone America/New_York
+```
+
+The default artifacts must report `database=(default)` and have scenario names
+that include `default`. All four timezone scenarios refuse cloud,
+`live-shape`, non-`demo-*` projects, missing `FIRESTORE_EMULATOR_HOST`, and
+occupied synthetic fixtures. These direct scenarios do not exercise the
+cross-database UID/phone bridge; backend worker tests remain the contract for
+that propagation.
+
+For an explicitly approved deployed-worker rollout, use the separate
+`cloud` + `live-shape` scenario. Do not repurpose the emulator scenarios or
+change its constants. The operator must approve these exact disposable trees:
+
+```text
+development/users/codex-timezone-live-smoke-20260726
+(default)/users/+15550003333
+```
+
+The fixed reminder, schedule, and Daily Call descendants are recorded in the
+scenario artifact. Run preflight first, then:
+
+```bash
+python3 tools/smoke/run.py run \
+  --env staging \
+  --scenario scheduled.cloud_timezone_worker_recalculation \
+  --uid codex-timezone-live-smoke-20260726 \
+  --from-timezone America/Los_Angeles \
+  --to-timezone America/New_York \
+  --direct-default-timezone America/Chicago \
+  --confirm-live-timezone-smoke RUN_LIVE_TIMEZONE_WORKER_SMOKE_20260726 \
+  --timeout-seconds 180
+```
+
+The scenario refuses a different project, environment mode, UID, confirmation,
+Firestore emulator, `--keep-docs`, `--skip-preflight`, occupied user subtree,
+matching legacy
+top-level schedule, unexpected worker identity/filter, or public/additional
+service-local Run Invoker. Project-level named invokers are audited into the
+artifact; public project members are refused. The scenario also requires the
+effective unauthenticated HTTP probe to be denied. Fixture creation is atomic
+create-only; all subsequent updates and cleanup deletes require the exact
+current run marker. Its `finally` path must report both trees and all matching
+legacy queries empty before the result is considered successful.
+
 Magic Camera example:
 
 ```bash

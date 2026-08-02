@@ -26,8 +26,10 @@ services:
     working_dir: /opt/xiaozhi-esp32-server
 
     environment:
-      GOOGLE_APPLICATION_CREDENTIALS: /opt/secrets/gcp/sa.json
       GOOGLE_CLOUD_PROJECT: composed-augury-469200-g6
+      BABYMILU_ALLOW_GCP_KEY_FILES: "false"
+      BABYMILU_TASK_API_BASE_URL: https://us-central1-composed-augury-469200-g6.cloudfunctions.net/tasks-api-miffy-dev
+      BABYMILU_TASK_API_TIMEOUT_SECONDS: ${BABYMILU_TASK_API_TIMEOUT_SECONDS:-4.0}
       MQTT_ENDPOINT: 35.188.112.96
       MQTT_URL: mqtt://mqtt:1883
       SERVER_EXTERNAL_IP: 35.188.112.96
@@ -66,12 +68,6 @@ services:
         bind:
           create_host_path: true
 
-      # 3) GCP Service Account
-      - type: bind
-        source: /srv/dev/current/data/.gcp/sa.json
-        target: /opt/secrets/gcp/sa.json
-        read_only: true
-        
 networks:
   default:
     name: current_default

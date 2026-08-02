@@ -3,6 +3,7 @@ LLM-based Task Detection Provider
 Uses LLM to detect and match tasks from conversation against user's assigned tasks
 """
 
+import asyncio
 import json
 import time
 from ..base import TaskProviderBase, logger
@@ -20,7 +21,7 @@ Conversation:
 User's assigned tasks:
 {tasks}
 
-Carefully analyze the conversation content to determine if any of the above tasks were discussed, mentioned, or completed.
+Carefully analyze the conversation content to determine if any of the above tasks were discussed, mentioned, or completed. A task whose action is "greet" is complete whenever the user has made any substantive, non-empty conversational utterance. The user does not need to use a greeting word or explicitly address the character.
 Return your response as a structured JSON object with a "tasks" array containing any matched tasks."""
 
 TASK_DETECTION_PROMPT_CN = """分析以下对话内容，判断是否与用户的已分配任务相关。
@@ -31,7 +32,7 @@ TASK_DETECTION_PROMPT_CN = """分析以下对话内容，判断是否与用户�
 用户的已分配任务：
 {tasks}
 
-仔细分析对话内容，确定是否讨论、提及或完成了上述任何任务。
+仔细分析对话内容，确定是否讨论、提及或完成了上述任何任务。对于 action 为 "greet" 的任务，只要用户说了任何实质性的、非空的话，就视为完成；用户不需要使用问候词或明确称呼角色。
 将响应作为结构化 JSON 对象返回，包含一个 "tasks" 数组，其中包含所有匹配的任务。"""
 
 # Manual JSON schema for OpenAI structured outputs
@@ -75,7 +76,14 @@ class TaskProvider(TaskProviderBase):
         self.temperature = config.get("temperature", 0.5)
         self.stateless = config.get("stateless", True)
         
-    async def detect_task(self, msgs, tasks=None, user_id=None, character_name=None):
+    async def detect_task(
+        self,
+        msgs,
+        tasks=None,
+        user_id=None,
+        character_name=None,
+        device_id=None,
+    ):
         """
         Detect tasks from conversation messages
         
@@ -83,15 +91,12 @@ class TaskProvider(TaskProviderBase):
             msgs: List of conversation messages (Message objects or dicts)
             tasks: user's assigned tasks text (optional, can be provided later)
             user_id: User ID for logging purposes
+            device_id: Active connection device ID used for backend ownership binding
             
         Returns:
             list: Matched tasks with format:
                   [{"task_id": "...", "task_action": "...", "match_reason": "..."}, ...]
         """
-        if not self.llm:
-            logger.bind(tag=TAG).warning("LLM未初始化，无法检测任务")
-            return []
-            
         if not msgs or len(msgs) == 0:
             logger.bind(tag=TAG).debug("对话为空，跳过任务检测")
             return []
@@ -114,20 +119,49 @@ class TaskProvider(TaskProviderBase):
                     tasks_text = tasks
                 else:
                     assigned_tasks = list(tasks)
-                    tasks_text = self._build_tasks_text_from_list(
-                        assigned_tasks, character_name
-                    )
             else:
                 # Fetch user's assigned tasks
-                assigned_tasks = get_assigned_tasks_for_user(user_id)
+                assigned_tasks = await asyncio.to_thread(
+                    get_assigned_tasks_for_user,
+                    device_id,
+                )
 
-                # Build tasks text
+            # A greeting task measures a successful conversation check-in, not
+            # keyword recognition. Complete it deterministically so a classifier
+            # prompt (or an unavailable LLM) cannot miss a real user utterance.
+            completed_greeting_tasks = self._matched_greeting_tasks(
+                msgs, assigned_tasks
+            )
+            if completed_greeting_tasks:
+                greeting_persisted = await asyncio.to_thread(
+                    process_user_action,
+                    device_id,
+                    completed_greeting_tasks,
+                )
+                if greeting_persisted:
+                    assigned_tasks = [
+                        task
+                        for task in assigned_tasks
+                        if task.get("actionConfig", {}).get("action") != "greet"
+                    ]
+                else:
+                    logger.bind(tag=TAG).error(
+                        "Greeting task completion was not persisted; leaving it active"
+                    )
+                    completed_greeting_tasks = []
+
+            if isinstance(tasks, str):
+                tasks_text = tasks
+            else:
                 tasks_text = self._build_tasks_text_from_list(
                     assigned_tasks, character_name
                 )
             if not tasks_text:
-                logger.bind(tag=TAG).debug(f"用户 {user_id} 没有分配的任务，跳过任务检测")
-                return []
+                return completed_greeting_tasks
+
+            if not self.llm:
+                logger.bind(tag=TAG).warning("LLM未初始化，无法检测任务")
+                return completed_greeting_tasks
             # Get appropriate prompt template
             prompt_template = TASK_DETECTION_PROMPT_CN if self.use_chinese else TASK_DETECTION_PROMPT
             
@@ -186,15 +220,54 @@ class TaskProvider(TaskProviderBase):
                 logger.bind(tag=TAG).info(
                     f"任务检测完成 - 用户: {user_id}, 匹配任务数: {len(matched_tasks)}"
                 )
-                process_user_action(user_id, matched_tasks)
-                return matched_tasks
+                await asyncio.to_thread(
+                    process_user_action,
+                    device_id,
+                    matched_tasks,
+                )
+                return completed_greeting_tasks + matched_tasks
             else:
                 logger.bind(tag=TAG).debug(f"任务检测完成 - 用户: {user_id}, 无匹配任务")
-                return []
+                return completed_greeting_tasks
                 
         except Exception as e:
             logger.bind(tag=TAG).error(f"任务检测失败: {e}", exc_info=True)
             return []
+
+    @staticmethod
+    def _matched_greeting_tasks(msgs, assigned_tasks):
+        """Return greeting tasks after any non-empty user utterance.
+
+        Product policy treats a greeting as a conversation check-in. It must be
+        deterministic, rather than relying on an LLM to identify a greeting word.
+        """
+        if not assigned_tasks or not TaskProvider._has_user_utterance(msgs):
+            return []
+
+        matches = []
+        for task in assigned_tasks:
+            if task.get("actionConfig", {}).get("action") == "greet":
+                matches.append(
+                    {
+                        "task_id": task.get("id", "unknown"),
+                        "task_action": "greet",
+                        "match_reason": "User participated in a conversation.",
+                    }
+                )
+        return matches
+
+    @staticmethod
+    def _has_user_utterance(msgs):
+        for msg in msgs:
+            if hasattr(msg, "role") and hasattr(msg, "content"):
+                role, content = msg.role, msg.content
+            elif isinstance(msg, dict):
+                role, content = msg.get("role"), msg.get("content")
+            else:
+                continue
+            if role == "user" and isinstance(content, str) and content.strip():
+                return True
+        return False
     
     def _build_conversation_text(self, msgs):
         """Build conversation text from messages"""

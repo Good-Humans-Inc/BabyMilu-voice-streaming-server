@@ -596,7 +596,7 @@ class ConnectionHandler:
                         refreshed_prompt += "\nUser profile:\n" + "\n- ".join(user_parts)
 
                     task_str = query_task(
-                        owner_phone,
+                        self.device_id,
                         fields.get("name") if isinstance(fields, dict) else None,
                         user_fields.get("name")
                         if isinstance(user_fields, dict)
@@ -885,7 +885,7 @@ class ConnectionHandler:
 
                 try:
                     task_str = query_task(
-                        owner_phone,
+                        self.device_id,
                         fields.get("name") if isinstance(fields, dict) else None,
                         user_fields.get("name")
                         if isinstance(user_fields, dict)
@@ -1086,12 +1086,12 @@ class ConnectionHandler:
             self.logger.bind(tag=TAG).error(f"生成AI对话摘要失败: {e}")
             return None
 
-    def check_conversation_against_tasks(self, user_id: str):
+    def check_conversation_against_tasks(self, device_id: str):
         """
         检查当前对话内容是否匹配用户的已分配任务
 
         Args:
-            user_id: 用户ID，用于获取分配的任务列表
+            device_id: 当前连接设备ID；后端据此解析任务所有者
 
         Returns:
             list: 匹配的任务列表，每个任务包含任务信息和匹配原因
@@ -1103,9 +1103,9 @@ class ConnectionHandler:
                 return []
 
             # 获取用户分配的任务
-            tasks = get_assigned_tasks_for_user(user_id)
+            tasks = get_assigned_tasks_for_user(device_id)
             if not tasks or len(tasks) == 0:
-                self.logger.bind(tag=TAG).debug(f"用户 {user_id} 没有分配的任务")
+                self.logger.bind(tag=TAG).debug(f"设备 {device_id} 的所有者没有分配的任务")
                 return []
 
             # 获取当前对话
@@ -1292,12 +1292,12 @@ Return ONLY the JSON array, no other explanation."""
             self.logger.bind(tag=TAG).error(f"生成AI对话摘要失败: {e}")
             return None
 
-    def check_conversation_against_tasks(self, user_id: str):
+    def check_conversation_against_tasks(self, device_id: str):
         """
         检查当前对话内容是否匹配用户的已分配任务
 
         Args:
-            user_id: 用户ID，用于获取分配的任务列表
+            device_id: 当前连接设备ID；后端据此解析任务所有者
 
         Returns:
             list: 匹配的任务列表，每个任务包含任务信息和匹配原因
@@ -1309,9 +1309,9 @@ Return ONLY the JSON array, no other explanation."""
                 return []
 
             # 获取用户分配的任务
-            tasks = get_assigned_tasks_for_user(user_id)
+            tasks = get_assigned_tasks_for_user(device_id)
             if not tasks or len(tasks) == 0:
-                self.logger.bind(tag=TAG).debug(f"用户 {user_id} 没有分配的任务")
+                self.logger.bind(tag=TAG).debug(f"设备 {device_id} 的所有者没有分配的任务")
                 return []
 
             # 获取当前对话
@@ -1475,12 +1475,9 @@ Return ONLY the JSON array, no other explanation."""
                             )
                             matched_tasks = []
                             try:
-                                # 获取用户ID (使用owner_phone作为user_id)
                                 if self.device_id and not use_task_provider:
-                                    owner_phone = get_owner_phone_for_device(self.device_id)
-                                    if owner_phone:
-                                        matched_tasks = self.check_conversation_against_tasks(owner_phone)
-                                        process_user_action(owner_phone, matched_tasks)
+                                    matched_tasks = self.check_conversation_against_tasks(self.device_id)
+                                    process_user_action(self.device_id, matched_tasks)
                             except Exception as task_err:
                                 self.logger.bind(tag=TAG).warning(f"检查任务匹配失败: {task_err}")
 
@@ -1541,7 +1538,11 @@ Return ONLY the JSON array, no other explanation."""
                         # Only add task detection if task provider has the method
                         if self.task and hasattr(self.task, 'detect_task'):
                             coroutines.append(
-                                self.task.detect_task(self.dialogue.dialogue, user_id=owner_phone)
+                                self.task.detect_task(
+                                    self.dialogue.dialogue,
+                                    user_id=owner_phone,
+                                    device_id=self.device_id,
+                                )
                             )
 
                         # Run all coroutines concurrently

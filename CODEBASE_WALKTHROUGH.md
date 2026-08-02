@@ -305,6 +305,11 @@ VUE_APP_API_BASE_URL=http://localhost:8002
 #### Required Environment Variables (Optional - can use config file)
 - `GOOGLE_APPLICATION_CREDENTIALS`: Path to GCP service account JSON (for Firestore)
 - `GOOGLE_CLOUD_PROJECT`: GCP project ID
+- `BABYMILU_TASK_API_BASE_URL`: Must equal
+  `https://us-central1-composed-augury-469200-g6.cloudfunctions.net/tasks-api-miffy-dev`
+- `BABYMILU_TASK_API_TIMEOUT_SECONDS`: Task API HTTP timeout (default `4.0`)
+- `BABYMILU_ALLOW_GCP_KEY_FILES=false`: VM-only fail-safe that prevents a
+  stale mounted JSON key from shadowing the attached service account
 - `MQTT_URL`: MQTT broker URL (e.g., `mqtt://localhost:1883`)
 - `TZ`: Timezone (e.g., `Asia/Shanghai`)
 - `PYTHONUNBUFFERED`: Set to `1` for Docker logging
@@ -316,6 +321,12 @@ All API keys and secrets should be configured here:
 - ASR API keys
 - Plugin API keys (weather, etc.)
 - Manager API secret (if using manager-api)
+
+The task API is a stricter exception to the general optional JSON-key setup
+above. Its caller uses Google OIDC from ADC/VM metadata and is accepted only as
+`babymilu-production-server@composed-augury-469200-g6.iam.gserviceaccount.com`.
+It sends the active device ID and never sends a uid, phone number, shared
+internal key, or service-account JSON key.
 
 ### Java Backend (manager-api)
 

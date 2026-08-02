@@ -192,7 +192,7 @@ def test_config_exposes_new_reminder_tools_and_preserves_magic_camera():
     assert "      - cancel_reminder\n" in text
     assert "      - modify_reminder\n" in text
     assert "      - complete_reminder\n" in text
-    assert "      - inspect_recent_magic_camera_photo\n" in text
+    assert "      - inspect_recent_photo\n" in text
     assert "      - set_reminder\n" not in text
 
 

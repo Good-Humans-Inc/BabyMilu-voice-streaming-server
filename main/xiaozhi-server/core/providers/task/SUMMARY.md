@@ -62,7 +62,8 @@ task_provider.init_task(role_id="user_123", llm=llm_instance)
 matched = await task_provider.detect_task(
     msgs=conversation,
     tasks=user_tasks,
-    user_id="user_123"
+    user_id="user_123",
+    device_id="90:e5:b1:d6:f8:58",
 )
 ```
 
@@ -127,8 +128,10 @@ matched_tasks = await self.detect_tasks_from_conversation(owner_phone)
 async def detect_task(
     self, 
     msgs,           # List[Message] or List[dict]
-    tasks=None,     # List[dict] from get_assigned_tasks_for_user()
-    user_id=None    # str for logging
+    tasks=None,        # List[dict] from get_assigned_tasks_for_user(device_id)
+    user_id=None,      # str for local logging only
+    character_name=None,
+    device_id=None,    # active connection device for backend ownership binding
 ) -> List[dict]:
     """Returns: [{"task_id": str, "task_action": str, "match_reason": str}, ...]"""
 ```
@@ -293,4 +296,3 @@ For issues or questions:
 **Created**: 2025-11-12  
 **Version**: 1.0  
 **Compatible with**: BabyMilu Voice Streaming Server
-

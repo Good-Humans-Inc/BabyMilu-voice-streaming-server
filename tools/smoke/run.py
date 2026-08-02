@@ -92,6 +92,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--prompt",
         help="Optional free-form prompt for future interaction scenarios",
     )
+    run.add_argument(
+        "--from-timezone",
+        default="America/Los_Angeles",
+        help="Original IANA timezone for timezone-recalculation scenarios",
+    )
+    run.add_argument(
+        "--to-timezone",
+        default="America/New_York",
+        help="Replacement IANA timezone for timezone-recalculation scenarios",
+    )
+    run.add_argument(
+        "--direct-default-timezone",
+        default="America/Chicago",
+        help=(
+            "Second replacement IANA timezone used by the guarded live cloud "
+            "timezone-worker scenario"
+        ),
+    )
+    run.add_argument(
+        "--confirm-live-timezone-smoke",
+        default="",
+        help=(
+            "Exact non-secret confirmation required by the allowlisted live "
+            "cloud timezone-worker scenario"
+        ),
+    )
 
     return parser
 
@@ -118,7 +144,14 @@ async def handle_run(args: argparse.Namespace) -> int:
     )
     result = await scenario.run(context)
     writer.write_json("result.json", result.to_dict(), artifact_dir)
-    print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            result.to_dict(),
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
+    )
     return 0 if result.success else 1
 
 
