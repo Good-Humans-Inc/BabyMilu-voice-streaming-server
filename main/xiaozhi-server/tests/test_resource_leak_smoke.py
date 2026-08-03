@@ -249,6 +249,10 @@ def _drain_audio_queue(provider):
             return items
 
 
+def _audio_item_core(item):
+    return item[:3]
+
+
 def _assert_owned_sessions(factory):
     assert factory.session_enter_count == factory.session_exit_count
     assert factory.response_enter_count == factory.response_exit_count
@@ -557,7 +561,8 @@ def test_fish_websocket_streams_llm_text_without_local_sentence_chunking(monkeyp
     assert ws.sent[-1] == {"event": "stop"}
 
     audio_items = _drain_audio_queue(provider)
-    assert audio_items[0] == (
+    audio_item_cores = [_audio_item_core(item) for item in audio_items]
+    assert audio_item_cores[0] == (
         SentenceType.FIRST,
         [],
         (
@@ -565,8 +570,8 @@ def test_fish_websocket_streams_llm_text_without_local_sentence_chunking(monkeyp
             "so no more slacking! Let's unleash that power!"
         ),
     )
-    assert (SentenceType.MIDDLE, b"opus", None) in audio_items
-    assert audio_items[-1] == (SentenceType.LAST, [], None)
+    assert (SentenceType.MIDDLE, b"opus", None) in audio_item_cores
+    assert audio_item_cores[-1] == (SentenceType.LAST, [], None)
 
 
 def test_fish_websocket_adds_fallback_tag_when_llm_omits_one(monkeypatch):

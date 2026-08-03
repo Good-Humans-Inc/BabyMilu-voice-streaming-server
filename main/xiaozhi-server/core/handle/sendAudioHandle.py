@@ -6,6 +6,7 @@ from core.utils.util import audio_to_data
 from core.providers.tts.dto.dto import SentenceType
 
 TAG = __name__
+DEFAULT_TTS_START_AUDIO_GRACE_MS = 120
 
 
 def _release_vad_for_tts(conn):
@@ -14,11 +15,58 @@ def _release_vad_for_tts(conn):
         release_vad(reset_connection_state=False)
 
 
-async def sendAudioMessage(conn, sentenceType, audios, text):
+def _active_utterance_id(conn):
+    return getattr(conn, "active_tts_sentence_id", None) or getattr(
+        conn, "sentence_id", None
+    )
+
+
+def _audio_frame_count(audios):
+    if audios is None:
+        return 0
+    if isinstance(audios, bytes):
+        return 1
+    try:
+        return len(audios)
+    except Exception:
+        return 0
+
+
+def _tts_start_audio_grace_seconds(conn):
+    try:
+        value = conn.config.get(
+            "tts_start_audio_grace_ms", DEFAULT_TTS_START_AUDIO_GRACE_MS
+        )
+        return max(0, int(value)) / 1000
+    except Exception:
+        return DEFAULT_TTS_START_AUDIO_GRACE_MS / 1000
+
+
+async def sendAudioMessage(conn, sentenceType, audios, text, sentence_id=None):
+    active_sentence_id = getattr(conn, "active_tts_sentence_id", None)
+    if sentence_id and sentence_id != active_sentence_id:
+        conn.logger.bind(tag=TAG).warning(
+            "Dropping stale TTS audio/control: "
+            f"sentence_type={sentenceType} sentence_id={sentence_id} "
+            f"active_sentence_id={active_sentence_id} text={text!r}"
+        )
+        return
+
+    if sentence_id:
+        conn.active_tts_sentence_id = sentence_id
+
     if conn.tts.tts_audio_first_sentence:
         conn.logger.bind(tag=TAG).info(f"发送第一段语音: {text}")
         conn.tts.tts_audio_first_sentence = False
+        conn.logger.bind(tag=TAG).info(
+            "TTS first audio ready; sending tts:start: "
+            f"utterance_id={_active_utterance_id(conn)} "
+            f"sentence_type={sentenceType} frames={_audio_frame_count(audios)}"
+        )
         await send_tts_message(conn, "start", None)
+        grace_seconds = _tts_start_audio_grace_seconds(conn)
+        if grace_seconds > 0:
+            await asyncio.sleep(grace_seconds)
 
     if sentenceType == SentenceType.FIRST:
         _release_vad_for_tts(conn)
@@ -35,6 +83,8 @@ async def sendAudioMessage(conn, sentenceType, audios, text):
     if sentenceType == SentenceType.LAST:
         await send_tts_message(conn, "stop", None)
         conn.client_is_speaking = False
+        if not sentence_id or sentence_id == getattr(conn, "active_tts_sentence_id", None):
+            conn.active_tts_sentence_id = None
         if conn.close_after_chat:
             await conn.close()
 
@@ -200,8 +250,16 @@ async def send_tts_message(conn, state, text=None):
     if text is None and state == "sentence_start":
         return
     message = {"type": "tts", "state": state, "session_id": conn.session_id}
+    utterance_id = _active_utterance_id(conn)
+    if utterance_id:
+        message["utterance_id"] = utterance_id
     if text is not None:
         message["text"] = textUtils.check_emoji(text)
+    conn.logger.bind(tag=TAG).info(
+        "TTS control send: "
+        f"state={state} utterance_id={utterance_id} "
+        f"text_len={len(text) if isinstance(text, str) else 0}"
+    )
 
     # TTS播放结束
     if state == "stop":
@@ -234,7 +292,9 @@ async def send_stt_message(conn, text):
     """发送 STT 状态消息"""
     end_prompt_str = conn.config.get("end_prompt", {}).get("prompt")
     if end_prompt_str and end_prompt_str == text:
-        await send_tts_message(conn, "start")
+        conn.logger.bind(tag=TAG).info(
+            "Skipping early tts:start for end prompt until audio is ready"
+        )
         return
 
     # 解析JSON格式，提取实际的用户说话内容
@@ -256,7 +316,9 @@ async def send_stt_message(conn, text):
     await conn.websocket.send(
         json.dumps({"type": "stt", "text": stt_text, "session_id": conn.session_id})
     )
-    conn.client_is_speaking = True
+    conn.logger.bind(tag=TAG).info(
+        f"STT forwarded without early tts:start: text_len={len(stt_text)}"
+    )
     # 标记用户有语音活动，取消任何闹钟跟进
     try:
         conn.last_stt_activity_ms = int(time.time() * 1000)
@@ -265,4 +327,3 @@ async def send_stt_message(conn, text):
             conn.followup_task.cancel()
     except Exception:
         pass
-    await send_tts_message(conn, "start")
