@@ -101,7 +101,13 @@ class SessionContextStore:
         if not doc.exists:
             return None
         data = doc.to_dict() or {}
-        session = self._hydrate_session(device_id, data)
+        try:
+            session = self._hydrate_session(device_id, data)
+        except Exception as exc:
+            logger.bind(tag=TAG).warning(
+                f"Failed to read sessionContext for {device_id}: {exc}"
+            )
+            return None
         if not session:
             return None
         if session.is_expired(now):
@@ -116,7 +122,12 @@ class SessionContextStore:
                         logger.bind(tag=TAG).warning(
                             f"Expiry callback failed for {device_id}: {exc}"
                         )
-                self.delete_session(device_id)
+                try:
+                    self.delete_session(device_id)
+                except Exception as exc:
+                    logger.bind(tag=TAG).warning(
+                        f"Failed to delete expired sessionContext for {device_id}: {exc}"
+                    )
             return None
         return session
 
@@ -161,14 +172,17 @@ class SessionContextStore:
     def _hydrate_session(
         self, device_id: str, payload: Dict[str, Any]
     ) -> Optional[models.ModeSession]:
-        triggered_at = payload.get("triggeredAt")
-        if isinstance(triggered_at, str):
-            triggered_at = datetime.fromisoformat(triggered_at)
-        if not isinstance(triggered_at, datetime):
+        raw_triggered_at = payload.get("triggeredAt")
+        triggered_at = _coerce_datetime(
+            raw_triggered_at, field_name="triggeredAt", device_id=device_id
+        )
+        if triggered_at is None and isinstance(raw_triggered_at, str):
+            return None
+        if triggered_at is None:
             triggered_at = datetime.now(timezone.utc)
-        expires_at = payload.get("expiresAt")
-        if isinstance(expires_at, str):
-            expires_at = datetime.fromisoformat(expires_at)
+        expires_at = _coerce_datetime(
+            payload.get("expiresAt"), field_name="expiresAt", device_id=device_id
+        )
         ttl_seconds = payload.get("ttlSeconds") or models.DEFAULT_SESSION_TTL_SECONDS
         session_config = payload.get("sessionConfig")
         if not isinstance(session_config, dict):
@@ -200,6 +214,32 @@ class SessionContextStore:
                 f"Failed to hydrate sessionContext for {device_id}: {exc}"
             )
             return None
+
+
+def _coerce_datetime(
+    value: Any, *, field_name: str, device_id: str
+) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            logger.bind(tag=TAG).warning(
+                f"Invalid sessionContext {field_name} for {device_id}: empty string"
+            )
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError as exc:
+            logger.bind(tag=TAG).warning(
+                f"Invalid sessionContext {field_name} for {device_id}: {raw} ({exc})"
+            )
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 _DEFAULT_STORE = SessionContextStore()

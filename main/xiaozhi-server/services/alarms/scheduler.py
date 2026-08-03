@@ -96,7 +96,14 @@ def prepare_wake_requests(
                     f"Alarm {alarm.alarm_id} target is missing device_id; skipping"
                 )
                 continue
-            existing = session_context_store.get_session(target.device_id, now=now)
+            try:
+                existing = session_context_store.get_session(target.device_id, now=now)
+            except Exception as exc:
+                logger.bind(tag=TAG).warning(
+                    f"Failed to check active session for device {target.device_id}; "
+                    f"continuing with alarm {alarm.alarm_id}: {exc}"
+                )
+                existing = None
             if existing:
                 logger.bind(tag=TAG).warning(
                     f"Skipping device {target.device_id}: existing session active ({existing.session_type})"

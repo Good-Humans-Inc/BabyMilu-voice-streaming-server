@@ -79,3 +79,42 @@ def test_get_session_removes_expired(monkeypatch):
     assert result is None
     assert "DEV999" not in fake_collection.storage
 
+
+def test_get_session_accepts_z_suffix_timestamps(monkeypatch):
+    fake_collection = _FakeCollection()
+    store = session_store.SessionContextStore()
+    monkeypatch.setattr(store, "_collection", lambda: fake_collection)
+
+    fake_collection.storage["DEV999"] = {
+        "sessionType": "alarm",
+        "triggeredAt": "2024-01-01T00:00:00.000Z",
+        "ttlSeconds": 60,
+        "expiresAt": "2024-01-01T00:01:00.000Z",
+        "sessionConfig": {"mode": "morning_alarm"},
+    }
+
+    result = store.get_session(
+        "DEV999", now=datetime(2024, 1, 1, 0, 2, tzinfo=timezone.utc)
+    )
+
+    assert result is None
+    assert "DEV999" not in fake_collection.storage
+
+
+def test_get_session_ignores_malformed_triggered_timestamp(monkeypatch):
+    fake_collection = _FakeCollection()
+    store = session_store.SessionContextStore()
+    monkeypatch.setattr(store, "_collection", lambda: fake_collection)
+
+    fake_collection.storage["DEV999"] = {
+        "sessionType": "alarm",
+        "triggeredAt": "not-a-timestamp",
+        "ttlSeconds": 60,
+        "expiresAt": "2024-01-01T00:01:00.000Z",
+        "sessionConfig": {"mode": "morning_alarm"},
+    }
+
+    result = store.get_session("DEV999", now=datetime(2024, 1, 1, tzinfo=timezone.utc))
+
+    assert result is None
+
