@@ -62,6 +62,14 @@ from core.utils.next_starter_client import get_ready_next_starter
 from services.session_context import store as session_context_store
 from services.alarms.config import MODE_CONFIG
 from services import log_context
+from services.planning_call import (
+    DAILY_CALL_ONBOARDING,
+    FirestorePlanningCallStore,
+    GrantRejected,
+    consume_onboarding_hello,
+    finalize_planning_call,
+)
+from services.session_context.models import ModeSession
 
 from core.utils.api_client import query_task, get_assigned_tasks_for_user, process_user_action
 TAG = __name__
@@ -306,6 +314,9 @@ class ConnectionHandler:
         # {"mcp": true}
         self.features = None
         self.mode_session = None
+        self.planning_call_binding = None
+        self.planning_call_personalization = {}
+        self._planning_call_store = None
 
         # MQTT 网关标记
         self.conn_from_mqtt_gateway = False
@@ -666,25 +677,47 @@ class ConnectionHandler:
             # 获取并验证headers
             self.headers = dict(ws.request.headers)
 
-            if self.headers.get("device-id", None) is None:
-                # 尝试从 URL 的查询参数中获取 device-id
-                from urllib.parse import parse_qs, urlparse
+            from urllib.parse import parse_qs, urlparse
+            request_path = ws.request.path
+            if not request_path:
+                self.logger.bind(tag=TAG).error("无法获取请求路径")
+                return
+            query_params = parse_qs(urlparse(request_path).query)
+            if self.headers.get("device-id") is None and "device-id" in query_params:
+                self.headers["device-id"] = query_params["device-id"][0]
+                self.headers["client-id"] = query_params.get(
+                    "client-id", [query_params["device-id"][0]]
+                )[0]
 
-                request_path = ws.request.path
-                if not request_path:
-                    self.logger.bind(tag=TAG).error("无法获取请求路径")
-                    return
-                parsed_url = urlparse(request_path)
-                query_params = parse_qs(parsed_url.query)
-                if "device-id" in query_params:
-                    self.headers["device-id"] = query_params["device-id"][0]
-                    self.headers["client-id"] = query_params.get(
-                        "client-id", [query_params["device-id"][0]]
-                    )[0]
-                else:
-                    await ws.send("端口正常，如需测试连接，请使用test_page.html")
+            # The first frame must be hello. For onboarding, consume its opaque
+            # grant before authentication, profile/provider bootstrap, or audio.
+            try:
+                initial_message = await asyncio.wait_for(ws.recv(), timeout=10.0)
+                initial_hello = json.loads(initial_message) if isinstance(initial_message, str) else None
+            except (asyncio.TimeoutError, json.JSONDecodeError, TypeError):
+                await self.close(ws)
+                return
+            if not isinstance(initial_hello, dict) or initial_hello.get("type") != "hello":
+                await self.close(ws)
+                return
+            if initial_hello.get("connectionType") == DAILY_CALL_ONBOARDING:
+                try:
+                    self._planning_call_store = FirestorePlanningCallStore()
+                    self.planning_call_binding = await consume_onboarding_hello(
+                        initial_hello, self._planning_call_store
+                    )
+                except GrantRejected:
+                    self.logger.bind(tag=TAG).warning("Planning-call grant rejected")
                     await self.close(ws)
                     return
+                # Internal routing key only; it contains no user, character,
+                # attempt, or grant material.
+                self.headers["device-id"] = f"planning-{self.session_id}"
+                self.headers["client-id"] = self.headers["device-id"]
+            elif self.headers.get("device-id") is None:
+                await ws.send("端口正常，如需测试连接，请使用test_page.html")
+                await self.close(ws)
+                return
 
             real_ip = self.headers.get("x-real-ip") or self.headers.get(
                 "x-forwarded-for"
@@ -694,11 +727,10 @@ class ConnectionHandler:
             else:
                 self.client_ip = ws.remote_address[0]
 
-            self.logger.bind(tag=TAG).info(
-                f"{self.client_ip} conn - Headers: {self.headers}"
-            )
+            self.logger.bind(tag=TAG).info("Connection opened")
 
-            await self.auth.authenticate(self.headers)
+            if self.planning_call_binding is None:
+                await self.auth.authenticate(self.headers)
 
             # 认证通过,继续处理
             self.websocket = ws
@@ -740,6 +772,7 @@ class ConnectionHandler:
             self.bootstrap_task = asyncio.create_task(self._bootstrap_after_connect())
 
             try:
+                await self._route_message(initial_message)
                 async for message in self.websocket:
                     await self._route_message(message)
             except websockets.exceptions.ConnectionClosed:
@@ -813,8 +846,11 @@ class ConnectionHandler:
         fields = {}
 
         try:
-            char_id = None
-            if self.device_id:
+            char_id = (
+                self.planning_call_binding.character_id
+                if self.planning_call_binding else None
+            )
+            if self.device_id and not self.planning_call_binding:
                 self.logger.bind(tag=TAG).info(f"Looking up device: {self.device_id}")
                 char_id = get_active_character_for_device(self.device_id)
                 if not char_id:
@@ -829,9 +865,12 @@ class ConnectionHandler:
             if char_id:
                 self.current_character_id = char_id
                 self.active_character_id = str(char_id)
-                self.logger.bind(tag=TAG, device_id=self.device_id).info(
-                    f"Active character id: {char_id!r}"
-                )
+                if self.planning_call_binding:
+                    self.logger.bind(tag=TAG).info("Planning-call character resolved")
+                else:
+                    self.logger.bind(tag=TAG, device_id=self.device_id).info(
+                        f"Active character id: {char_id!r}"
+                    )
                 char_doc = get_character_profile(char_id)
                 fields = extract_character_profile_fields(char_doc or {})
 
@@ -864,7 +903,11 @@ class ConnectionHandler:
                     "MISSING activeCharacterId; using defaults"
                 )
 
-            owner_phone = get_owner_phone_for_device(self.device_id)
+            owner_phone = (
+                self.planning_call_binding.account_phone
+                if self.planning_call_binding
+                else get_owner_phone_for_device(self.device_id)
+            )
             if owner_phone:
                 user_id = owner_phone
                 user_doc = get_user_profile_by_phone(owner_phone)
@@ -942,16 +985,23 @@ class ConnectionHandler:
                 device_id=self.device_id,
             )
             self._session_created = True
-            self.logger.bind(tag=TAG).info(
-                f"Session created: {self.session_id} user={self.user_id}"
-            )
+            self.logger.bind(tag=TAG).info(f"Session created: {self.session_id}")
 
         if new_prompt != self.config.get("prompt", ""):
             self.config["prompt"] = new_prompt
             self.change_system_prompt(new_prompt, prompt_label="base")
 
         self._initialize_private_config()
-        self._hydrate_mode_session()
+        if self.planning_call_binding:
+            self.mode_session = ModeSession(
+                device_id=self.device_id,
+                session_type="milu_call_onboarding",
+                triggered_at=datetime.now(timezone.utc),
+                session_config={"mode": DAILY_CALL_ONBOARDING},
+            )
+            self._apply_mode_session_settings()
+        else:
+            self._hydrate_mode_session()
 
         try:
             base_prompt = self.config.get("prompt")
@@ -1467,6 +1517,19 @@ Return ONLY the JSON array, no other explanation."""
                             # 生成AI摘要
                             ai_summary = self.generate_ai_conversation_summary()
 
+                            if self.planning_call_binding and self._planning_call_store:
+                                completed = finalize_planning_call(
+                                    self._planning_call_store,
+                                    self.planning_call_binding,
+                                    personalization=self.planning_call_personalization,
+                                    summary=ai_summary,
+                                    conversation_id=self.current_conversation_id,
+                                )
+                                if not completed:
+                                    self.logger.bind(tag=TAG).warning(
+                                        "Planning-call completion ignored because the attempt changed"
+                                    )
+
                             # 检查任务匹配
                             use_task_provider = bool(
                                 self.memory
@@ -1475,7 +1538,11 @@ Return ONLY the JSON array, no other explanation."""
                             )
                             matched_tasks = []
                             try:
-                                if self.device_id and not use_task_provider:
+                                if (
+                                    self.device_id
+                                    and not use_task_provider
+                                    and not self.planning_call_binding
+                                ):
                                     matched_tasks = self.check_conversation_against_tasks(self.device_id)
                                     process_user_action(self.device_id, matched_tasks)
                             except Exception as task_err:
@@ -1487,10 +1554,14 @@ Return ONLY the JSON array, no other explanation."""
                                 f"总消息: {len(conversation)}, 用户: {user_msgs}, 助手: {assistant_msgs}"
                             )
 
-                            if ai_summary:
+                            if ai_summary and not self.planning_call_binding:
                                 log_msg += f"\nAI摘要: {ai_summary}"
 
-                            if matched_tasks and len(matched_tasks) > 0:
+                            if (
+                                not self.planning_call_binding
+                                and matched_tasks
+                                and len(matched_tasks) > 0
+                            ):
                                 log_msg += f"\nMatched tasks ({len(matched_tasks)}):"
                                 for task in matched_tasks:
                                     log_msg += f"\n  - Action: {task.get('task_action')} (ID: {task.get('task_id')}): {task.get('match_reason')}"
@@ -1515,12 +1586,19 @@ Return ONLY the JSON array, no other explanation."""
                     try:
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
-                        owner_phone = get_owner_phone_for_device(self.device_id)
+                        owner_phone = (
+                            self.planning_call_binding.account_phone
+                            if self.planning_call_binding
+                            else get_owner_phone_for_device(self.device_id)
+                        )
 
                         # Build list of coroutines to run
                         coroutines = [self.memory.save_memory(self.dialogue.dialogue)]
-                        char_id = None
-                        if self.device_id:
+                        char_id = (
+                            self.planning_call_binding.character_id
+                            if self.planning_call_binding else None
+                        )
+                        if self.device_id and not self.planning_call_binding:
                             char_id = get_active_character_for_device(self.device_id)
                             if not char_id:
                                 fallback_id = get_most_recent_character_via_user_for_device(self.device_id)
@@ -1530,7 +1608,6 @@ Return ONLY the JSON array, no other explanation."""
                                     )
                                     char_id = fallback_id
                         if char_id:
-                            self.logger.info(f"char_id={char_id!r}")
                             char_doc = get_character_profile(char_id)
                             self.logger.info(f"char_doc_keys={list((char_doc or {}).keys())}")
                             fields = extract_character_profile_fields(char_doc or {})
@@ -2197,13 +2274,9 @@ Return ONLY the JSON array, no other explanation."""
                 user_id=getattr(self, "user_id", None)
             )
             if summary_memory_block:
-                self.logger.bind(tag=TAG).info(
-                    f"Loaded systemMemoryBlock from memory_read_model for user {getattr(self, 'user_id', None)}"
-                )
+                self.logger.bind(tag=TAG).info("Loaded systemMemoryBlock")
             else:
-                self.logger.bind(tag=TAG).info(
-                    f"systemMemoryBlock is empty for user {getattr(self, 'user_id', None)}"
-                )
+                self.logger.bind(tag=TAG).info("systemMemoryBlock is empty")
         except Exception as e:
             self.logger.bind(tag=TAG).warning(
                 f"Failed loading systemMemoryBlock from memory_read_model: {e}"

@@ -19,6 +19,12 @@ PRIORITY_FOLLOWUP_MAX: Dict[str, int] = {
 }
 
 MODE_CONFIG: Dict[str, Dict[str, Any]] = {
+    "daily_call_onboarding": {
+        "instructions_file": "services/alarms/mode_instructions/daily_call_onboarding.txt",
+        "server_initiate_chat": True,
+        "followup_enabled": False,
+        "use_separate_conversation": True,
+    },
     "morning_alarm": {
         "instructions_file": "services/alarms/mode_instructions/morning_alarm.txt",
         "server_initiate_chat": True,

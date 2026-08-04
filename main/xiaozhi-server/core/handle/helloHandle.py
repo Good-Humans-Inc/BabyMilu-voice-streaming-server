@@ -22,6 +22,8 @@ def _build_server_initiated_query(conn) -> str:
     mode_session = getattr(conn, "mode_session", None)
     session_config = (getattr(mode_session, "session_config", None) or {}) if mode_session else {}
     mode = session_config.get("mode")
+    if mode == "daily_call_onboarding":
+        return "Begin the first morning-planning call warmly with one short question."
     if mode != "scheduled_conversation":
         return ""
 
@@ -108,7 +110,10 @@ _wakeup_response_lock = asyncio.Lock()
 
 async def handleHelloMessage(conn, msg_json):
     """处理hello消息"""
-    conn.logger.bind(tag=TAG).info(f"👋 Received hello message: {msg_json}")
+    if msg_json.get("connectionType") == "daily_call_onboarding":
+        conn.logger.bind(tag=TAG).info("Received planning-call hello")
+    else:
+        conn.logger.bind(tag=TAG).info("Received hello message")
     audio_params = msg_json.get("audio_params")
     if audio_params:
         format = audio_params.get("format")
