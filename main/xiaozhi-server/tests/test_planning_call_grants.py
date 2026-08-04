@@ -19,6 +19,8 @@ from services.planning_call import (
     parse_personalization_extraction,
     mark_planning_call_retryable,
     planning_call_succeeded,
+    consumed_call_lease_expired,
+    consumed_call_lease_seconds,
     wait_for_greeting_mode,
     run_greeting_after_bootstrap,
     redact_planning_call_message,
@@ -136,16 +138,22 @@ class MemoryCompletionStore:
         self.states = []
         self.status = "call_in_progress"
         self.grant_hash = None
+        self.consumed_at = datetime.now(timezone.utc)
         self._status_lock = threading.Lock()
 
     def save_status(
         self, binding, status, personalization=None, summary=None,
         expected_statuses=(), consumed_grant_hash=None,
+        require_active_consumed_lease=False,
     ):
         with self._status_lock:
             if expected_statuses and self.status not in expected_statuses:
                 return False
             if consumed_grant_hash is not None and consumed_grant_hash != self.grant_hash:
+                return False
+            if require_active_consumed_lease and consumed_call_lease_expired(
+                self.consumed_at, datetime.now(timezone.utc)
+            ):
                 return False
             self.states.append((binding, status, personalization, summary))
             self.status = status
@@ -172,10 +180,7 @@ def test_finalization_uses_same_attempt_and_sanitizes_personalization():
         summary="  Discussed a calm wake-up.  ",
         conversation_id="conversation-1",
     )
-    assert [state[1] for state in store.states] == [
-        "saving_personalization",
-        "completed",
-    ]
+    assert [state[1] for state in store.states] == ["completed"]
     saved = store.states[-1][2]
     assert saved == {
         "schemaVersion": 1,
@@ -197,7 +202,7 @@ def test_finalization_stops_if_attempt_no_longer_matches():
     assert not finalize_planning_call(
         store, binding, personalization={"wakeStyle": "gentle"}
     )
-    assert store.states == ["saving_personalization"]
+    assert store.states == ["completed"]
 
 
 def test_greeting_waits_until_bootstrap_applies_onboarding_mode():
@@ -271,9 +276,7 @@ def test_finalization_completes_when_user_declines_personalization():
     store = MemoryCompletionStore()
     binding = PlanningCallBinding("+1", "c", "attempt", DAILY_CALL_ONBOARDING)
     assert finalize_planning_call(store, binding, personalization={})
-    assert [state[1] for state in store.states] == [
-        "saving_personalization", "completed"
-    ]
+    assert [state[1] for state in store.states] == ["completed"]
     assert store.states[-1][2] == {"schemaVersion": 1}
 
 
@@ -347,3 +350,38 @@ def test_concurrent_retry_and_finalize_never_downgrade_terminal_state():
     terminal = store.status
     assert not finalize_planning_call(store, binding, personalization={"wakeStyle": "late"})
     assert store.status == terminal
+
+
+def test_consumed_call_lease_matches_backend_default_and_clamps(monkeypatch):
+    monkeypatch.delenv("MILU_CALL_CONSUMED_LEASE_SECONDS", raising=False)
+    assert consumed_call_lease_seconds() == 900
+    monkeypatch.setenv("MILU_CALL_CONSUMED_LEASE_SECONDS", "5")
+    assert consumed_call_lease_seconds() == 60
+    monkeypatch.setenv("MILU_CALL_CONSUMED_LEASE_SECONDS", "9999")
+    assert consumed_call_lease_seconds() == 3600
+
+
+def test_dead_voice_process_becomes_recoverable_after_consumed_lease():
+    consumed_at = datetime.now(timezone.utc)
+    assert not consumed_call_lease_expired(
+        consumed_at, consumed_at + timedelta(seconds=899), lease_seconds=900
+    )
+    assert consumed_call_lease_expired(
+        consumed_at, consumed_at + timedelta(seconds=900), lease_seconds=900
+    )
+
+
+def test_atomic_completion_cannot_leave_saving_personalization():
+    store = MemoryCompletionStore()
+    binding = PlanningCallBinding("+1", "c", "attempt", DAILY_CALL_ONBOARDING)
+    assert finalize_planning_call(store, binding, personalization=None)
+    assert [state[1] for state in store.states] == ["completed"]
+
+
+def test_stale_voice_finalize_after_lease_recovery_cannot_overwrite_ready():
+    store = MemoryCompletionStore()
+    store.status = "ready_for_call"
+    store.consumed_at = datetime.now(timezone.utc) - timedelta(seconds=901)
+    binding = PlanningCallBinding("+1", "c", "attempt", DAILY_CALL_ONBOARDING)
+    assert not finalize_planning_call(store, binding, personalization=None)
+    assert store.status == "ready_for_call"

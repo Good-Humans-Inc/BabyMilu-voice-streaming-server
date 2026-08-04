@@ -6,8 +6,9 @@ import asyncio
 import hashlib
 import hmac
 import json
+import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Mapping, Optional, Protocol
 
 from google.cloud import firestore
@@ -26,6 +27,28 @@ _PERSONALIZATION_LIMITS = {
     "morningRoutine": 2_000,
     "morningSupport": 2_000,
 }
+
+
+def consumed_call_lease_seconds() -> int:
+    try:
+        configured = int(os.environ.get("MILU_CALL_CONSUMED_LEASE_SECONDS", "900"))
+    except (TypeError, ValueError):
+        configured = 900
+    return max(60, min(3_600, configured))
+
+
+def consumed_call_lease_expired(
+    consumed_at: Any,
+    now: Optional[datetime] = None,
+    *,
+    lease_seconds: Optional[int] = None,
+) -> bool:
+    consumed = _timestamp_to_datetime(consumed_at)
+    if consumed is None:
+        return True
+    current = now or datetime.now(timezone.utc)
+    ttl = consumed_call_lease_seconds() if lease_seconds is None else lease_seconds
+    return current >= consumed + timedelta(seconds=ttl)
 
 
 class GrantRejected(Exception):
@@ -59,6 +82,7 @@ class PlanningCallCompletionStore(Protocol):
         summary: Optional[str] = None,
         expected_statuses: tuple = (),
         consumed_grant_hash: Optional[str] = None,
+        require_active_consumed_lease: bool = False,
     ) -> bool: ...
 
 
@@ -211,7 +235,7 @@ class FirestorePlanningCallStore:
             ):
                 raise GrantRejected()
             txn.update(snapshot.reference, {
-                "planningCall.grant.consumedAt": firestore.SERVER_TIMESTAMP,
+                "planningCall.grant.consumedAt": now,
                 "planningCall.grant.consumedAttemptId": attempt_id,
                 "planningCall.updatedAt": firestore.SERVER_TIMESTAMP,
             })
@@ -233,6 +257,7 @@ class FirestorePlanningCallStore:
         summary: Optional[str] = None,
         expected_statuses: tuple = (),
         consumed_grant_hash: Optional[str] = None,
+        require_active_consumed_lease: bool = False,
     ) -> bool:
         ref = (
             self.client.collection("users").document(binding.account_phone)
@@ -256,12 +281,17 @@ class FirestorePlanningCallStore:
                 and hmac.compare_digest(stored_grant_hash, consumed_grant_hash)
                 and grant.get("consumedAt") is not None
             )
+            active_lease = (
+                not require_active_consumed_lease
+                or not consumed_call_lease_expired(grant.get("consumedAt"))
+            )
             if (
                 not snapshot.exists
                 or planning.get("attemptId") != binding.attempt_id
                 or planning.get("characterId") != binding.character_id
                 or (expected_statuses and planning.get("status") not in expected_statuses)
                 or not grant_matches
+                or not active_lease
             ):
                 return False
             updates: Dict[str, Any] = {
@@ -308,21 +338,15 @@ def finalize_planning_call(
     if binding.scenario != DAILY_CALL_ONBOARDING:
         return False
     validated = _validated_personalization(personalization, conversation_id)
-    if not store.save_status(
-        binding,
-        "saving_personalization",
-        expected_statuses=("call_in_progress",),
-        consumed_grant_hash=binding.consumed_grant_hash,
-    ):
-        return False
     clean_summary = summary.strip()[:2_000] if isinstance(summary, str) and summary.strip() else None
     return store.save_status(
         binding,
         "completed",
         validated,
         clean_summary,
-        expected_statuses=("saving_personalization",),
+        expected_statuses=("call_in_progress",),
         consumed_grant_hash=binding.consumed_grant_hash,
+        require_active_consumed_lease=True,
     )
 
 
@@ -337,4 +361,5 @@ def mark_planning_call_retryable(
         "ready_for_call",
         expected_statuses=("call_in_progress",),
         consumed_grant_hash=binding.consumed_grant_hash,
+        require_active_consumed_lease=True,
     )
