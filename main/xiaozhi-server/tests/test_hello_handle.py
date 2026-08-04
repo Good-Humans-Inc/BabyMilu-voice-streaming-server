@@ -39,6 +39,11 @@ def test_build_server_initiated_query_noops_for_non_scheduled_conversation_mode(
     assert _build_server_initiated_query(_Conn({"mode": "morning_alarm"})) == ""
 
 
+def test_build_server_initiated_query_starts_daily_call_onboarding_briefly():
+    query = _build_server_initiated_query(_Conn({"mode": "daily_call_onboarding"}))
+    assert "one short question" in query
+
+
 def test_get_precomputed_reminder_message_ignores_scheduled_conversations():
     assert (
         _get_precomputed_reminder_message(

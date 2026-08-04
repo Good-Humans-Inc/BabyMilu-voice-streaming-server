@@ -1,6 +1,7 @@
 import json
 
 from core.handle.textMessageHandlerRegistry import TextMessageHandlerRegistry
+from services.planning_call import redact_planning_call_message
 
 TAG = __name__
 
@@ -22,7 +23,8 @@ class TextMessageProcessor:
                 message_type = msg_json.get("type")
 
                 # 记录日志
-                conn.logger.bind(tag=TAG).info(f"收到{message_type}消息：{message}")
+                safe_message = redact_planning_call_message(message)
+                conn.logger.bind(tag=TAG).info(f"收到{message_type}消息：{safe_message}")
 
                 # 获取并执行处理器
                 handler = self.registry.get_handler(message_type)
