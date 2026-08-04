@@ -13,6 +13,11 @@ from services.planning_call import (
     PlanningCallBinding,
     consume_onboarding_hello,
     finalize_planning_call,
+    has_meaningful_exchange,
+    parse_personalization_extraction,
+    mark_planning_call_retryable,
+    wait_for_greeting_mode,
+    run_greeting_after_bootstrap,
     redact_planning_call_message,
 )
 
@@ -174,5 +179,87 @@ def test_finalization_stops_if_attempt_no_longer_matches():
 
     store = StaleStore()
     binding = PlanningCallBinding("+1", "c", "old-attempt", DAILY_CALL_ONBOARDING)
-    assert not finalize_planning_call(store, binding, personalization={})
+    assert not finalize_planning_call(
+        store, binding, personalization={"wakeStyle": "gentle"}
+    )
     assert store.states == ["saving_personalization"]
+
+
+def test_greeting_waits_until_bootstrap_applies_onboarding_mode():
+    class Conn:
+        def __init__(self):
+            self.bootstrap_complete = asyncio.Event()
+            self.server_initiate_chat = False
+            self._server_greeting_scheduled = False
+
+    async def scenario():
+        conn = Conn()
+        waiter = asyncio.create_task(wait_for_greeting_mode(conn))
+        await asyncio.sleep(0)
+        assert not waiter.done()
+        conn.server_initiate_chat = True
+        conn.bootstrap_complete.set()
+        return await waiter
+
+    assert asyncio.run(scenario()) is True
+
+
+def test_greeting_trigger_runs_only_after_mode_is_applied():
+    class Conn:
+        def __init__(self):
+            self.bootstrap_complete = asyncio.Event()
+            self.server_initiate_chat = False
+            self._server_greeting_scheduled = False
+
+    async def scenario():
+        conn = Conn()
+        observed = []
+
+        async def trigger(_conn):
+            observed.append((_conn.server_initiate_chat, _conn.bootstrap_complete.is_set()))
+
+        task = asyncio.create_task(run_greeting_after_bootstrap(conn, trigger))
+        await asyncio.sleep(0)
+        assert observed == []
+        conn.server_initiate_chat = True
+        conn.bootstrap_complete.set()
+        assert await task
+        return observed, conn._server_greeting_scheduled
+
+    assert asyncio.run(scenario()) == ([(True, True)], True)
+
+
+def test_meaningful_exchange_requires_user_and_assistant_turns():
+    assert not has_meaningful_exchange([{"role": "assistant", "content": "Good morning"}])
+    assert not has_meaningful_exchange([{"role": "user", "content": "   "}])
+    assert has_meaningful_exchange([
+        {"role": "assistant", "content": "How do you like to wake up?"},
+        {"role": "user", "content": "Gently, but don't let me snooze."},
+    ])
+
+
+def test_structured_extraction_is_allowlisted_and_requires_real_content():
+    assert parse_personalization_extraction('{"schemaVersion":1}') is None
+    assert parse_personalization_extraction('not json') is None
+    assert parse_personalization_extraction(json.dumps({
+        "wakeStyle": "  playful and persistent ",
+        "morningRoutine": "coffee first",
+        "secret": "drop me",
+    })) == {
+        "wakeStyle": "playful and persistent",
+        "morningRoutine": "coffee first",
+    }
+
+
+def test_finalization_does_not_advance_without_valid_extraction():
+    store = MemoryCompletionStore()
+    binding = PlanningCallBinding("+1", "c", "attempt", DAILY_CALL_ONBOARDING)
+    assert not finalize_planning_call(store, binding, personalization={})
+    assert store.states == []
+
+
+def test_failed_exchange_returns_same_attempt_to_retryable_status():
+    store = MemoryCompletionStore()
+    binding = PlanningCallBinding("+1", "c", "attempt", DAILY_CALL_ONBOARDING)
+    assert mark_planning_call_retryable(store, binding)
+    assert [state[1] for state in store.states] == ["ready_for_call"]

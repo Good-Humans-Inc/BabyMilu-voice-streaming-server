@@ -89,6 +89,59 @@ def redact_planning_call_message(message: str) -> str:
     return message
 
 
+async def wait_for_greeting_mode(conn: Any) -> bool:
+    """Wait until bootstrap has applied the server-owned onboarding mode."""
+    bootstrap_complete = getattr(conn, "bootstrap_complete", None)
+    if bootstrap_complete is not None and not bootstrap_complete.is_set():
+        await bootstrap_complete.wait()
+    return bool(
+        getattr(conn, "server_initiate_chat", False)
+        and not getattr(conn, "_server_greeting_scheduled", False)
+    )
+
+
+async def run_greeting_after_bootstrap(conn: Any, trigger) -> bool:
+    if not await wait_for_greeting_mode(conn):
+        return False
+    conn._server_greeting_scheduled = True
+    await trigger(conn)
+    return True
+
+
+def has_meaningful_exchange(conversation: Any) -> bool:
+    if not isinstance(conversation, list):
+        return False
+    roles = {
+        item.get("role")
+        for item in conversation
+        if isinstance(item, dict)
+        and isinstance(item.get("content"), str)
+        and item["content"].strip()
+    }
+    return "user" in roles and "assistant" in roles
+
+
+def parse_personalization_extraction(raw: Any) -> Optional[Dict[str, str]]:
+    if not isinstance(raw, str):
+        return None
+    try:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        value = json.loads(raw[start:end + 1])
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    result: Dict[str, str] = {}
+    for field, limit in _PERSONALIZATION_LIMITS.items():
+        item = value.get(field)
+        if isinstance(item, str) and item.strip():
+            result[field] = item.strip()[:limit]
+    return result or None
+
+
 def _timestamp_to_datetime(value: Any) -> Optional[datetime]:
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
@@ -233,12 +286,24 @@ def finalize_planning_call(
 ) -> bool:
     if binding.scenario != DAILY_CALL_ONBOARDING:
         return False
+    validated = _validated_personalization(personalization, conversation_id)
+    if len(validated) <= (2 if "sourceConversationId" in validated else 1):
+        return False
     if not store.save_status(binding, "saving_personalization"):
         return False
     clean_summary = summary.strip()[:2_000] if isinstance(summary, str) and summary.strip() else None
     return store.save_status(
         binding,
         "completed",
-        _validated_personalization(personalization, conversation_id),
+        validated,
         clean_summary,
     )
+
+
+def mark_planning_call_retryable(
+    store: PlanningCallCompletionStore,
+    binding: PlanningCallBinding,
+) -> bool:
+    if binding.scenario != DAILY_CALL_ONBOARDING:
+        return False
+    return store.save_status(binding, "ready_for_call")

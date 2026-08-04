@@ -14,6 +14,7 @@ from core.providers.tools.device_mcp import (
     send_mcp_initialize_message,
     send_mcp_tools_list_request,
 )
+from services.planning_call import DAILY_CALL_ONBOARDING, run_greeting_after_bootstrap
 
 TAG = __name__
 
@@ -96,6 +97,11 @@ async def _trigger_server_greeting(conn):
         conn.logger.bind(tag=TAG).warning("Cannot trigger greeting: llm_finish_task is False")
 
 
+async def _schedule_onboarding_greeting_after_bootstrap(conn):
+    if not await run_greeting_after_bootstrap(conn, _trigger_server_greeting):
+        conn.logger.bind(tag=TAG).warning("Onboarding greeting mode unavailable after bootstrap")
+
+
 WAKEUP_CONFIG = {
     "refresh_time": 5,
     "words": ["你好", "你好啊", "嘿，你好", "嗨"],
@@ -132,7 +138,13 @@ async def handleHelloMessage(conn, msg_json):
             # 发送mcp消息，获取tools列表
             asyncio.create_task(send_mcp_tools_list_request(conn))
 
-    if getattr(conn, "server_initiate_chat", False) and not getattr(
+    if (
+        msg_json.get("connectionType") == DAILY_CALL_ONBOARDING
+        and not getattr(conn, "_server_greeting_waiter_scheduled", False)
+    ):
+        conn._server_greeting_waiter_scheduled = True
+        asyncio.create_task(_schedule_onboarding_greeting_after_bootstrap(conn))
+    elif getattr(conn, "server_initiate_chat", False) and not getattr(
         conn, "_server_greeting_scheduled", False
     ):
         conn._server_greeting_scheduled = True

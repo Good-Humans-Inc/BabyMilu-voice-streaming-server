@@ -68,6 +68,9 @@ from services.planning_call import (
     GrantRejected,
     consume_onboarding_hello,
     finalize_planning_call,
+    has_meaningful_exchange,
+    mark_planning_call_retryable,
+    parse_personalization_extraction,
 )
 from services.session_context.models import ModeSession
 
@@ -1501,6 +1504,68 @@ Return ONLY the JSON array, no other explanation."""
         finally:
             self._session_closed = True
 
+    def _extract_planning_call_personalization(self, conversation):
+        """Extract bounded morning-call facts without persisting raw model output."""
+        if not self.llm or not has_meaningful_exchange(conversation):
+            return None
+        lines = []
+        for message in conversation:
+            if not isinstance(message, dict) or message.get("role") not in {"user", "assistant"}:
+                continue
+            content = message.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            role = "User" if message.get("role") == "user" else "Assistant"
+            lines.append(f"{role}: {content.strip()[:2000]}")
+        transcript = "\n".join(lines)[:12000]
+        prompt = [{
+            "role": "user",
+            "content": (
+                "Extract only facts the user explicitly shared about their mornings. "
+                "Return one JSON object using only these optional string keys: "
+                "ageContext, wakeStyle, dailyLife, nightRoutine, morningRoutine, "
+                "morningSupport. Omit unknown fields. Do not infer medical, intimate, "
+                "or other sensitive facts. Return JSON only.\n\nConversation:\n" + transcript
+            ),
+        }]
+        try:
+            parts = self.llm.response(
+                f"{self.session_id}_planning_personalization",
+                prompt,
+                stateless=True,
+            )
+            raw = "".join(part for part in parts if isinstance(part, str))
+            return parse_personalization_extraction(raw)
+        except Exception:
+            self.logger.bind(tag=TAG).warning("Planning-call personalization extraction failed")
+            return None
+
+    def _persist_planning_call_outcome(self, conversation, summary=None):
+        if not self.planning_call_binding or not self._planning_call_store:
+            return
+        personalization = None
+        if has_meaningful_exchange(conversation):
+            personalization = self._extract_planning_call_personalization(conversation)
+        self.planning_call_personalization = personalization or {}
+        if self.planning_call_personalization:
+            completed = finalize_planning_call(
+                self._planning_call_store,
+                self.planning_call_binding,
+                personalization=self.planning_call_personalization,
+                summary=summary,
+                conversation_id=self.current_conversation_id,
+            )
+            if not completed:
+                self.logger.bind(tag=TAG).warning(
+                    "Planning-call completion ignored because the attempt changed"
+                )
+            return
+        mark_planning_call_retryable(
+            self._planning_call_store,
+            self.planning_call_binding,
+        )
+        self.logger.bind(tag=TAG).info("Planning call returned to retryable state")
+
     async def _save_and_close(self, ws):
         """保存记忆并关闭连接"""
         try:
@@ -1517,18 +1582,7 @@ Return ONLY the JSON array, no other explanation."""
                             # 生成AI摘要
                             ai_summary = self.generate_ai_conversation_summary()
 
-                            if self.planning_call_binding and self._planning_call_store:
-                                completed = finalize_planning_call(
-                                    self._planning_call_store,
-                                    self.planning_call_binding,
-                                    personalization=self.planning_call_personalization,
-                                    summary=ai_summary,
-                                    conversation_id=self.current_conversation_id,
-                                )
-                                if not completed:
-                                    self.logger.bind(tag=TAG).warning(
-                                        "Planning-call completion ignored because the attempt changed"
-                                    )
+                            self._persist_planning_call_outcome(conversation, ai_summary)
 
                             # 检查任务匹配
                             use_task_provider = bool(
@@ -1567,9 +1621,16 @@ Return ONLY the JSON array, no other explanation."""
                                     log_msg += f"\n  - Action: {task.get('task_action')} (ID: {task.get('task_id')}): {task.get('match_reason')}"
 
                             self.logger.bind(tag=TAG).info(log_msg)
+                        else:
+                            self._persist_planning_call_outcome([], None)
                     except Exception as e:
                         self.logger.bind(tag=TAG).warning(f"获取对话摘要失败: {e}")
                 self._submit_persistence_work(complete_task_task, "conversation_summary")
+            elif self.planning_call_binding and self._planning_call_store:
+                self._submit_persistence_work(
+                    lambda: self._persist_planning_call_outcome([], None),
+                    "planning_call_retry",
+                )
             try:
                 await self.run_sync(
                     "persistence",
