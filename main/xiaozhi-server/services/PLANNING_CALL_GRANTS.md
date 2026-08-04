@@ -26,12 +26,17 @@ replayed, mismatched, or client-identified hellos close before profile,
 provider, session, or audio initialization.
 
 At a successful conversational close, the server requires both a user and an
-assistant turn, runs a stateless structured extraction over the bounded
-transcript, and requires at least one validated morning fact before moving the
-same attempt through `saving_personalization` to `completed`. Calls without a
-meaningful exchange or valid extraction return to `ready_for_call`. Validated
+assistant turn and runs a stateless structured extraction over the bounded
+transcript before moving the same attempt through `saving_personalization` to
+`completed`. Personalization is optional: declining, being unsure, or a
+transient extractor failure stores a valid empty payload and does not repeat
+the call. Calls without a meaningful exchange return to `ready_for_call`. Validated
 `morningCallPersonalization` is written to the onboarding record and copied to
 `users/{verifiedPhone}/miluCall/dailyCall` when that document already exists.
+Every lifecycle write is a Firestore compare-and-set bound to the consumed
+grant hash, attempt, character, and expected current status. A delayed retry or
+finalizer therefore cannot downgrade `saving_personalization`, `completed`, or
+a newer reissued attempt.
 
 Runtime requirements:
 

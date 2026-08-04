@@ -41,6 +41,7 @@ class PlanningCallBinding:
     character_id: str
     attempt_id: str
     scenario: str
+    consumed_grant_hash: Optional[str] = None
 
 
 class AsyncGrantStore(Protocol):
@@ -56,6 +57,8 @@ class PlanningCallCompletionStore(Protocol):
         status: str,
         personalization: Optional[Dict[str, Any]] = None,
         summary: Optional[str] = None,
+        expected_statuses: tuple = (),
+        consumed_grant_hash: Optional[str] = None,
     ) -> bool: ...
 
 
@@ -119,6 +122,12 @@ def has_meaningful_exchange(conversation: Any) -> bool:
         and item["content"].strip()
     }
     return "user" in roles and "assistant" in roles
+
+
+def planning_call_succeeded(
+    conversation: Any, *, explicit_successful_end: bool = False
+) -> bool:
+    return bool(explicit_successful_end or has_meaningful_exchange(conversation))
 
 
 def parse_personalization_extraction(raw: Any) -> Optional[Dict[str, str]]:
@@ -211,6 +220,7 @@ class FirestorePlanningCallStore:
                 character_id=character_id,
                 attempt_id=attempt_id,
                 scenario=scenario,
+                consumed_grant_hash=grant_hash_value,
             )
 
         return consume_in_transaction(transaction)
@@ -221,6 +231,8 @@ class FirestorePlanningCallStore:
         status: str,
         personalization: Optional[Dict[str, Any]] = None,
         summary: Optional[str] = None,
+        expected_statuses: tuple = (),
+        consumed_grant_hash: Optional[str] = None,
     ) -> bool:
         ref = (
             self.client.collection("users").document(binding.account_phone)
@@ -237,10 +249,19 @@ class FirestorePlanningCallStore:
             snapshot = ref.get(transaction=txn)
             daily_call = daily_call_ref.get(transaction=txn)
             planning = ((snapshot.to_dict() or {}).get("planningCall") or {})
+            grant = planning.get("grant") or {}
+            stored_grant_hash = grant.get("hash")
+            grant_matches = consumed_grant_hash is None or (
+                isinstance(stored_grant_hash, str)
+                and hmac.compare_digest(stored_grant_hash, consumed_grant_hash)
+                and grant.get("consumedAt") is not None
+            )
             if (
                 not snapshot.exists
                 or planning.get("attemptId") != binding.attempt_id
                 or planning.get("characterId") != binding.character_id
+                or (expected_statuses and planning.get("status") not in expected_statuses)
+                or not grant_matches
             ):
                 return False
             updates: Dict[str, Any] = {
@@ -287,9 +308,12 @@ def finalize_planning_call(
     if binding.scenario != DAILY_CALL_ONBOARDING:
         return False
     validated = _validated_personalization(personalization, conversation_id)
-    if len(validated) <= (2 if "sourceConversationId" in validated else 1):
-        return False
-    if not store.save_status(binding, "saving_personalization"):
+    if not store.save_status(
+        binding,
+        "saving_personalization",
+        expected_statuses=("call_in_progress",),
+        consumed_grant_hash=binding.consumed_grant_hash,
+    ):
         return False
     clean_summary = summary.strip()[:2_000] if isinstance(summary, str) and summary.strip() else None
     return store.save_status(
@@ -297,6 +321,8 @@ def finalize_planning_call(
         "completed",
         validated,
         clean_summary,
+        expected_statuses=("saving_personalization",),
+        consumed_grant_hash=binding.consumed_grant_hash,
     )
 
 
@@ -306,4 +332,9 @@ def mark_planning_call_retryable(
 ) -> bool:
     if binding.scenario != DAILY_CALL_ONBOARDING:
         return False
-    return store.save_status(binding, "ready_for_call")
+    return store.save_status(
+        binding,
+        "ready_for_call",
+        expected_statuses=("call_in_progress",),
+        consumed_grant_hash=binding.consumed_grant_hash,
+    )

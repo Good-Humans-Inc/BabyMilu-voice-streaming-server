@@ -32,6 +32,8 @@ def handle_exit_intent(conn, say_goodbye: str | None = None):
         if say_goodbye is None:
             say_goodbye = "再见，祝您生活愉快！"
         conn.close_after_chat = True
+        if getattr(conn, "planning_call_binding", None) is not None:
+            conn.planning_call_successful_end = True
         logger.bind(tag=TAG).info(f"退出意图已处理:{say_goodbye}")
         return ActionResponse(
             action=Action.RESPONSE, result="退出意图已处理", response=say_goodbye

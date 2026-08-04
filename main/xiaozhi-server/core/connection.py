@@ -71,6 +71,7 @@ from services.planning_call import (
     has_meaningful_exchange,
     mark_planning_call_retryable,
     parse_personalization_extraction,
+    planning_call_succeeded,
 )
 from services.session_context.models import ModeSession
 
@@ -319,6 +320,7 @@ class ConnectionHandler:
         self.mode_session = None
         self.planning_call_binding = None
         self.planning_call_personalization = {}
+        self.planning_call_successful_end = False
         self._planning_call_store = None
 
         # MQTT 网关标记
@@ -1543,11 +1545,13 @@ Return ONLY the JSON array, no other explanation."""
     def _persist_planning_call_outcome(self, conversation, summary=None):
         if not self.planning_call_binding or not self._planning_call_store:
             return
-        personalization = None
-        if has_meaningful_exchange(conversation):
-            personalization = self._extract_planning_call_personalization(conversation)
-        self.planning_call_personalization = personalization or {}
-        if self.planning_call_personalization:
+        if planning_call_succeeded(
+            conversation,
+            explicit_successful_end=self.planning_call_successful_end,
+        ):
+            self.planning_call_personalization = (
+                self._extract_planning_call_personalization(conversation) or {}
+            )
             completed = finalize_planning_call(
                 self._planning_call_store,
                 self.planning_call_binding,
@@ -1560,6 +1564,7 @@ Return ONLY the JSON array, no other explanation."""
                     "Planning-call completion ignored because the attempt changed"
                 )
             return
+        self.planning_call_personalization = {}
         mark_planning_call_retryable(
             self._planning_call_store,
             self.planning_call_binding,

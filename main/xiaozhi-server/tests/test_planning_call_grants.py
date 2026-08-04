@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -16,6 +18,7 @@ from services.planning_call import (
     has_meaningful_exchange,
     parse_personalization_extraction,
     mark_planning_call_retryable,
+    planning_call_succeeded,
     wait_for_greeting_mode,
     run_greeting_after_bootstrap,
     redact_planning_call_message,
@@ -131,10 +134,22 @@ def test_planning_hello_redaction_never_emits_grant_or_identity():
 class MemoryCompletionStore:
     def __init__(self):
         self.states = []
+        self.status = "call_in_progress"
+        self.grant_hash = None
+        self._status_lock = threading.Lock()
 
-    def save_status(self, binding, status, personalization=None, summary=None):
-        self.states.append((binding, status, personalization, summary))
-        return True
+    def save_status(
+        self, binding, status, personalization=None, summary=None,
+        expected_statuses=(), consumed_grant_hash=None,
+    ):
+        with self._status_lock:
+            if expected_statuses and self.status not in expected_statuses:
+                return False
+            if consumed_grant_hash is not None and consumed_grant_hash != self.grant_hash:
+                return False
+            self.states.append((binding, status, personalization, summary))
+            self.status = status
+            return True
 
 
 def test_finalization_uses_same_attempt_and_sanitizes_personalization():
@@ -173,7 +188,7 @@ def test_finalization_uses_same_attempt_and_sanitizes_personalization():
 
 def test_finalization_stops_if_attempt_no_longer_matches():
     class StaleStore(MemoryCompletionStore):
-        def save_status(self, binding, status, personalization=None, summary=None):
+        def save_status(self, binding, status, personalization=None, summary=None, **kwargs):
             self.states.append(status)
             return False
 
@@ -236,6 +251,7 @@ def test_meaningful_exchange_requires_user_and_assistant_turns():
         {"role": "assistant", "content": "How do you like to wake up?"},
         {"role": "user", "content": "Gently, but don't let me snooze."},
     ])
+    assert planning_call_succeeded([], explicit_successful_end=True)
 
 
 def test_structured_extraction_is_allowlisted_and_requires_real_content():
@@ -251,11 +267,27 @@ def test_structured_extraction_is_allowlisted_and_requires_real_content():
     }
 
 
-def test_finalization_does_not_advance_without_valid_extraction():
+def test_finalization_completes_when_user_declines_personalization():
     store = MemoryCompletionStore()
     binding = PlanningCallBinding("+1", "c", "attempt", DAILY_CALL_ONBOARDING)
-    assert not finalize_planning_call(store, binding, personalization={})
-    assert store.states == []
+    assert finalize_planning_call(store, binding, personalization={})
+    assert [state[1] for state in store.states] == [
+        "saving_personalization", "completed"
+    ]
+    assert store.states[-1][2] == {"schemaVersion": 1}
+
+
+def test_unsure_answer_and_transient_extractor_failure_do_not_force_replay():
+    conversation = [
+        {"role": "assistant", "content": "What helps you wake up?"},
+        {"role": "user", "content": "I'm not sure yet."},
+    ]
+    assert has_meaningful_exchange(conversation)
+    assert parse_personalization_extraction("temporary provider error") is None
+    store = MemoryCompletionStore()
+    binding = PlanningCallBinding("+1", "c", "attempt", DAILY_CALL_ONBOARDING)
+    assert finalize_planning_call(store, binding, personalization=None)
+    assert store.status == "completed"
 
 
 def test_failed_exchange_returns_same_attempt_to_retryable_status():
@@ -263,3 +295,55 @@ def test_failed_exchange_returns_same_attempt_to_retryable_status():
     binding = PlanningCallBinding("+1", "c", "attempt", DAILY_CALL_ONBOARDING)
     assert mark_planning_call_retryable(store, binding)
     assert [state[1] for state in store.states] == ["ready_for_call"]
+
+
+def test_stale_retry_cannot_downgrade_saving_or_completed_attempt():
+    binding = PlanningCallBinding("+1", "c", "attempt", DAILY_CALL_ONBOARDING)
+    for newer_status in ("saving_personalization", "completed"):
+        store = MemoryCompletionStore()
+        store.status = newer_status
+        assert not mark_planning_call_retryable(store, binding)
+        assert store.status == newer_status
+
+
+def test_finalize_uses_expected_status_for_each_transition():
+    store = MemoryCompletionStore()
+    binding = PlanningCallBinding("+1", "c", "attempt", DAILY_CALL_ONBOARDING)
+    assert finalize_planning_call(store, binding, personalization=None)
+    assert store.status == "completed"
+    # A delayed duplicate finalizer cannot move completed back through saving.
+    assert not finalize_planning_call(store, binding, personalization={"wakeStyle": "late"})
+    assert store.status == "completed"
+
+
+def test_old_consumed_grant_cannot_update_reissued_attempt():
+    store = MemoryCompletionStore()
+    store.grant_hash = "new-grant-hash"
+    stale = PlanningCallBinding(
+        "+1", "c", "attempt", DAILY_CALL_ONBOARDING, "old-grant-hash"
+    )
+    assert not mark_planning_call_retryable(store, stale)
+    assert not finalize_planning_call(store, stale, personalization=None)
+    assert store.status == "call_in_progress"
+
+
+def test_concurrent_retry_and_finalize_never_downgrade_terminal_state():
+    store = MemoryCompletionStore()
+    binding = PlanningCallBinding("+1", "c", "attempt", DAILY_CALL_ONBOARDING)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(
+            lambda action: action(),
+            (
+                lambda: mark_planning_call_retryable(store, binding),
+                lambda: finalize_planning_call(store, binding, personalization=None),
+            ),
+        ))
+    assert any(outcomes)
+    assert store.status in {"ready_for_call", "completed"}
+    assert not (
+        store.status == "ready_for_call"
+        and any(state[1] == "completed" for state in store.states)
+    )
+    terminal = store.status
+    assert not finalize_planning_call(store, binding, personalization={"wakeStyle": "late"})
+    assert store.status == terminal
