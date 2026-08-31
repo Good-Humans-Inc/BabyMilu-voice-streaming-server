@@ -118,6 +118,23 @@ def build_parser() -> argparse.ArgumentParser:
             "cloud timezone-worker scenario"
         ),
     )
+    run.add_argument(
+        "--app-repo",
+        help="App checkout used by cross-repository contract scenarios",
+    )
+    run.add_argument(
+        "--backend-functions-dir",
+        help="Backend src/functions directory used by contract scenarios",
+    )
+    run.add_argument(
+        "--firmware-repo",
+        help="Firmware checkout used by contract scenarios",
+    )
+    run.add_argument(
+        "--backend-python",
+        default=sys.executable,
+        help="Python interpreter with backend test dependencies",
+    )
 
     return parser
 
