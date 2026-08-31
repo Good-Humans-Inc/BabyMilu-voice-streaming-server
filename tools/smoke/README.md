@@ -390,6 +390,28 @@ Gift text actions through preview and Send, validates each signed private
 image, reverses its synthetic economy counters, and removes Firebase Auth,
 Firestore, and Storage test data.
 
+### BM2 Wi-Fi provisioning contract
+
+This local-only cross-repository gate runs the app protocol tests, the actual
+backend begin/report/get contract, the firmware parser/reassembly tests, and
+checks that a firmware image was built. It performs no cloud writes and does
+not require a new native app build:
+
+```bash
+python tools/smoke/run.py run \
+  --env contract-local \
+  --scenario contract.wifi_provisioning_bm2 \
+  --uid local-bm2-contract \
+  --skip-preflight \
+  --app-repo /path/to/babymilu-app \
+  --backend-functions-dir /path/to/babymilu-backend/src/functions \
+  --backend-python /path/to/backend/python \
+  --firmware-repo /path/to/babymilu-firmware
+```
+
+The physical iOS/Android BLE matrix and device flash remain separate release
+gates because they require attached hardware.
+
 ## Codex Workflow
 
 This is the workflow every teammate's Codex should follow before running live smoke tests:

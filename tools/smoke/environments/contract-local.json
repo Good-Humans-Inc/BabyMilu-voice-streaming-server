@@ -1,0 +1,14 @@
+{
+  "environment_type": "local-compose",
+  "data_mode": "isolated",
+  "project": "demo-babymilu-contract",
+  "scheduler_url": "",
+  "mqtt_host": "127.0.0.1",
+  "ws_url": "ws://127.0.0.1:8000/xiaozhi/v1/",
+  "artifact_root": "tools/smoke/artifacts",
+  "default_timezone": "America/Los_Angeles",
+  "scheduler_trigger": "http",
+  "scheduler_entrypoint": "",
+  "compose_project_dir": ".",
+  "notes": "Offline contract scenarios only; no endpoint is contacted."
+}

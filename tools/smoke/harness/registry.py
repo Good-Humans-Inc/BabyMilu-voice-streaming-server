@@ -15,6 +15,7 @@ from .scenarios.timezone_recalculation import (
     ScheduledDefaultTimezoneRecalculationScenario,
     ScheduledTimezoneRecalculationScenario,
 )
+from .scenarios.wifi_provisioning import WifiProvisioningBm2ContractScenario
 
 
 @dataclass
@@ -25,6 +26,14 @@ class ScenarioDescriptor:
 
 
 SCENARIOS = {
+    "contract.wifi_provisioning_bm2": ScenarioDescriptor(
+        name="contract.wifi_provisioning_bm2",
+        description=(
+            "Run the app BM2/legacy tests, backend authenticated result "
+            "contract, firmware parser tests, and firmware artifact check."
+        ),
+        cls=WifiProvisioningBm2ContractScenario,
+    ),
     "scheduled.reminder": ScenarioDescriptor(
         name="scheduled.reminder",
         description=(
